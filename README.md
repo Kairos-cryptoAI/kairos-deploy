@@ -43,4 +43,4 @@ explicitly flip it. The minimal infra footprint matches the spec's ~$100/mo budg
 (8 vCPU / 16-32 GB VPS + residential proxies for the Text Scouts).
 
 ---
-Part of the [Kairos](https://github.com/TheLitis/kairos) system. MIT licensed.
+Part of the [Kairos](https://github.com/Kairos-cryptoAI/kairos) system. MIT licensed.

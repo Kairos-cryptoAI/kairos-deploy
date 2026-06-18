@@ -14,5 +14,5 @@ ps:
 # Clone every Kairos repo as a sibling (run from the parent directory).
 clone:
 	for r in core llm quant-scouts text-scouts router aggregator macro-strategist risk-manager execution-engine; do \
-		git clone https://github.com/TheLitis/kairos-$$r.git ../kairos-$$r; \
+		git clone https://github.com/Kairos-cryptoAI/kairos-$$r.git ../kairos-$$r; \
 	done
