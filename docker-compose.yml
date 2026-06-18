@@ -1,0 +1,96 @@
+# Kairos — full system orchestration.
+# Run from a directory where all kairos-* repos are checked out as siblings:
+#   parent/
+#     kairos-core/ kairos-llm/ kairos-quant-scouts/ ... kairos-deploy/
+# then:  cd kairos-deploy && docker compose --project-directory .. -f kairos-deploy/docker-compose.yml up
+name: kairos
+
+x-svc: &svc
+  build:
+    context: ..
+    dockerfile: kairos-deploy/docker/Dockerfile
+  env_file: [./.env]
+  depends_on: [redis]
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes: ["redis-data:/data"]
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: kairos
+      POSTGRES_PASSWORD: kairos
+      POSTGRES_DB: kairos
+    ports: ["5432:5432"]
+    volumes:
+      - ts-data:/var/lib/postgresql/data
+      - ./timescaledb/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+  quant-scouts:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-quant-scouts, MODULE: kairos_quant }
+
+  text-scouts:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-text-scouts, MODULE: kairos_text }
+
+  router:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-router, MODULE: kairos_router }
+
+  aggregator:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-aggregator, MODULE: kairos_aggregator }
+
+  macro-strategist:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-macro-strategist, MODULE: kairos_macro }
+
+  risk-manager:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-risk-manager, MODULE: kairos_risk }
+
+  execution-engine:
+    <<: *svc
+    build:
+      context: ..
+      dockerfile: kairos-deploy/docker/Dockerfile
+      args: { SERVICE_DIR: kairos-execution-engine, MODULE: kairos_execution }
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes: ["./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:latest
+    environment: { GF_SECURITY_ADMIN_PASSWORD: kairos }
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  redis-data:
+  ts-data:
