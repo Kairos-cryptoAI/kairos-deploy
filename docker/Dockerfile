@@ -11,8 +11,9 @@ WORKDIR /app
 COPY kairos-core /src/kairos-core
 RUN pip install /src/kairos-core
 # The LLM gateway is needed by the analytical layers; harmless elsewhere.
+# Never mask installation failures: every image must contain the exact same gateway build.
 COPY kairos-llm /src/kairos-llm
-RUN pip install /src/kairos-llm || true
+RUN pip install /src/kairos-llm
 
 COPY ${SERVICE_DIR} /src/${SERVICE_DIR}
 RUN pip install /src/${SERVICE_DIR}
