@@ -116,7 +116,7 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#8bd56ee310bf18f3f089ced028fcdfd2442ee815
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#ab0a8235584022bfc4dc971dfd838a714539cf0d
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
@@ -157,7 +157,7 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#80551ae30d602e7fe6b61de7bbd3d3f67cd06819
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#2d23fb41023e15505b86dc17d1d533c20ee4236a
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
@@ -177,7 +177,7 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#c9afdbce68a7fc3b793e0209eca761955a8c4207
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#e9eaa0a6b42449bdc096351677ba19f2abfbc36a
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
@@ -196,7 +196,7 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#c64517d810690240c246ab90106773a72be368ea
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#cd41bf6a73fecb1e0dadac79232a5780b456f060
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
