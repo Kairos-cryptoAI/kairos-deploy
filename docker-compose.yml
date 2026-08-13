@@ -116,11 +116,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#8e2d3b818d33109808c3744aa21dcf74a666825f
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#8bd56ee310bf18f3f089ced028fcdfd2442ee815
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 8e2d3b818d33109808c3744aa21dcf74a666825f
+        SOURCE_REVISION: 8bd56ee310bf18f3f089ced028fcdfd2442ee815
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
@@ -157,11 +157,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#f3f2c46dcbc048183bdee3fd0e54caa893c483e0
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#80551ae30d602e7fe6b61de7bbd3d3f67cd06819
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: f3f2c46dcbc048183bdee3fd0e54caa893c483e0
+        SOURCE_REVISION: 80551ae30d602e7fe6b61de7bbd3d3f67cd06819
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -177,11 +177,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#4a46a13096d21d9a527bd547f3022e691ea4b892
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#c9afdbce68a7fc3b793e0209eca761955a8c4207
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 4a46a13096d21d9a527bd547f3022e691ea4b892
+        SOURCE_REVISION: c9afdbce68a7fc3b793e0209eca761955a8c4207
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
