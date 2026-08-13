@@ -1,97 +1,306 @@
-# Kairos — full system orchestration.
-# Run from a directory where all kairos-* repos are checked out as siblings:
-#   parent/
-#     kairos-core/ kairos-llm/ kairos-quant-scouts/ ... kairos-deploy/
-# then:  cd kairos-deploy && docker compose --project-directory .. -f kairos-deploy/docker-compose.yml up
+# Kairos production-like local topology.
+#
+# `.env` is used only for Compose interpolation. It is never injected wholesale
+# into a container: every service below has an explicit environment allow-list.
 name: kairos
 
-x-svc: &svc
-  build:
-    context: ..
-    dockerfile: kairos-deploy/docker/Dockerfile
-  env_file: [./.env]
-  depends_on: [redis]
+x-common-environment: &common-environment
+  KAIROS_ENVIRONMENT: ${KAIROS_ENVIRONMENT:-prod}
+  KAIROS_LOG_LEVEL: ${KAIROS_LOG_LEVEL:-INFO}
+  KAIROS_LOG_JSON: ${KAIROS_LOG_JSON:-true}
+  KAIROS_BUS_BACKEND: redis
+  KAIROS_REDIS_URL: redis://:${KAIROS_REDIS_PASSWORD:?set KAIROS_REDIS_PASSWORD in .env}@redis:6379/0
+  KAIROS_TRADING_SYMBOLS: '${KAIROS_TRADING_SYMBOLS:-["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]}'
+
+x-python-build: &python-build
+  context: .
+  dockerfile: docker/Dockerfile
+  pull: true
+
+x-python-service: &python-service
   restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  depends_on:
+    redis:
+      condition: service_healthy
+  stop_grace_period: 30s
+  logging: &default-logging
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
 
 services:
   redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports: ["6379:6379"]
-    volumes: ["redis-data:/data"]
+    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    pull_policy: always
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        exec redis-server /tmp/redis.conf
+    environment:
+      REDIS_PASSWORD: ${KAIROS_REDIS_PASSWORD:?set KAIROS_REDIS_PASSWORD in .env}
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - bus
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
 
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    pull_policy: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-kairos}
-    ports: ["5432:5432"]
     volumes:
       - ts-data:/var/lib/postgresql/data
-      - ./timescaledb/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - ./timescaledb/schema.sql:/docker-entrypoint-initdb.d/001-kairos.sql:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
 
   quant-scouts:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-quant-scouts, MODULE: kairos_quant }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#5e30222227dc1b723cdca2380672208e8bffb259
+      args:
+        PACKAGE_DIR: kairos_quant
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
+        SOURCE_REVISION: 5e30222227dc1b723cdca2380672208e8bffb259
+    command: ["kairos-quant-scouts"]
+    environment:
+      <<: *common-environment
+    networks:
+      - bus
+      - egress
+      - observability
 
   text-scouts:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-text-scouts, MODULE: kairos_text }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#8bd56ee310bf18f3f089ced028fcdfd2442ee815
+      args:
+        PACKAGE_DIR: kairos_text
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
+        SOURCE_REVISION: 8bd56ee310bf18f3f089ced028fcdfd2442ee815
+    command: ["kairos-text-scouts"]
+    environment:
+      <<: *common-environment
+      KAIROS_DEEPSEEK_API_KEY: ${KAIROS_DEEPSEEK_API_KEY:?set KAIROS_DEEPSEEK_API_KEY in .env}
+      KAIROS_BRIGHTDATA_API_TOKEN: ${KAIROS_BRIGHTDATA_API_TOKEN:-}
+      KAIROS_BRIGHTDATA_X_DATASET_ID: ${KAIROS_BRIGHTDATA_X_DATASET_ID:-}
+      KAIROS_REDDIT_CLIENT_ID: ${KAIROS_REDDIT_CLIENT_ID:-}
+      KAIROS_REDDIT_CLIENT_SECRET: ${KAIROS_REDDIT_CLIENT_SECRET:-}
+      KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
+    networks:
+      - bus
+      - egress
+      - observability
 
   router:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-router, MODULE: kairos_router }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-router.git#eae29f3a435c5edec25df3759e22448bd78e85a1
+      args:
+        PACKAGE_DIR: kairos_router
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-router
+        SOURCE_REVISION: eae29f3a435c5edec25df3759e22448bd78e85a1
+    command: ["kairos-router"]
+    environment:
+      <<: *common-environment
+    networks:
+      - bus
+      - observability
 
   aggregator:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-aggregator, MODULE: kairos_aggregator }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#80551ae30d602e7fe6b61de7bbd3d3f67cd06819
+      args:
+        PACKAGE_DIR: kairos_aggregator
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
+        SOURCE_REVISION: 80551ae30d602e7fe6b61de7bbd3d3f67cd06819
+    command: ["kairos-aggregator"]
+    environment:
+      <<: *common-environment
+      KAIROS_DEEPSEEK_API_KEY: ${KAIROS_DEEPSEEK_API_KEY:?set KAIROS_DEEPSEEK_API_KEY in .env}
+      KAIROS_OPENAI_API_KEY: ${KAIROS_OPENAI_API_KEY:?set KAIROS_OPENAI_API_KEY in .env}
+    networks:
+      - bus
+      - egress
+      - observability
 
   macro-strategist:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-macro-strategist, MODULE: kairos_macro }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#c9afdbce68a7fc3b793e0209eca761955a8c4207
+      args:
+        PACKAGE_DIR: kairos_macro
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
+        SOURCE_REVISION: c9afdbce68a7fc3b793e0209eca761955a8c4207
+    command: ["kairos-macro-strategist"]
+    environment:
+      <<: *common-environment
+      KAIROS_OPENAI_API_KEY: ${KAIROS_OPENAI_API_KEY:?set KAIROS_OPENAI_API_KEY in .env}
+    networks:
+      - bus
+      - egress
+      - observability
 
   risk-manager:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-risk-manager, MODULE: kairos_risk }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#c64517d810690240c246ab90106773a72be368ea
+      args:
+        PACKAGE_DIR: kairos_risk
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
+        SOURCE_REVISION: c64517d810690240c246ab90106773a72be368ea
+    command: ["kairos-risk-manager"]
+    environment:
+      <<: *common-environment
+      KAIROS_REQUIRE_RECONCILED_ACCOUNT: "true"
+      KAIROS_ACCOUNT_SNAPSHOT_MAX_AGE_S: ${KAIROS_ACCOUNT_SNAPSHOT_MAX_AGE_S:-60}
+      KAIROS_REQUIRE_STRATEGIC_ALLOCATION: "true"
+    networks:
+      - bus
+      - observability
 
   execution-engine:
-    <<: *svc
+    <<: *python-service
     build:
-      context: ..
-      dockerfile: kairos-deploy/docker/Dockerfile
-      args: { SERVICE_DIR: kairos-execution-engine, MODULE: kairos_execution }
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#0f35bcd462b12597e26d0210698529d9e2ac619f
+      args:
+        PACKAGE_DIR: kairos_execution
+        SERVICE_EXTRA: evedex
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
+        SOURCE_REVISION: 0f35bcd462b12597e26d0210698529d9e2ac619f
+    command: ["kairos-execution-engine"]
+    environment:
+      <<: *common-environment
+      KAIROS_EXCHANGE: evedex
+      KAIROS_DRY_RUN: ${KAIROS_DRY_RUN:-true}
+      KAIROS_ACCOUNT_ID: ${KAIROS_ACCOUNT_ID:-primary}
+      KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S: ${KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S:-15}
+      KAIROS_DRY_RUN_EQUITY_USD: ${KAIROS_DRY_RUN_EQUITY_USD:-10000}
+      KAIROS_EVEDEX_EXCHANGE_URL: ${KAIROS_EVEDEX_EXCHANGE_URL:-https://exchange-api.evedex.com}
+      KAIROS_EVEDEX_CHAIN_ID: ${KAIROS_EVEDEX_CHAIN_ID:-1}
+      KAIROS_EVEDEX_JWT: ${KAIROS_EVEDEX_JWT:?set KAIROS_EVEDEX_JWT in .env}
+      KAIROS_EVEDEX_PRIVATE_KEY: ${KAIROS_EVEDEX_PRIVATE_KEY:?set KAIROS_EVEDEX_PRIVATE_KEY in .env}
+    networks:
+      - bus
+      - egress
+      - observability
 
   prometheus:
-    image: prom/prometheus:latest
-    volumes: ["./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
-    ports: ["9090:9090"]
+    image: prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+    pull_policy: always
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - 127.0.0.1:${PROMETHEUS_PORT:-9090}:9090
+    networks:
+      - observability
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4.8@sha256:7753ad493720e33560077e8bc5e05fbce4ade777f1387b19ab5050b6777111dd
+    pull_policy: always
     environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-kairos-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
-    ports: ["3000:3000"]
-    depends_on: [prometheus]
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - 127.0.0.1:${GRAFANA_PORT:-3000}:3000
+    networks:
+      - observability
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  bus:
+    internal: true
+  data:
+    internal: true
+  observability:
+    internal: true
+  egress:
 
 volumes:
   redis-data:
   ts-data:
+  prometheus-data:
+  grafana-data:

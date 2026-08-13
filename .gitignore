@@ -1,6 +1,7 @@
 *.env
 .env
 !.env.example
+.compose.resolved.json
 __pycache__/
 *.pyc
 .DS_Store

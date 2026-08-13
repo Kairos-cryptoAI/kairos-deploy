@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Validate source lock
+        run: python scripts/validate_deployment.py
+      - name: Run validator tests
+        run: python -m unittest discover -s tests -v
+
+  validate:
+    needs: static-python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - name: Validate source lock and remote lockfiles
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/validate_deployment.py --verify-remote
+      - name: Render Compose configuration
+        run: docker compose --env-file .env.example -f docker-compose.yml config --format json > compose.json
+      - name: Validate rendered Compose security
+        run: python scripts/validate_deployment.py --compose-json compose.json
+      - name: Validate Compose model
+        run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
+      - name: Lint Dockerfile
+        run: >-
+          docker run --rm
+          -v "$PWD:/work:ro"
+          -w /work
+          hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
+          hadolint docker/Dockerfile
+
+  build:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - quant-scouts
+          - text-scouts
+          - router
+          - aggregator
+          - macro-strategist
+          - risk-manager
+          - execution-engine
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Build pinned service image
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+        run: docker compose --env-file .env.example -f docker-compose.yml build --pull ${{ matrix.service }}
