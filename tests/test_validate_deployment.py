@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from scripts.validate_deployment import validate_compose, validate_environment, validate_source_lock
 
@@ -94,6 +96,18 @@ class SourceLockValidationTests(unittest.TestCase):
         errors = validate_source_lock(lock)
 
         self.assertTrue(any("Redis 8.2.8 runtime" in error for error in errors))
+
+    def test_repository_compose_revisions_match_source_lock(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        lock = json.loads((repository_root / "sources.lock.json").read_text(encoding="utf-8"))
+        compose = (repository_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+        for service, source in lock["services"].items():
+            with self.subTest(service=service):
+                revision = source["revision"]
+                repository = source["repository"]
+                self.assertIn(f"service: {repository}.git#{revision}", compose)
+                self.assertIn(f"SOURCE_REVISION: {revision}", compose)
 
 
 class ComposeValidationTests(unittest.TestCase):

@@ -120,7 +120,7 @@ services:
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 8bd56ee310bf18f3f089ced028fcdfd2442ee815
+        SOURCE_REVISION: ab0a8235584022bfc4dc971dfd838a714539cf0d
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
@@ -161,7 +161,7 @@ services:
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: 80551ae30d602e7fe6b61de7bbd3d3f67cd06819
+        SOURCE_REVISION: 2d23fb41023e15505b86dc17d1d533c20ee4236a
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -181,7 +181,7 @@ services:
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: c9afdbce68a7fc3b793e0209eca761955a8c4207
+        SOURCE_REVISION: e9eaa0a6b42449bdc096351677ba19f2abfbc36a
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
@@ -200,7 +200,7 @@ services:
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: c64517d810690240c246ab90106773a72be368ea
+        SOURCE_REVISION: cd41bf6a73fecb1e0dadac79232a5780b456f060
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment
