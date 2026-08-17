@@ -25,9 +25,9 @@ uv 0.12.3, the expected `kairos-core`/`kairos-llm` Git pins, and a committed loc
 `.env` is used by Compose only for interpolation. There is deliberately no `env_file`:
 each container receives an explicit allow-list.
 
-- Text Scouts: DeepSeek plus optional Bright Data/Reddit credentials.
-- Aggregator: DeepSeek and OpenAI.
-- Macro Strategist: OpenAI only.
+- Text Scouts: DeepSeek V4 Flash (non-thinking) plus optional Bright Data/Reddit credentials.
+- Aggregator: OpenAI GPT-5.6 Luna for the normal path and Terra for conflict escalation.
+- Macro Strategist: OpenAI GPT-5.6 Sol (`xhigh`) only.
 - Execution Engine: EVEDEX JWT and private key only; its image installs the `evedex`
   optional dependency.
 - Quant, Router, Risk, Prometheus, and Grafana never receive LLM or exchange secrets.
