@@ -34,6 +34,7 @@ EGRESS_SERVICES = {
     "execution-engine",
 }
 LLM_SERVICES = {"text-scouts", "aggregator", "macro-strategist"}
+X_RUNTIME_BUDGET_MICROUSD = 9_000_000
 EXPECTED_REPOSITORIES = {
     **{
         name: f"https://github.com/Kairos-cryptoAI/kairos-{name}"
@@ -124,7 +125,7 @@ def validate_source_lock(lock: dict[str, Any]) -> list[str]:
     if build.get("uv") != "0.12.3":
         errors.append("source lock must pin uv 0.12.3")
     dependencies = lock.get("dependencies", {}) or {}
-    for name in ("kairos-core", "kairos-llm"):
+    for name in ("kairos-core", "kairos-llm", "kairos-persistence"):
         if not SHA_PATTERN.fullmatch(str(dependencies.get(name, ""))):
             errors.append(f"dependency {name} must have a full immutable Git SHA")
     redis = (lock.get("infrastructure", {}) or {}).get("redis", {}) or {}
@@ -299,6 +300,17 @@ def validate_compose(
                 errors.append(
                     f"{name}: expected provider binding {environment_name} is missing"
                 )
+
+    text_environment = services.get("text-scouts", {}).get("environment", {}) or {}
+    try:
+        x_runtime_budget = int(text_environment["KAIROS_X_MONTHLY_BUDGET_MICROUSD"])
+    except (KeyError, TypeError, ValueError):
+        errors.append("text-scouts: X monthly runtime budget must be an integer")
+    else:
+        if x_runtime_budget != X_RUNTIME_BUDGET_MICROUSD:
+            errors.append(
+                "text-scouts: X monthly runtime budget must preserve the $1 qualification reserve"
+            )
 
     risk_env = services.get("risk-manager", {}).get("environment", {}) or {}
     if not _is_true(risk_env.get("KAIROS_REQUIRE_RECONCILED_ACCOUNT")):
@@ -486,6 +498,13 @@ def verify_remote_sources(
                     )
             elif llm_source:
                 errors.append(f"{name}: unexpected kairos-llm source dependency")
+            persistence_source = sources.get("kairos-persistence") or {}
+            if name in LLM_SERVICES and persistence_source.get(
+                "rev"
+            ) != dependencies.get("kairos-persistence"):
+                errors.append(
+                    f"{name}: kairos-persistence SHA differs from deployment lock"
+                )
             project = pyproject.get("project", {})
             if source.get("command") not in (project.get("scripts", {}) or {}):
                 errors.append(
@@ -514,6 +533,11 @@ def verify_remote_sources(
                 errors.append(f"{name}: uv.lock lacks pinned kairos-core SHA")
             if name in LLM_SERVICES and dependencies.get("kairos-llm") not in lock_text:
                 errors.append(f"{name}: uv.lock lacks pinned kairos-llm SHA")
+            if (
+                name in LLM_SERVICES
+                and dependencies.get("kairos-persistence") not in lock_text
+            ):
+                errors.append(f"{name}: uv.lock lacks pinned kairos-persistence SHA")
         except (OSError, ValueError, KeyError, urllib.error.HTTPError) as exc:
             errors.append(
                 f"{name}: remote source verification failed ({type(exc).__name__})"

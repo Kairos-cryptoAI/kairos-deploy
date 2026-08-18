@@ -58,7 +58,11 @@ def source_lock(revision: str = "a" * 40) -> dict[str, object]:
     return {
         "schema_version": 1,
         "build": {"python": "3.11.15", "uv": "0.12.3"},
-        "dependencies": {"kairos-core": "b" * 40, "kairos-llm": "c" * 40},
+        "dependencies": {
+            "kairos-core": "b" * 40,
+            "kairos-llm": "c" * 40,
+            "kairos-persistence": "a" * 40,
+        },
         "infrastructure": {
             "redis": {
                 "image": "redis:8.2.8-alpine3.22@sha256:"
@@ -106,6 +110,8 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                     "KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S": "15",
                 }
             )
+        if name == "text-scouts":
+            environment["KAIROS_X_MONTHLY_BUDGET_MICROUSD"] = "9000000"
         if name == "risk-manager":
             environment.update(
                 {
@@ -258,6 +264,16 @@ class ComposeValidationTests(unittest.TestCase):
             [{"source": "evedex_jwt"}, {"source": "evedex_private_key"}]
         )
         self.assertEqual(validate_compose(config, lock, live=True), [])
+
+    def test_rejects_x_runtime_budget_that_consumes_qualification_reserve(self) -> None:
+        config, lock = rendered_config()
+        config["services"]["text-scouts"]["environment"][
+            "KAIROS_X_MONTHLY_BUDGET_MICROUSD"
+        ] = "10000000"
+
+        errors = validate_compose(config, lock)
+
+        self.assertTrue(any("qualification reserve" in error for error in errors))
 
 
 if __name__ == "__main__":

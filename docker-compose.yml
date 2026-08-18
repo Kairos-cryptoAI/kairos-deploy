@@ -146,17 +146,17 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#c32d24d05aca14f9dbfec430bf9e25f0d8efb58f
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#e5b0bf601169d11495a86efb8039d67870900962
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: c32d24d05aca14f9dbfec430bf9e25f0d8efb58f
+        SOURCE_REVISION: e5b0bf601169d11495a86efb8039d67870900962
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
       KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key,KAIROS_X_BEARER_TOKEN=/run/secrets/x_bearer_token
       KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
-      KAIROS_X_MONTHLY_BUDGET_MICROUSD: ${KAIROS_X_MONTHLY_BUDGET_MICROUSD:-10000000}
+      KAIROS_X_MONTHLY_BUDGET_MICROUSD: ${KAIROS_X_MONTHLY_BUDGET_MICROUSD:-9000000}
       KAIROS_X_POST_READ_UNIT_COST_MICROUSD: ${KAIROS_X_POST_READ_UNIT_COST_MICROUSD:-5000}
       KAIROS_X_USER_READ_UNIT_COST_MICROUSD: ${KAIROS_X_USER_READ_UNIT_COST_MICROUSD:-10000}
     secrets:
@@ -193,11 +193,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#85271f8c8d761148947339e585ea4c50e6d8f003
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#fe857ace5816d46b3a65049acf0f79f6ba5f0ff4
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: 85271f8c8d761148947339e585ea4c50e6d8f003
+        SOURCE_REVISION: fe857ace5816d46b3a65049acf0f79f6ba5f0ff4
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -217,11 +217,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#882ac975dab743b47434ba59439eff800acc67aa
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#8aadf33fd23468ef261643df6e59eb2daed641c0
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 882ac975dab743b47434ba59439eff800acc67aa
+        SOURCE_REVISION: 8aadf33fd23468ef261643df6e59eb2daed641c0
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment

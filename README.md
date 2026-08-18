@@ -92,12 +92,19 @@ These tools never place orders and always emit `live_orders_allowed=false`:
 - `kairos-venue-compare`: timestamped Binance-versus-EVEDEX basis, spread, depth, and
   executable-slippage samples.
 - `kairos-llm-qualify`: workload/model resolution, structured-output quality, latency,
-  token usage, quotas, availability, and modeled cost.
-- `kairos-feed-qualify`: feed availability/freshness/latency; metered Bright Data probing
-  requires a separate explicit flag.
+  token usage, quotas, availability, and modeled cost. Route selection and a
+  preflight cost ceiling prevent a diagnostic retry from recalling models that
+  already passed.
+- `kairos-feed-qualify`: feed availability/freshness/latency; official X reads
+  require a separate explicit flag and hard per-run cost cap.
 
 Credentials are accepted from file paths by those CLIs. Keep full reports outside Git;
 commit only reviewed redacted summaries if needed.
+
+The normal X runtime allocation is `$9` under the `$10` provider cap, preserving
+`$1` for controlled qualification/recovery. DeepSeek and OpenAI calls share
+provider-wide PostgreSQL ledgers capped at `$4.50` and `$45` respectively across
+Text Scouts, Aggregator and Macro; these are not separate per-service budgets.
 
 ## Monitoring and reconnect soak
 
