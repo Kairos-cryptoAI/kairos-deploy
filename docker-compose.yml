@@ -9,8 +9,24 @@ x-common-environment: &common-environment
   KAIROS_LOG_LEVEL: ${KAIROS_LOG_LEVEL:-INFO}
   KAIROS_LOG_JSON: ${KAIROS_LOG_JSON:-true}
   KAIROS_BUS_BACKEND: redis
-  KAIROS_REDIS_URL: redis://:${KAIROS_REDIS_PASSWORD:?set KAIROS_REDIS_PASSWORD in .env}@redis:6379/0
+  KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url
   KAIROS_TRADING_SYMBOLS: '${KAIROS_TRADING_SYMBOLS:-["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]}'
+
+x-redis-url-secret: &redis-url-secret
+  source: redis_url
+  target: redis_url
+
+x-persistence-url-secret: &persistence-url-secret
+  source: persistence_database_url
+  target: persistence_database_url
+
+x-deepseek-secret: &deepseek-secret
+  source: deepseek_api_key
+  target: deepseek_api_key
+
+x-openai-secret: &openai-secret
+  source: openai_api_key
+  target: openai_api_key
 
 x-python-build: &python-build
   context: .
@@ -30,6 +46,11 @@ x-python-service: &python-service
   depends_on:
     redis:
       condition: service_healthy
+    timescaledb:
+      condition: service_healthy
+  secrets:
+    - *redis-url-secret
+    - *persistence-url-secret
   stop_grace_period: 30s
   logging: &default-logging
     driver: json-file
@@ -46,10 +67,12 @@ services:
       - -ec
       - |
         umask 077
-        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$REDIS_PASSWORD" > /tmp/redis.conf
+        password=$$(cat /run/secrets/redis_password)
+        test -n "$$password"
+        printf 'appendonly yes\nappendfsync everysec\nrequirepass %s\n' "$$password" > /tmp/redis.conf
         exec redis-server /tmp/redis.conf
-    environment:
-      REDIS_PASSWORD: ${KAIROS_REDIS_PASSWORD:?set KAIROS_REDIS_PASSWORD in .env}
+    secrets:
+      - redis_password
     expose:
       - "6379"
     volumes:
@@ -57,7 +80,7 @@ services:
     networks:
       - bus
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -75,15 +98,17 @@ services:
     pull_policy: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB:-kairos}
+    secrets:
+      - postgres_password
     volumes:
       - ts-data:/var/lib/postgresql/data
       - ./timescaledb/schema.sql:/docker-entrypoint-initdb.d/001-kairos.sql:ro
     networks:
       - data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      test: ["CMD-SHELL", "test \"$$(cat /proc/1/comm)\" = postgres && pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -98,16 +123,17 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#c74b9853bd97597b2104b2d9c4bcd5b7c6cefb24
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#c6d5d61515bd6adc31f7f45e05c5c88cc27ac162
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: c74b9853bd97597b2104b2d9c4bcd5b7c6cefb24
+        SOURCE_REVISION: c6d5d61515bd6adc31f7f45e05c5c88cc27ac162
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
     networks:
       - bus
+      - data
       - egress
       - observability
 
@@ -116,22 +142,23 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#94411689e1507516385e9e56a0192012cb6de057
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#4fcd797539526f244b674a886316b04c7505ea1b
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 94411689e1507516385e9e56a0192012cb6de057
+        SOURCE_REVISION: 4fcd797539526f244b674a886316b04c7505ea1b
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
-      KAIROS_DEEPSEEK_API_KEY: ${KAIROS_DEEPSEEK_API_KEY:?set KAIROS_DEEPSEEK_API_KEY in .env}
-      KAIROS_BRIGHTDATA_API_TOKEN: ${KAIROS_BRIGHTDATA_API_TOKEN:-}
-      KAIROS_BRIGHTDATA_X_DATASET_ID: ${KAIROS_BRIGHTDATA_X_DATASET_ID:-}
-      KAIROS_REDDIT_CLIENT_ID: ${KAIROS_REDDIT_CLIENT_ID:-}
-      KAIROS_REDDIT_CLIENT_SECRET: ${KAIROS_REDDIT_CLIENT_SECRET:-}
+      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key
       KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
+    secrets:
+      - *redis-url-secret
+      - *persistence-url-secret
+      - *deepseek-secret
     networks:
       - bus
+      - data
       - egress
       - observability
 
@@ -140,16 +167,17 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-router.git#089770dabf435594d47e5ee046e38e20628fd7d0
+        service: https://github.com/Kairos-cryptoAI/kairos-router.git#b575d5d1a1e0613ea2bc07ce95b984b55bb4d0fe
       args:
         PACKAGE_DIR: kairos_router
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-router
-        SOURCE_REVISION: 089770dabf435594d47e5ee046e38e20628fd7d0
+        SOURCE_REVISION: b575d5d1a1e0613ea2bc07ce95b984b55bb4d0fe
     command: ["kairos-router"]
     environment:
       <<: *common-environment
     networks:
       - bus
+      - data
       - observability
 
   aggregator:
@@ -157,18 +185,22 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#bc655536d314f91b6eb0b067c04475217c0aaa5d
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#85271f8c8d761148947339e585ea4c50e6d8f003
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: bc655536d314f91b6eb0b067c04475217c0aaa5d
+        SOURCE_REVISION: 85271f8c8d761148947339e585ea4c50e6d8f003
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
-      KAIROS_DEEPSEEK_API_KEY: ${KAIROS_DEEPSEEK_API_KEY:?set KAIROS_DEEPSEEK_API_KEY in .env}
-      KAIROS_OPENAI_API_KEY: ${KAIROS_OPENAI_API_KEY:?set KAIROS_OPENAI_API_KEY in .env}
+      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_OPENAI_API_KEY=/run/secrets/openai_api_key
+    secrets:
+      - *redis-url-secret
+      - *persistence-url-secret
+      - *openai-secret
     networks:
       - bus
+      - data
       - egress
       - observability
 
@@ -177,17 +209,22 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#0810ca35ebb18699c2054bccd071cc2613c9a8cf
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#882ac975dab743b47434ba59439eff800acc67aa
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 0810ca35ebb18699c2054bccd071cc2613c9a8cf
+        SOURCE_REVISION: 882ac975dab743b47434ba59439eff800acc67aa
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
-      KAIROS_OPENAI_API_KEY: ${KAIROS_OPENAI_API_KEY:?set KAIROS_OPENAI_API_KEY in .env}
+      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_OPENAI_API_KEY=/run/secrets/openai_api_key
+    secrets:
+      - *redis-url-secret
+      - *persistence-url-secret
+      - *openai-secret
     networks:
       - bus
+      - data
       - egress
       - observability
 
@@ -196,11 +233,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#0565bed4e55fd543f5e984e2a60431638cc752fe
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#abd5f7bc4bfededad4c1605027be0231215fb220
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: 0565bed4e55fd543f5e984e2a60431638cc752fe
+        SOURCE_REVISION: abd5f7bc4bfededad4c1605027be0231215fb220
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment
@@ -209,6 +246,7 @@ services:
       KAIROS_REQUIRE_STRATEGIC_ALLOCATION: "true"
     networks:
       - bus
+      - data
       - observability
 
   execution-engine:
@@ -216,12 +254,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#911669d2365bd6aba24b765f3d290aee6fef3916
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#639c2406344527b1c099037c5132f8c93af65dd0
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 911669d2365bd6aba24b765f3d290aee6fef3916
+        SOURCE_REVISION: 639c2406344527b1c099037c5132f8c93af65dd0
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
@@ -232,12 +270,42 @@ services:
       KAIROS_DRY_RUN_EQUITY_USD: ${KAIROS_DRY_RUN_EQUITY_USD:-10000}
       KAIROS_EVEDEX_EXCHANGE_URL: ${KAIROS_EVEDEX_EXCHANGE_URL:-https://exchange-api.evedex.com}
       KAIROS_EVEDEX_CHAIN_ID: ${KAIROS_EVEDEX_CHAIN_ID:-1}
-      KAIROS_EVEDEX_JWT: ${KAIROS_EVEDEX_JWT:?set KAIROS_EVEDEX_JWT in .env}
-      KAIROS_EVEDEX_PRIVATE_KEY: ${KAIROS_EVEDEX_PRIVATE_KEY:?set KAIROS_EVEDEX_PRIVATE_KEY in .env}
     networks:
       - bus
+      - data
       - egress
       - observability
+
+  ops-exporter:
+    <<: *python-service
+    build:
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#ca41d5eb43dc07ee8b1dcdc14595f91038d0d7c9
+      args:
+        PACKAGE_DIR: kairos_persistence
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
+        SOURCE_REVISION: ca41d5eb43dc07ee8b1dcdc14595f91038d0d7c9
+    command: ["kairos-persistence-exporter"]
+    environment:
+      <<: *common-environment
+      KAIROS_METRICS_HOST: 0.0.0.0
+      KAIROS_METRICS_PORT: "9108"
+    expose:
+      - "9108"
+    ports:
+      - 127.0.0.1:${KAIROS_METRICS_PORT:-9108}:9108
+    networks:
+      - bus
+      - data
+      - observability
+      - management
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   prometheus:
     image: prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
@@ -248,11 +316,22 @@ services:
       - --storage.tsdb.retention.time=15d
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - 127.0.0.1:${PROMETHEUS_PORT:-9090}:9090
     networks:
       - observability
+      - management
+    depends_on:
+      ops-exporter:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -268,18 +347,29 @@ services:
     pull_policy: always
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-kairos-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
     volumes:
       - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/kairos.yml:ro
+    secrets:
+      - grafana_admin_password
     ports:
       - 127.0.0.1:${GRAFANA_PORT:-3000}:3000
     networks:
       - observability
+      - management
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 10m
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -297,6 +387,7 @@ networks:
     internal: true
   observability:
     internal: true
+  management:
   egress:
 
 volumes:
@@ -304,3 +395,19 @@ volumes:
   ts-data:
   prometheus-data:
   grafana-data:
+
+secrets:
+  redis_password:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/redis_password
+  redis_url:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/redis_url
+  postgres_password:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/postgres_password
+  persistence_database_url:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/persistence_database_url
+  grafana_admin_password:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/grafana_admin_password
+  deepseek_api_key:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/deepseek_api_key
+  openai_api_key:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/openai_api_key

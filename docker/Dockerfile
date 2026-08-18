@@ -65,9 +65,11 @@ RUN groupadd --gid 10001 kairos \
 
 WORKDIR /app
 COPY --from=builder --chown=kairos:kairos /app/.venv /app/.venv
+COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/kairos-entrypoint
 
 USER 10001:10001
 STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/kairos-entrypoint"]
 
 # Every Compose service overrides this with its installed, lockfile-backed entrypoint.
 CMD ["python", "--version"]

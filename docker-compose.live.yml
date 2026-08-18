@@ -1,0 +1,21 @@
+# Explicit live overlay. Never use this file until all qualification reports pass.
+services:
+  execution-engine:
+    environment:
+      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_EVEDEX_JWT=/run/secrets/evedex_jwt,KAIROS_EVEDEX_PRIVATE_KEY=/run/secrets/evedex_private_key
+      KAIROS_DRY_RUN: "false"
+    secrets:
+      - source: redis_url
+        target: redis_url
+      - source: persistence_database_url
+        target: persistence_database_url
+      - source: evedex_jwt
+        target: evedex_jwt
+      - source: evedex_private_key
+        target: evedex_private_key
+
+secrets:
+  evedex_jwt:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/evedex_jwt
+  evedex_private_key:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/evedex_private_key

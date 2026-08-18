@@ -2,6 +2,10 @@
 .env
 !.env.example
 .compose.resolved.json
+.compose.*.resolved.json
+secrets/
+backups/
+reports/
 __pycache__/
 *.pyc
 .DS_Store
