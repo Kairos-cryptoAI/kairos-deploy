@@ -64,7 +64,7 @@ x-python-service: &python-service
 
 services:
   redis:
-    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    image: redis:8.4.5-alpine3.22@sha256:bd4a0d37e7cd830117ffec9329052b4a1887afa060c265e1768f82b177ff6f43
     pull_policy: always
     command:
       - /bin/sh
@@ -351,7 +351,7 @@ services:
     logging: *default-logging
 
   grafana:
-    image: grafana/grafana:12.4.8@sha256:7753ad493720e33560077e8bc5e05fbce4ade777f1387b19ab5050b6777111dd
+    image: grafana/grafana:13.1.4@sha256:9be3a3ccdb06bcbb127f888b0c4c1d151837443e478887897a63a27d7b348043
     pull_policy: always
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-kairos-admin}
