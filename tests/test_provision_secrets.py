@@ -25,8 +25,13 @@ class SecretProvisioningTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             initialize(root)
-            (root / "deepseek_api_key").write_text("deepseek\n", encoding="utf-8")
-            (root / "openai_api_key").write_text("openai\n", encoding="utf-8")
+            for name, value in {
+                "deepseek_api_key": "deepseek\n",
+                "openai_api_key": "openai\n",
+            }.items():
+                path = root / name
+                path.write_text(value, encoding="utf-8")
+                path.chmod(0o600)
 
             self.assertEqual(validate(root, live=False), [])
             with self.assertRaises(FileExistsError):
