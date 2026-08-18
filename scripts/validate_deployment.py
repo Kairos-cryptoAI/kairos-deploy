@@ -53,6 +53,7 @@ FORBIDDEN_SECRET_ENV = {
     "KAIROS_PERSISTENCE_DATABASE_URL",
     "KAIROS_DEEPSEEK_API_KEY",
     "KAIROS_OPENAI_API_KEY",
+    "KAIROS_X_BEARER_TOKEN",
     "KAIROS_BRIGHTDATA_API_TOKEN",
     "KAIROS_REDDIT_CLIENT_ID",
     "KAIROS_REDDIT_CLIENT_SECRET",
@@ -271,14 +272,33 @@ def validate_compose(
             errors.append("base Compose must not mount EVEDEX live credentials")
 
     expected_provider_secrets = {
-        "text-scouts": {"deepseek_api_key"},
-        "aggregator": {"openai_api_key"},
-        "macro-strategist": {"openai_api_key"},
+        "text-scouts": {
+            "KAIROS_DEEPSEEK_API_KEY": (
+                "deepseek_api_key",
+                "/run/secrets/deepseek_api_key",
+            ),
+            "KAIROS_X_BEARER_TOKEN": ("x_bearer_token", "/run/secrets/x_bearer_token"),
+        },
+        "aggregator": {
+            "KAIROS_OPENAI_API_KEY": ("openai_api_key", "/run/secrets/openai_api_key")
+        },
+        "macro-strategist": {
+            "KAIROS_OPENAI_API_KEY": ("openai_api_key", "/run/secrets/openai_api_key")
+        },
     }
     for name, expected in expected_provider_secrets.items():
+        service = services.get(name, {}) or {}
+        bindings = _bindings(service)
         sources = _secret_sources(services.get(name, {}) or {})
-        if not expected.issubset(sources):
-            errors.append(f"{name}: expected provider secret file is missing")
+        for environment_name, (source, path) in expected.items():
+            if source not in sources:
+                errors.append(
+                    f"{name}: expected provider secret file {source} is missing"
+                )
+            if bindings.get(environment_name) != path:
+                errors.append(
+                    f"{name}: expected provider binding {environment_name} is missing"
+                )
 
     risk_env = services.get("risk-manager", {}).get("environment", {}) or {}
     if not _is_true(risk_env.get("KAIROS_REQUIRE_RECONCILED_ACCOUNT")):

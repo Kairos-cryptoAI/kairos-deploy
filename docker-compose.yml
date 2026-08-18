@@ -28,6 +28,10 @@ x-openai-secret: &openai-secret
   source: openai_api_key
   target: openai_api_key
 
+x-x-bearer-secret: &x-bearer-secret
+  source: x_bearer_token
+  target: x_bearer_token
+
 x-python-build: &python-build
   context: .
   dockerfile: docker/Dockerfile
@@ -150,12 +154,13 @@ services:
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
-      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key
+      KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key,KAIROS_X_BEARER_TOKEN=/run/secrets/x_bearer_token
       KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
     secrets:
       - *redis-url-secret
       - *persistence-url-secret
       - *deepseek-secret
+      - *x-bearer-secret
     networks:
       - bus
       - data
@@ -411,3 +416,5 @@ secrets:
     file: ${KAIROS_SECRETS_DIR:-./secrets}/deepseek_api_key
   openai_api_key:
     file: ${KAIROS_SECRETS_DIR:-./secrets}/openai_api_key
+  x_bearer_token:
+    file: ${KAIROS_SECRETS_DIR:-./secrets}/x_bearer_token

@@ -34,8 +34,20 @@ appearing in `docker inspect` environment metadata.
 Set-Location D:\Kairos\kairos-deploy
 Copy-Item .env.example .env
 python scripts\provision_secrets.py --initialize-infrastructure
-python scripts\provision_secrets.py --prompt deepseek_api_key --prompt openai_api_key
+python scripts\provision_secrets.py --prompt deepseek_api_key --prompt openai_api_key --prompt x_bearer_token
 python scripts\provision_secrets.py
+```
+
+An existing local labelled provider file can be imported without placing secret values on the
+command line or printing them. Only explicitly selected labels are accepted, destination files
+are created exclusively, and unknown lines are ignored:
+
+```powershell
+python scripts\provision_secrets.py `
+  --import-labelled-file C:\path\to\API.txt `
+  --import-name deepseek_api_key `
+  --import-name openai_api_key `
+  --import-name x_bearer_token
 ```
 
 The base Compose file is always dry-run and does not mount EVEDEX credentials. Live mode

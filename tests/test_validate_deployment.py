@@ -121,13 +121,19 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                 "target": "persistence_database_url",
             },
         ]
-        provider = {
-            "text-scouts": "deepseek_api_key",
-            "aggregator": "openai_api_key",
-            "macro-strategist": "openai_api_key",
-        }.get(name)
-        if provider:
+        providers = {
+            "text-scouts": (
+                ("KAIROS_DEEPSEEK_API_KEY", "deepseek_api_key"),
+                ("KAIROS_X_BEARER_TOKEN", "x_bearer_token"),
+            ),
+            "aggregator": (("KAIROS_OPENAI_API_KEY", "openai_api_key"),),
+            "macro-strategist": (("KAIROS_OPENAI_API_KEY", "openai_api_key"),),
+        }.get(name, ())
+        for environment_name, provider in providers:
             secrets.append({"source": provider, "target": provider})
+            environment["KAIROS_SECRET_BINDINGS"] += (
+                f",{environment_name}=/run/secrets/{provider}"
+            )
         services[name] = {
             "build": {
                 "additional_contexts": {
