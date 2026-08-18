@@ -123,7 +123,6 @@ class SecretProvisioningTests(unittest.TestCase):
                 import_labelled_secrets(root / "other", source, ["openai_api_key"])
 
     @patch("scripts.provision_secrets.subprocess.run")
-    @patch("scripts.provision_secrets.os.name", "nt")
     def test_windows_permissions_use_sids_and_remove_inheritance(self, run) -> None:
         run.side_effect = [
             Mock(stdout='"desktop\\operator","S-1-5-21-123"\n'),
@@ -132,7 +131,12 @@ class SecretProvisioningTests(unittest.TestCase):
             Mock(stdout=""),
         ]
         with TemporaryDirectory() as temporary:
-            harden_permissions(Path(temporary))
+            # Construct the native path before selecting the simulated Windows
+            # branch. Patching os.name first makes pathlib create a WindowsPath
+            # for a real POSIX temporary directory on Linux CI.
+            root = Path(temporary).resolve(strict=True)
+            with patch("scripts.provision_secrets.os.name", "nt"):
+                harden_permissions(root)
 
         remove_inheritance = run.call_args_list[1].args[0]
         recursive_grant = run.call_args_list[2].args[0]
