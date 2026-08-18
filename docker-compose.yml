@@ -146,16 +146,19 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#4fcd797539526f244b674a886316b04c7505ea1b
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#c32d24d05aca14f9dbfec430bf9e25f0d8efb58f
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 4fcd797539526f244b674a886316b04c7505ea1b
+        SOURCE_REVISION: c32d24d05aca14f9dbfec430bf9e25f0d8efb58f
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
       KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key,KAIROS_X_BEARER_TOKEN=/run/secrets/x_bearer_token
       KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
+      KAIROS_X_MONTHLY_BUDGET_MICROUSD: ${KAIROS_X_MONTHLY_BUDGET_MICROUSD:-10000000}
+      KAIROS_X_POST_READ_UNIT_COST_MICROUSD: ${KAIROS_X_POST_READ_UNIT_COST_MICROUSD:-5000}
+      KAIROS_X_USER_READ_UNIT_COST_MICROUSD: ${KAIROS_X_USER_READ_UNIT_COST_MICROUSD:-10000}
     secrets:
       - *redis-url-secret
       - *persistence-url-secret
@@ -286,11 +289,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#ca41d5eb43dc07ee8b1dcdc14595f91038d0d7c9
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#2e85bcac7529ca78b79dec5aa64a4f3d021a0ac0
       args:
         PACKAGE_DIR: kairos_persistence
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
-        SOURCE_REVISION: ca41d5eb43dc07ee8b1dcdc14595f91038d0d7c9
+        SOURCE_REVISION: 2e85bcac7529ca78b79dec5aa64a4f3d021a0ac0
     command: ["kairos-persistence-exporter"]
     environment:
       <<: *common-environment

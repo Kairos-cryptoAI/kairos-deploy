@@ -23,7 +23,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "4fcd797539526f244b674a886316b04c7505ea1b",
+      "revision": "c32d24d05aca14f9dbfec430bf9e25f0d8efb58f",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
@@ -60,7 +60,7 @@
     },
     "ops-exporter": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "ca41d5eb43dc07ee8b1dcdc14595f91038d0d7c9",
+      "revision": "2e85bcac7529ca78b79dec5aa64a4f3d021a0ac0",
       "package_dir": "kairos_persistence",
       "command": "kairos-persistence-exporter"
     }
