@@ -50,3 +50,87 @@ groups:
           severity: critical
         annotations:
           summary: An exchange mutation requires reconciliation
+      - alert: KairosClosedBarGap
+        expr: kairos_closed_bar_gaps_24h > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A persisted Binance one-minute stream contains a gap or reorder boundary
+      - alert: KairosClosedBarCoverageIncomplete
+        expr: kairos_closed_bar_symbols_24h != 5 or kairos_closed_bar_minimum_coverage_ratio_24h < 0.999
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The PAPER 24-hour closed-bar qualification window is incomplete
+      - alert: KairosClosedBarStreamStale
+        expr: kairos_closed_bar_latest_age_seconds > 90
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: At least one PAPER Binance closed-bar stream is stale
+      - alert: KairosVenueAvailabilityBelowGate
+        expr: kairos_venue_availability_ratio_24h < 0.99
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: EVEDEX DEV read-only availability is below the 99 percent gate
+      - alert: KairosVenueMeasurementStale
+        expr: kairos_venue_measurements_24h < 1 or kairos_venue_latest_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No fresh EVEDEX DEV venue-quality measurement is available
+      - alert: KairosVenueEconomicsOutsideGate
+        expr: kairos_venue_p95_abs_basis_bps > 25 or kairos_venue_p95_spread_bps > 25 or kairos_venue_p95_slippage_bps > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: EVEDEX DEV basis, spread, or executable slippage exceeds 25 bps
+      - alert: KairosVenueTimingOutsideGate
+        expr: kairos_venue_max_book_age_ms > 5000 or kairos_venue_max_timestamp_skew_ms > 2000 or kairos_venue_p95_latency_ms > 5000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: EVEDEX DEV book freshness, timestamp skew, or latency exceeds the PAPER gate
+      - alert: KairosPaperExposureUnprotected
+        expr: kairos_paper_unprotected_trades > 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: A filled PAPER position has no reconciled protective stop
+      - alert: KairosPaperRecoveryBlocked
+        expr: kairos_paper_recovery_blocked > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: PAPER entries remain blocked because authoritative recovery is incomplete
+      - alert: KairosPaperAccountSnapshotStale
+        expr: kairos_paper_active_trades > 0 and kairos_paper_account_latest_age_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Active PAPER exposure is not backed by a fresh reconciled account snapshot
+      - alert: KairosExecutionShortfallOutsideGate
+        expr: kairos_execution_p95_shortfall_bps > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: PAPER entry execution shortfall exceeds 25 bps at p95
+      - alert: KairosQualificationBudgetExceeded
+        expr: kairos_api_spend_month_usd > 15
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Durable API qualification spend exceeded the hard 15 USD cap
