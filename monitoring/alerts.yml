@@ -43,6 +43,13 @@ groups:
           severity: critical
         annotations:
           summary: Kairos durable inbox contains failed messages
+      - alert: KairosExpiredInboxLease
+        expr: kairos_inbox_processing_expired > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos inbox contains an expired processing lease requiring recovery
       - alert: KairosUnresolvedExecutionMutation
         expr: kairos_execution_effects_prepared > 0 or kairos_execution_effects_failed > 0
         for: 1m
@@ -72,7 +79,7 @@ groups:
         annotations:
           summary: At least one PAPER Binance closed-bar stream is stale
       - alert: KairosVenueAvailabilityBelowGate
-        expr: kairos_venue_availability_ratio_24h < 0.99
+        expr: kairos_venue_poll_expected_24h != 14400 or kairos_venue_availability_ratio_24h < 0.99
         for: 15m
         labels:
           severity: warning
@@ -114,12 +121,12 @@ groups:
         annotations:
           summary: PAPER entries remain blocked because authoritative recovery is incomplete
       - alert: KairosPaperAccountSnapshotStale
-        expr: kairos_paper_active_trades > 0 and kairos_paper_account_latest_age_seconds > 60
+        expr: kairos_paper_account_latest_age_seconds < 0 or kairos_paper_account_latest_age_seconds > 60
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: Active PAPER exposure is not backed by a fresh reconciled account snapshot
+          summary: PAPER readiness is not backed by a fresh reconciled account snapshot
       - alert: KairosExecutionShortfallOutsideGate
         expr: kairos_execution_p95_shortfall_bps > 25
         for: 5m
@@ -134,3 +141,38 @@ groups:
           severity: critical
         annotations:
           summary: Durable API qualification spend exceeded the hard 15 USD cap
+      - alert: KairosExecutionRuntimeHealthStale
+        expr: kairos_execution_runtime_health_age_seconds < 0 or kairos_execution_runtime_health_age_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Durable EVEDEX execution health is missing or stale
+      - alert: KairosEvedexAuthNearExpiry
+        expr: kairos_evedex_auth_expires_in_seconds < 60
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: EVEDEX DEV authentication is unknown, expired, or near expiry
+      - alert: KairosEvedexMutationBudgetUnsafe
+        expr: kairos_evedex_local_mutation_capacity != 30 or kairos_evedex_local_mutation_compensation_reserve < 4 or kairos_evedex_local_mutation_window_seconds < 60
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: EVEDEX mutation budget no longer preserves the fixed safety boundary
+      - alert: KairosEvedexCompensationReserveExhausted
+        expr: kairos_evedex_local_mutation_reserve < kairos_evedex_local_mutation_compensation_reserve
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: EVEDEX cancel and emergency-close mutation reserve is exhausted
+      - alert: KairosEvedexVenueRateLimitExhausted
+        expr: kairos_evedex_venue_rate_limit_observable == 1 and kairos_evedex_venue_rate_limit_reserve < 1
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: EVEDEX reported no remaining venue-side request capacity

@@ -18,6 +18,8 @@ REQUIRED_METRICS = (
     "kairos_outbox_pending",
     "kairos_outbox_dead_lettered_total",
     "kairos_inbox_failed",
+    "kairos_inbox_processing_oldest_age_seconds",
+    "kairos_inbox_processing_expired",
     "kairos_execution_effects_prepared",
     "kairos_execution_effects_failed",
     "kairos_outbox_oldest_age_seconds",
@@ -26,8 +28,12 @@ REQUIRED_METRICS = (
 ZERO_REQUIRED = (
     "kairos_outbox_dead_lettered_total",
     "kairos_inbox_failed",
+    "kairos_inbox_processing_expired",
+    "kairos_execution_effects_prepared",
     "kairos_execution_effects_failed",
 )
+
+MAX_OUTBOX_AGE_SECONDS = 60.0
 
 PAPER_REQUIRED_METRICS = (
     "kairos_closed_bar_gaps_24h",
@@ -36,6 +42,10 @@ PAPER_REQUIRED_METRICS = (
     "kairos_closed_bar_latest_age_seconds",
     "kairos_venue_measurements_24h",
     "kairos_venue_availability_ratio_24h",
+    "kairos_venue_poll_expected_24h",
+    "kairos_venue_poll_attempted_24h",
+    "kairos_venue_poll_succeeded_24h",
+    "kairos_venue_poll_failed_24h",
     "kairos_venue_blocked_24h",
     "kairos_venue_p95_abs_basis_bps",
     "kairos_venue_p95_spread_bps",
@@ -50,12 +60,57 @@ PAPER_REQUIRED_METRICS = (
     "kairos_execution_p95_shortfall_bps",
     "kairos_paper_account_latest_age_seconds",
     "kairos_api_spend_month_usd",
+    "kairos_execution_runtime_health_age_seconds",
+    "kairos_evedex_auth_age_seconds",
+    "kairos_evedex_auth_expires_in_seconds",
+    "kairos_evedex_local_mutation_reserve",
+    "kairos_evedex_local_mutation_capacity",
+    "kairos_evedex_local_mutation_compensation_reserve",
+    "kairos_evedex_local_mutation_window_seconds",
+    "kairos_evedex_venue_rate_limit_observable",
+    "kairos_evedex_venue_rate_limit_reserve",
 )
 
 PAPER_ZERO_REQUIRED = (
     "kairos_closed_bar_gaps_24h",
     "kairos_paper_unprotected_trades",
 )
+
+# These predicates describe a rolling 24-hour evidence window.  A new PAPER
+# database is expected to report them while that window fills; only the final
+# sample may qualify the gate.  Counting warm-up as service downtime would make
+# a documented 24-hour observation require an undocumented second 24 hours.
+PAPER_WINDOW_READINESS_ERRORS = {
+    "venue_measurements_missing",
+    "closed_bar_symbol_coverage_incomplete",
+    "closed_bar_coverage_below_0.999",
+    "venue_availability_below_0.99",
+    "venue_poll_schedule_incomplete",
+}
+
+# These facts are not ordinary transient health states.  Once observed during a
+# qualification session they remain part of that session's failed evidence even
+# if a later reconciliation or rolling window makes the current gauge look clean.
+IRREVERSIBLE_QUALIFICATION_ERRORS = {
+    "nonzero:kairos_outbox_dead_lettered_total",
+    "nonzero:kairos_inbox_failed",
+    "nonzero:kairos_execution_effects_failed",
+    "nonzero:kairos_closed_bar_gaps_24h",
+    "nonzero:kairos_paper_unprotected_trades",
+    "venue_poll_fact_counts_inconsistent",
+    "api_qualification_budget_exceeded",
+    "evedex_mutation_budget_unsafe",
+}
+
+
+def _is_window_readiness_error(error: str) -> bool:
+    return error in PAPER_WINDOW_READINESS_ERRORS or error.startswith("threshold:")
+
+
+def _sample_availability_errors(errors: list[str], *, paper: bool) -> list[str]:
+    if not paper:
+        return errors
+    return [error for error in errors if not _is_window_readiness_error(error)]
 
 
 def parse_metrics(payload: str) -> dict[str, float]:
@@ -93,6 +148,8 @@ def health_errors(metrics: dict[str, float], *, paper: bool = False) -> list[str
     for name in ZERO_REQUIRED:
         if name in metrics and metrics[name] != 0.0:
             errors.append(f"nonzero:{name}")
+    if metrics.get("kairos_outbox_oldest_age_seconds", 0.0) > MAX_OUTBOX_AGE_SECONDS:
+        errors.append("outbox_backlog_stale")
     if not paper:
         return errors
     for name in PAPER_REQUIRED_METRICS:
@@ -111,6 +168,13 @@ def health_errors(metrics: dict[str, float], *, paper: bool = False) -> list[str
         errors.append("closed_bar_stream_stale")
     if metrics.get("kairos_venue_availability_ratio_24h", 0.0) < 0.99:
         errors.append("venue_availability_below_0.99")
+    if metrics.get("kairos_venue_poll_expected_24h", 0.0) != 14_400:
+        errors.append("venue_poll_schedule_incomplete")
+    attempted = metrics.get("kairos_venue_poll_attempted_24h", 0.0)
+    succeeded = metrics.get("kairos_venue_poll_succeeded_24h", 0.0)
+    failed = metrics.get("kairos_venue_poll_failed_24h", 0.0)
+    if succeeded + failed > attempted:
+        errors.append("venue_poll_fact_counts_inconsistent")
     if metrics.get("kairos_venue_latest_age_seconds", 0.0) > 60:
         errors.append("venue_measurement_stale")
     for name in (
@@ -130,13 +194,32 @@ def health_errors(metrics: dict[str, float], *, paper: bool = False) -> list[str
             errors.append(f"threshold:{name}")
     if metrics.get("kairos_paper_recovery_blocked", 0.0) != 0:
         errors.append("paper_recovery_blocked")
-    if (
-        metrics.get("kairos_paper_active_trades", 0.0) > 0
-        and metrics.get("kairos_paper_account_latest_age_seconds", 0.0) > 60
-    ):
+    if not 0 <= metrics.get("kairos_paper_account_latest_age_seconds", -1.0) <= 60:
         errors.append("paper_account_snapshot_stale")
     if metrics.get("kairos_api_spend_month_usd", 0.0) > 15:
         errors.append("api_qualification_budget_exceeded")
+    if not 0 <= metrics.get("kairos_execution_runtime_health_age_seconds", -1.0) <= 60:
+        errors.append("execution_runtime_health_missing_or_stale")
+    if metrics.get("kairos_evedex_auth_age_seconds", -1.0) < 0:
+        errors.append("evedex_auth_age_unknown")
+    if metrics.get("kairos_evedex_auth_expires_in_seconds", -1.0) < 60:
+        errors.append("evedex_auth_expired_or_near_expiry")
+    capacity = metrics.get("kairos_evedex_local_mutation_capacity", -1.0)
+    reserve = metrics.get("kairos_evedex_local_mutation_reserve", -1.0)
+    compensation = metrics.get(
+        "kairos_evedex_local_mutation_compensation_reserve", -1.0
+    )
+    window = metrics.get("kairos_evedex_local_mutation_window_seconds", -1.0)
+    if capacity != 30 or compensation < 4 or window < 60:
+        errors.append("evedex_mutation_budget_unsafe")
+    if reserve < compensation:
+        errors.append("evedex_compensation_reserve_exhausted")
+    venue_observable = metrics.get("kairos_evedex_venue_rate_limit_observable", -1.0)
+    venue_reserve = metrics.get("kairos_evedex_venue_rate_limit_reserve", -1.0)
+    if venue_observable not in {0.0, 1.0}:
+        errors.append("evedex_venue_rate_limit_observability_unknown")
+    if venue_observable == 1.0 and venue_reserve < 1:
+        errors.append("evedex_venue_rate_limit_exhausted")
     return errors
 
 
@@ -208,9 +291,9 @@ def run_soak(
             durable_failures.update(
                 error
                 for error in last_errors
-                if error not in {"redis_unavailable", "metrics_unavailable"}
+                if error in IRREVERSIBLE_QUALIFICATION_ERRORS
             )
-            if not last_errors:
+            if not _sample_availability_errors(last_errors, paper=paper):
                 healthy += 1
                 if restarted:
                     recovered = True
