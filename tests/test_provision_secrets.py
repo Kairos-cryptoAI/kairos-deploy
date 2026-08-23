@@ -74,6 +74,8 @@ class SecretProvisioningTests(unittest.TestCase):
             (root / "evedex_dev_private_key").write_text(
                 f"0x{'a' * 64}\n", encoding="utf-8"
             )
+            (root / "evedex_dev_api_key").chmod(0o600)
+            (root / "evedex_dev_private_key").chmod(0o600)
 
             self.assertEqual(validate(root, live=False, paper=True), [])
             self.assertFalse((root / "evedex_jwt").exists())
