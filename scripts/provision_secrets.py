@@ -16,8 +16,9 @@ from pathlib import Path
 GENERATED = ("redis_password", "postgres_password", "grafana_admin_password")
 DERIVED = ("redis_url", "persistence_database_url")
 EXTERNAL = ("deepseek_api_key", "openai_api_key", "x_bearer_token")
+PAPER = ("evedex_dev_api_key", "evedex_dev_private_key")
 LIVE = ("evedex_jwt", "evedex_private_key")
-PROMPTABLE = (*EXTERNAL, *LIVE)
+PROMPTABLE = (*EXTERNAL, *PAPER, *LIVE)
 PRIVATE_KEY = re.compile(r"^0x[0-9A-Fa-f]{64}$")
 IMPORT_LABELS = {
     "deepseek_api_key": {"deepseek", "deepseekapi", "deepseekapikey"},
@@ -29,6 +30,14 @@ IMPORT_LABELS = {
         "xapi",
         "xapibearertoken",
         "xbearertoken",
+    },
+    "evedex_dev_api_key": {
+        "evedexdevapi",
+        "evedexdevapikey",
+    },
+    "evedex_dev_private_key": {
+        "evedexdevprivatekey",
+        "evedexdevsigningkey",
     },
 }
 
@@ -134,19 +143,24 @@ def initialize(directory: Path) -> None:
     harden_permissions(root)
 
 
+def _validated_secret_value(name: str, value: str) -> str:
+    normalized = value.strip()
+    if not normalized or "\n" in normalized or "\r" in normalized:
+        raise ValueError(f"{name} must contain exactly one non-empty line")
+    if name in {"evedex_dev_private_key", "evedex_private_key"} and not PRIVATE_KEY.fullmatch(
+        normalized
+    ):
+        raise ValueError(f"{name} must be 0x followed by 64 hexadecimal characters")
+    if name == "evedex_jwt" and len(normalized) < 20:
+        raise ValueError("evedex_jwt is unexpectedly short")
+    return normalized
+
+
 def prompt_secrets(directory: Path, names: list[str]) -> None:
     root = directory.resolve()
     root.mkdir(parents=True, exist_ok=True)
     for name in names:
-        value = getpass.getpass(f"{name}: ").strip()
-        if not value or "\n" in value or "\r" in value:
-            raise ValueError(f"{name} must contain exactly one non-empty line")
-        if name == "evedex_private_key" and not PRIVATE_KEY.fullmatch(value):
-            raise ValueError(
-                "evedex_private_key must be 0x followed by 64 hexadecimal characters"
-            )
-        if name == "evedex_jwt" and len(value) < 20:
-            raise ValueError("evedex_jwt is unexpectedly short")
+        value = _validated_secret_value(name, getpass.getpass(f"{name}: "))
         _write_exclusive(root / name, value)
     harden_permissions(root)
 
@@ -160,7 +174,8 @@ def import_labelled_secrets(directory: Path, source: Path, names: list[str]) -> 
     requested = tuple(dict.fromkeys(names))
     if not requested:
         raise ValueError("at least one import name is required")
-    unsupported = sorted(set(requested) - set(EXTERNAL))
+    supported = set((*EXTERNAL, *PAPER))
+    unsupported = sorted(set(requested) - supported)
     if unsupported:
         raise ValueError(f"unsupported import names: {', '.join(unsupported)}")
 
@@ -185,7 +200,7 @@ def import_labelled_secrets(directory: Path, source: Path, names: list[str]) -> 
                     raise ValueError(
                         f"{name} at line {number} must contain one non-empty value"
                     )
-                matches[name].append(value)
+                matches[name].append(_validated_secret_value(name, value))
 
     for name, values in matches.items():
         if len(values) != 1:
@@ -212,9 +227,12 @@ def _read(path: Path) -> str:
     return value
 
 
-def validate(directory: Path, *, live: bool) -> list[str]:
+def validate(directory: Path, *, live: bool, paper: bool = False) -> list[str]:
+    if live and paper:
+        raise ValueError("live and paper secret profiles are mutually exclusive")
     root = directory.resolve()
-    required = (*GENERATED, *DERIVED, *EXTERNAL, *(LIVE if live else ()))
+    provider_secrets = PAPER if paper else EXTERNAL
+    required = (*GENERATED, *DERIVED, *provider_secrets, *(LIVE if live else ()))
     errors: list[str] = []
     values: dict[str, str] = {}
     for name in required:
@@ -250,6 +268,14 @@ def validate(directory: Path, *, live: bool) -> list[str]:
         )
     if live and 0 < len(values.get("evedex_jwt", "")) < 20:
         errors.append("evedex_jwt is unexpectedly short")
+    if (
+        paper
+        and "evedex_dev_private_key" in values
+        and not PRIVATE_KEY.fullmatch(values["evedex_dev_private_key"])
+    ):
+        errors.append(
+            "evedex_dev_private_key must be 0x followed by 64 hexadecimal characters"
+        )
     return errors
 
 
@@ -259,7 +285,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--initialize-infrastructure", action="store_true")
     parser.add_argument("--prompt", action="append", choices=PROMPTABLE)
     parser.add_argument("--import-labelled-file", type=Path)
-    parser.add_argument("--import-name", action="append", choices=EXTERNAL)
+    parser.add_argument("--import-name", action="append", choices=(*EXTERNAL, *PAPER))
+    parser.add_argument("--paper", action="store_true")
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -288,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.import_name:
             raise ValueError("--import-name requires --import-labelled-file")
-        errors = validate(args.secrets_dir, live=args.live)
+        errors = validate(args.secrets_dir, live=args.live, paper=args.paper)
     except (OSError, ValueError) as exc:
         print(f"secret provisioning failed: {exc}", file=sys.stderr)
         return 2

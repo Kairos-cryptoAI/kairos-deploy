@@ -73,6 +73,26 @@ class SecretProvisioningTests(unittest.TestCase):
             self.assertTrue(any("unexpectedly short" in error for error in errors))
             self.assertTrue(any("64 hexadecimal" in error for error in errors))
 
+    def test_paper_requires_only_dev_credentials_and_never_static_jwt(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initialize(root)
+            (root / "evedex_dev_api_key").write_text("dev-api-key\n", encoding="utf-8")
+            (root / "evedex_dev_private_key").write_text(
+                f"0x{'a' * 64}\n", encoding="utf-8"
+            )
+
+            self.assertEqual(validate(root, live=False, paper=True), [])
+            self.assertFalse((root / "evedex_jwt").exists())
+            self.assertFalse((root / "evedex_private_key").exists())
+
+            (root / "evedex_dev_private_key").write_text("invalid\n", encoding="utf-8")
+            errors = validate(root, live=False, paper=True)
+            self.assertTrue(any("evedex_dev_private_key" in error for error in errors))
+
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                validate(root, live=True, paper=True)
+
     def test_labelled_import_is_explicit_exclusive_and_does_not_copy_unknowns(
         self,
     ) -> None:
@@ -84,6 +104,8 @@ class SecretProvisioningTests(unittest.TestCase):
                 "OpenAI API: openai-value\n"
                 "DeepSeek API: deepseek-value\n"
                 "EVEDEX = deliberately-ignored\n"
+                "EVEDEX DEV API Key = dev-api-value\n"
+                f"EVEDEX DEV Private Key = 0x{'b' * 64}\n"
                 "X Bearer Token: x-value\n",
                 encoding="utf-8",
             )
@@ -110,6 +132,17 @@ class SecretProvisioningTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 import_labelled_secrets(destination, source, ["x_bearer_token"])
 
+            paper_destination = root / "paper-secrets"
+            import_labelled_secrets(
+                paper_destination,
+                source,
+                ["evedex_dev_api_key", "evedex_dev_private_key"],
+            )
+            self.assertEqual(
+                sorted(path.name for path in paper_destination.iterdir()),
+                ["evedex_dev_api_key", "evedex_dev_private_key"],
+            )
+
     def test_labelled_import_rejects_missing_or_duplicate_provider(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -121,6 +154,13 @@ class SecretProvisioningTests(unittest.TestCase):
                 import_labelled_secrets(root / "secrets", source, ["x_bearer_token"])
             with self.assertRaisesRegex(ValueError, "exactly one"):
                 import_labelled_secrets(root / "other", source, ["openai_api_key"])
+
+            malformed = root / "malformed.txt"
+            malformed.write_text("EVEDEX DEV Private Key: not-a-key\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "64 hexadecimal"):
+                import_labelled_secrets(
+                    root / "paper", malformed, ["evedex_dev_private_key"]
+                )
 
     @patch("scripts.provision_secrets.subprocess.run")
     def test_windows_permissions_use_sids_and_remove_inheritance(self, run) -> None:
