@@ -17,6 +17,7 @@ import tomllib
 
 APP_SERVICES = {
     "quant-scouts",
+    "strategy-engine",
     "text-scouts",
     "router",
     "aggregator",
@@ -34,7 +35,8 @@ EGRESS_SERVICES = {
     "execution-engine",
 }
 LLM_SERVICES = {"text-scouts", "aggregator", "macro-strategist"}
-X_RUNTIME_BUDGET_MICROUSD = 9_000_000
+PERSISTENCE_SERVICES = SOURCE_SERVICES - {"ops-exporter"}
+X_RUNTIME_BUDGET_MICROUSD = 2_000_000
 EXPECTED_REPOSITORIES = {
     **{
         name: f"https://github.com/Kairos-cryptoAI/kairos-{name}"
@@ -69,6 +71,113 @@ FORBIDDEN_SECRET_ENV = {
 COMMON_BINDINGS = {
     "KAIROS_REDIS_URL": "/run/secrets/redis_url",
     "KAIROS_PERSISTENCE_DATABASE_URL": "/run/secrets/persistence_database_url",
+}
+BASE_SECRET_FILES = {
+    "redis_password": "redis_password",
+    "redis_url": "redis_url",
+    "postgres_password": "postgres_password",
+    "persistence_database_url": "persistence_database_url",
+    "grafana_admin_password": "grafana_admin_password",
+    "deepseek_api_key": "deepseek_api_key",
+    "openai_api_key": "openai_api_key",
+    "x_bearer_token": "x_bearer_token",
+}
+BASE_COMMON_ENVIRONMENT_KEYS = {
+    "KAIROS_ENVIRONMENT",
+    "KAIROS_LOG_LEVEL",
+    "KAIROS_LOG_JSON",
+    "KAIROS_BUS_BACKEND",
+    "KAIROS_SECRET_BINDINGS",
+    "KAIROS_TRADING_SYMBOLS",
+}
+BASE_SOURCE_ENVIRONMENT_KEYS = {
+    "quant-scouts": {*BASE_COMMON_ENVIRONMENT_KEYS},
+    "strategy-engine": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_TRADING_MODE",
+        "KAIROS_ENABLED_STRATEGY_IDS",
+    },
+    "text-scouts": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_REDDIT_USER_AGENT",
+        "KAIROS_X_MONTHLY_BUDGET_MICROUSD",
+        "KAIROS_X_POST_READ_UNIT_COST_MICROUSD",
+        "KAIROS_X_USER_READ_UNIT_COST_MICROUSD",
+    },
+    "router": {*BASE_COMMON_ENVIRONMENT_KEYS},
+    "aggregator": {*BASE_COMMON_ENVIRONMENT_KEYS},
+    "macro-strategist": {*BASE_COMMON_ENVIRONMENT_KEYS},
+    "risk-manager": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_REQUIRE_RECONCILED_ACCOUNT",
+        "KAIROS_ACCOUNT_SNAPSHOT_MAX_AGE_S",
+        "KAIROS_REQUIRE_STRATEGIC_ALLOCATION",
+    },
+    "execution-engine": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_EXCHANGE",
+        "KAIROS_TRADING_MODE",
+        "KAIROS_ACCOUNT_ID",
+        "KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S",
+        "KAIROS_DRY_RUN_EQUITY_USD",
+        "KAIROS_EVEDEX_EXCHANGE_URL",
+        "KAIROS_EVEDEX_CHAIN_ID",
+    },
+    "ops-exporter": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_METRICS_HOST",
+        "KAIROS_METRICS_PORT",
+    },
+}
+BASE_INFRASTRUCTURE_ENVIRONMENT_KEYS = {
+    "redis": set(),
+    "timescaledb": {"POSTGRES_USER", "POSTGRES_PASSWORD_FILE", "POSTGRES_DB"},
+    "prometheus": set(),
+    "grafana": {
+        "GF_SECURITY_ADMIN_USER",
+        "GF_SECURITY_ADMIN_PASSWORD__FILE",
+        "GF_USERS_ALLOW_SIGN_UP",
+        "GF_ANALYTICS_REPORTING_ENABLED",
+        "GF_ANALYTICS_CHECK_FOR_UPDATES",
+    },
+}
+BASE_INFRASTRUCTURE_USERS = {
+    "redis": "redis:redis",
+    "timescaledb": "postgres:postgres",
+}
+BASE_SERVICE_NETWORKS = {
+    "redis": {"bus"},
+    "timescaledb": {"data"},
+    "quant-scouts": {"bus", "data", "observability", "egress"},
+    "strategy-engine": {"bus", "data", "observability"},
+    "text-scouts": {"bus", "data", "observability", "egress"},
+    "router": {"bus", "data", "observability"},
+    "aggregator": {"bus", "data", "observability", "egress"},
+    "macro-strategist": {"bus", "data", "observability", "egress"},
+    "risk-manager": {"bus", "data", "observability"},
+    "execution-engine": {"bus", "data", "observability", "egress"},
+    "ops-exporter": {"bus", "data", "observability", "management"},
+    "prometheus": {"observability", "management"},
+    "grafana": {"observability", "management"},
+}
+FORBIDDEN_SERVICE_OPTIONS = {
+    "cap_add",
+    "cgroup",
+    "cgroup_parent",
+    "configs",
+    "credential_spec",
+    "device_cgroup_rules",
+    "devices",
+    "entrypoint",
+    "external_links",
+    "ipc",
+    "links",
+    "network_mode",
+    "pid",
+    "runtime",
+    "user",
+    "uts",
+    "volumes_from",
 }
 
 
@@ -153,6 +262,8 @@ def validate_source_lock(lock: dict[str, Any]) -> list[str]:
             errors.append(f"{name}: command is required")
     if services.get("execution-engine", {}).get("extra") != "evedex":
         errors.append("execution-engine must install the evedex extra")
+    if services.get("strategy-engine", {}).get("extra") != "runtime":
+        errors.append("strategy-engine must install the runtime extra")
     return errors
 
 
@@ -163,13 +274,37 @@ def _validate_source_service(
     repository = str(source.get("repository", ""))
     revision = str(source.get("revision", ""))
     build = service.get("build", {}) or {}
-    if _context_map(build).get("service") != f"{repository}.git#{revision}":
+    contexts = _context_map(build)
+    if set(contexts) != {"service"}:
+        errors.append(f"{name}: named build contexts must match the exact allow-list")
+    if contexts.get("service") != f"{repository}.git#{revision}":
         errors.append(f"{name}: named build context differs from sources.lock.json")
+    try:
+        local_context = Path(str(build.get("context", ""))).resolve(strict=False)
+    except OSError:
+        local_context = Path()
+    if local_context != Path(__file__).resolve().parents[1]:
+        errors.append(
+            f"{name}: Docker build context must be this deployment repository"
+        )
+    if build.get("dockerfile") != "docker/Dockerfile":
+        errors.append(f"{name}: Dockerfile differs from the reviewed allow-list")
+    if build.get("pull") is not True:
+        errors.append(f"{name}: builds must refresh digest-pinned base images")
     args = build.get("args", {}) or {}
+    expected_arg_names = {"PACKAGE_DIR", "SOURCE_REPOSITORY", "SOURCE_REVISION"}
+    if source.get("extra"):
+        expected_arg_names.add("SERVICE_EXTRA")
+    if set(args) != expected_arg_names:
+        errors.append(f"{name}: build arguments must match the exact allow-list")
     if str(args.get("SOURCE_REVISION", "")) != revision:
         errors.append(f"{name}: OCI source revision differs from the source lock")
+    if str(args.get("SOURCE_REPOSITORY", "")) != repository:
+        errors.append(f"{name}: OCI source repository differs from the source lock")
     if str(args.get("PACKAGE_DIR", "")) != str(source.get("package_dir", "")):
         errors.append(f"{name}: package directory differs from the source lock")
+    if str(args.get("SERVICE_EXTRA", "")) != str(source.get("extra", "")):
+        errors.append(f"{name}: build extra differs from the source lock")
     if service.get("command", []) != [str(source.get("command", ""))]:
         errors.append(f"{name}: command differs from the source lock")
     return errors
@@ -179,6 +314,8 @@ def validate_compose(
     config: dict[str, Any], lock: dict[str, Any], *, live: bool = False
 ) -> list[str]:
     errors: list[str] = []
+    if config.get("name") != "kairos":
+        errors.append("base Compose project name must be exactly kairos")
     services = config.get("services", {}) or {}
     if set(services) != EXPECTED_SERVICES:
         errors.append(
@@ -190,6 +327,11 @@ def validate_compose(
             errors.append(f"{name}: env_file is forbidden")
         if service.get("privileged"):
             errors.append(f"{name}: privileged containers are forbidden")
+        for option in sorted(FORBIDDEN_SERVICE_OPTIONS):
+            if option == "user" and name in BASE_INFRASTRUCTURE_USERS:
+                continue
+            if service.get(option) not in (None, "", [], {}):
+                errors.append(f"{name}: unsafe Compose option {option} is forbidden")
         for volume in service.get("volumes", []) or []:
             source = str(
                 volume.get("source", "") if isinstance(volume, dict) else volume
@@ -197,10 +339,28 @@ def validate_compose(
             if "docker.sock" in source:
                 errors.append(f"{name}: mounting the Docker socket is forbidden")
         environment = service.get("environment", {}) or {}
+        expected_environment_keys = (
+            BASE_SOURCE_ENVIRONMENT_KEYS.get(name)
+            if name in SOURCE_SERVICES
+            else BASE_INFRASTRUCTURE_ENVIRONMENT_KEYS.get(name)
+        )
+        if (
+            expected_environment_keys is not None
+            and set(environment) != expected_environment_keys
+        ):
+            errors.append(f"{name}: environment keys must match the exact allow-list")
+        if set(service.get("networks", {}) or []) != BASE_SERVICE_NETWORKS.get(
+            name, set()
+        ):
+            errors.append(f"{name}: networks must match the exact isolation map")
         for secret in sorted(FORBIDDEN_SECRET_ENV & set(environment)):
             errors.append(
                 f"{name}: secret {secret} must be file-mounted, not an environment value"
             )
+
+    for name, expected_user in BASE_INFRASTRUCTURE_USERS.items():
+        if (services.get(name, {}) or {}).get("user") != expected_user:
+            errors.append(f"{name}: must run as the pinned non-root image user")
 
     source_services = lock.get("services", {}) or {}
     for name in sorted(SOURCE_SERVICES):
@@ -210,10 +370,12 @@ def validate_compose(
         )
         if service.get("read_only") is not True:
             errors.append(f"{name}: root filesystem must be read-only")
-        if "ALL" not in (service.get("cap_drop") or []):
+        if service.get("cap_drop") != ["ALL"]:
             errors.append(f"{name}: all Linux capabilities must be dropped")
-        if "no-new-privileges:true" not in (service.get("security_opt") or []):
+        if service.get("security_opt") != ["no-new-privileges:true"]:
             errors.append(f"{name}: no-new-privileges must be enabled")
+        if service.get("init") is not True:
+            errors.append(f"{name}: the reviewed init wrapper must remain enabled")
         dependencies = service.get("depends_on") or {}
         for dependency in ("redis", "timescaledb"):
             requirement = dependencies.get(dependency, {})
@@ -223,6 +385,10 @@ def validate_compose(
             ):
                 errors.append(f"{name}: must wait for healthy {dependency}")
         networks = set(service.get("networks", {}) or [])
+        if name not in EGRESS_SERVICES and "egress" in networks:
+            errors.append(f"{name}: egress is forbidden outside the exact allow-list")
+        if name in SOURCE_SERVICES and (service.get("volumes") or []):
+            errors.append(f"{name}: application bind/volume mounts are forbidden")
         if not {"bus", "data", "observability"}.issubset(networks):
             errors.append(f"{name}: bus, data, and observability networks are required")
         if name in APP_SERVICES and (name in EGRESS_SERVICES) != ("egress" in networks):
@@ -246,6 +412,11 @@ def validate_compose(
             _secret_sources(service)
         ):
             errors.append(f"{name}: durable Redis/database secret files are required")
+        common_environment = service.get("environment", {}) or {}
+        if str(common_environment.get("KAIROS_BUS_BACKEND", "")).casefold() != "redis":
+            errors.append(f"{name}: durable runtime requires the Redis bus backend")
+        if not _is_true(common_environment.get("KAIROS_LOG_JSON")):
+            errors.append(f"{name}: structured JSON logs must remain enabled")
 
     execution = services.get("execution-engine", {}) or {}
     execution_env = execution.get("environment", {}) or {}
@@ -255,20 +426,25 @@ def validate_compose(
         errors.append("execution-engine must build with SERVICE_EXTRA=evedex")
     execution_secrets = _secret_sources(execution)
     execution_bindings = _bindings(execution)
+    if "KAIROS_DRY_RUN" in execution_env:
+        errors.append("execution-engine: retired KAIROS_DRY_RUN switch must be removed")
     if live:
-        if _is_true(execution_env.get("KAIROS_DRY_RUN")):
-            errors.append("live Compose must set execution-engine dry-run to false")
-        for name, path in {
-            "KAIROS_EVEDEX_JWT": "/run/secrets/evedex_jwt",
-            "KAIROS_EVEDEX_PRIVATE_KEY": "/run/secrets/evedex_private_key",
-        }.items():
-            if execution_bindings.get(name) != path:
-                errors.append(f"live Compose must bind {name} from its secret file")
-        if not {"evedex_jwt", "evedex_private_key"}.issubset(execution_secrets):
-            errors.append("live Compose must mount both EVEDEX credential files")
+        if execution_env.get("KAIROS_TRADING_MODE") != "LIVE":
+            errors.append("live Compose must explicitly select TradingMode=LIVE")
+        if {"evedex_jwt", "evedex_private_key"} & execution_secrets:
+            errors.append(
+                "live Compose must not mount retired static EVEDEX credentials"
+            )
+        if {
+            "KAIROS_EVEDEX_JWT",
+            "KAIROS_EVEDEX_PRIVATE_KEY",
+        } & set(execution_bindings):
+            errors.append(
+                "live Compose must not bind retired static EVEDEX credentials"
+            )
     else:
-        if not _is_true(execution_env.get("KAIROS_DRY_RUN")):
-            errors.append("base Compose must keep execution-engine in dry-run")
+        if execution_env.get("KAIROS_TRADING_MODE") != "DRY_RUN":
+            errors.append("base Compose must explicitly select TradingMode=DRY_RUN")
         if {"evedex_jwt", "evedex_private_key"} & execution_secrets:
             errors.append("base Compose must not mount EVEDEX live credentials")
 
@@ -301,6 +477,42 @@ def validate_compose(
                     f"{name}: expected provider binding {environment_name} is missing"
                 )
 
+    for name in sorted(SOURCE_SERVICES):
+        service = services.get(name, {}) or {}
+        providers = expected_provider_secrets.get(name, {})
+        expected_sources = {"redis_url", "persistence_database_url"} | {
+            source for source, _path in providers.values()
+        }
+        expected_bindings = {
+            **COMMON_BINDINGS,
+            **{
+                environment_name: path
+                for environment_name, (_source, path) in providers.items()
+            },
+        }
+        if _secret_sources(service) != expected_sources:
+            errors.append(f"{name}: secret source set must match the exact allow-list")
+        if _bindings(service) != expected_bindings:
+            errors.append(f"{name}: secret bindings must match the exact allow-list")
+
+    secret_definitions = config.get("secrets", {}) or {}
+    if set(secret_definitions) != set(BASE_SECRET_FILES):
+        errors.append(
+            "top-level secret definitions must match the exact base allow-list"
+        )
+    resolved_paths: list[str] = []
+    for name, basename in BASE_SECRET_FILES.items():
+        definition = secret_definitions.get(name, {}) or {}
+        if definition.get("name") not in (None, f"kairos_{name}"):
+            errors.append(f"{name}: resolved secret aliases another Compose project")
+        resolved = str(definition.get("file", "")).replace("\\", "/")
+        if not resolved.endswith(f"/{basename}"):
+            errors.append(f"{name}: secret file must end with /{basename}")
+        if resolved:
+            resolved_paths.append(resolved.casefold())
+    if len(resolved_paths) != len(set(resolved_paths)):
+        errors.append("top-level secret files must resolve to distinct paths")
+
     text_environment = services.get("text-scouts", {}).get("environment", {}) or {}
     try:
         x_runtime_budget = int(text_environment["KAIROS_X_MONTHLY_BUDGET_MICROUSD"])
@@ -309,8 +521,14 @@ def validate_compose(
     else:
         if x_runtime_budget != X_RUNTIME_BUDGET_MICROUSD:
             errors.append(
-                "text-scouts: X monthly runtime budget must preserve the $1 qualification reserve"
+                "text-scouts: X monthly budget must equal the $2 qualification ceiling"
             )
+
+    strategy_env = services.get("strategy-engine", {}).get("environment", {}) or {}
+    if strategy_env.get("KAIROS_TRADING_MODE") != "DRY_RUN":
+        errors.append("strategy-engine: base topology must remain DRY_RUN")
+    if strategy_env.get("KAIROS_ENABLED_STRATEGY_IDS") != "[]":
+        errors.append("strategy-engine: rejected alpha sleeves must remain disabled")
 
     risk_env = services.get("risk-manager", {}).get("environment", {}) or {}
     if not _is_true(risk_env.get("KAIROS_REQUIRE_RECONCILED_ACCOUNT")):
@@ -364,6 +582,85 @@ def validate_compose(
         "GF_SECURITY_ADMIN_PASSWORD__FILE"
     ) != ("/run/secrets/grafana_admin_password"):
         errors.append("Grafana must use an admin password file")
+    expected_infrastructure_secrets = {
+        "redis": {"redis_password"},
+        "timescaledb": {"postgres_password"},
+        "prometheus": set(),
+        "grafana": {"grafana_admin_password"},
+    }
+    for name, expected in expected_infrastructure_secrets.items():
+        if _secret_sources(services.get(name, {}) or {}) != expected:
+            errors.append(
+                f"{name}: infrastructure secret set must match the exact allow-list"
+            )
+    expected_volume_targets = {
+        "redis": {"/data": ("volume", "redis-data", False)},
+        "timescaledb": {
+            "/var/lib/postgresql/data": ("volume", "ts-data", False),
+            "/docker-entrypoint-initdb.d/001-kairos.sql": (
+                "bind",
+                "/timescaledb/schema.sql",
+                True,
+            ),
+        },
+        "prometheus": {
+            "/prometheus": ("volume", "prometheus-data", False),
+            "/etc/prometheus/prometheus.yml": (
+                "bind",
+                "/monitoring/prometheus.yml",
+                True,
+            ),
+            "/etc/prometheus/alerts.yml": (
+                "bind",
+                "/monitoring/alerts.base.yml",
+                True,
+            ),
+        },
+        "grafana": {
+            "/var/lib/grafana": ("volume", "grafana-data", False),
+            "/etc/grafana/provisioning/datasources/kairos.yml": (
+                "bind",
+                "/monitoring/grafana-datasource.yml",
+                True,
+            ),
+        },
+    }
+    for name, expected in expected_volume_targets.items():
+        actual_volumes = (services.get(name, {}) or {}).get("volumes", []) or []
+        actual_by_target = {
+            str(volume.get("target", "")): volume
+            for volume in actual_volumes
+            if isinstance(volume, dict)
+        }
+        if set(actual_by_target) != set(expected):
+            errors.append(f"{name}: volume targets must match the exact allow-list")
+            continue
+        for target, (kind, source, read_only) in expected.items():
+            volume = actual_by_target[target]
+            actual_source = str(volume.get("source", "")).replace("\\", "/")
+            source_matches = (
+                actual_source == source
+                if kind == "volume"
+                else actual_source.endswith(source)
+            )
+            if (
+                volume.get("type") != kind
+                or not source_matches
+                or bool(volume.get("read_only", False)) is not read_only
+            ):
+                errors.append(f"{name}: volume {target} differs from the allow-list")
+    expected_named_volumes = {
+        "redis-data",
+        "ts-data",
+        "prometheus-data",
+        "grafana-data",
+    }
+    if set(config.get("volumes", {}) or {}) != expected_named_volumes:
+        errors.append("top-level volumes must match the exact allow-list")
+    for name in expected_named_volumes:
+        definition = (config.get("volumes", {}) or {}).get(name, {}) or {}
+        if definition.get("name") not in (None, f"kairos_{name}"):
+            errors.append(f"{name}: resolved volume aliases another Compose project")
 
     for name in ("ops-exporter", "prometheus", "grafana"):
         service_networks = set(services.get(name, {}).get("networks", {}) or [])
@@ -385,14 +682,17 @@ def validate_compose(
         if not IMAGE_PATTERN.fullmatch(str(services.get(name, {}).get("image", ""))):
             errors.append(f"{name}: image must use tag plus sha256 digest")
     networks = config.get("networks", {}) or {}
-    for name in ("bus", "data", "observability"):
+    expected_networks = {"bus", "data", "observability", "management", "egress"}
+    if set(networks) != expected_networks:
+        errors.append("top-level networks must match the exact allow-list")
+    for name, network in networks.items():
+        if (network or {}).get("name") not in (None, f"kairos_{name}"):
+            errors.append(f"{name}: resolved network aliases another Compose project")
+    for name in ("bus", "data", "observability", "management"):
         if networks.get(name, {}).get("internal") is not True:
             errors.append(f"{name}: network must be internal")
-    if (
-        "management" not in networks
-        or networks.get("management", {}).get("internal") is True
-    ):
-        errors.append("management: a non-internal host-publishing network is required")
+    if networks.get("egress", {}).get("internal") is True:
+        errors.append("egress must remain the sole external connectivity network")
     return errors
 
 
@@ -424,8 +724,8 @@ def validate_environment(environment: dict[str, str]) -> list[str]:
             errors.append(f"{name} must be set")
     for name in sorted(FORBIDDEN_SECRET_ENV & set(environment)):
         errors.append(f"{name} must not be stored in the Compose interpolation file")
-    if not _is_true(environment.get("KAIROS_DRY_RUN", "true")):
-        errors.append("base environment must keep KAIROS_DRY_RUN=true")
+    if "KAIROS_DRY_RUN" in environment:
+        errors.append("KAIROS_DRY_RUN is retired and must be removed")
     return errors
 
 
@@ -499,7 +799,7 @@ def verify_remote_sources(
             elif llm_source:
                 errors.append(f"{name}: unexpected kairos-llm source dependency")
             persistence_source = sources.get("kairos-persistence") or {}
-            if name in LLM_SERVICES and persistence_source.get(
+            if name in PERSISTENCE_SERVICES and persistence_source.get(
                 "rev"
             ) != dependencies.get("kairos-persistence"):
                 errors.append(
@@ -534,7 +834,7 @@ def verify_remote_sources(
             if name in LLM_SERVICES and dependencies.get("kairos-llm") not in lock_text:
                 errors.append(f"{name}: uv.lock lacks pinned kairos-llm SHA")
             if (
-                name in LLM_SERVICES
+                name in PERSISTENCE_SERVICES
                 and dependencies.get("kairos-persistence") not in lock_text
             ):
                 errors.append(f"{name}: uv.lock lacks pinned kairos-persistence SHA")

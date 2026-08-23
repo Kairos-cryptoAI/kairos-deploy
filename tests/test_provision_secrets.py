@@ -59,19 +59,12 @@ class SecretProvisioningTests(unittest.TestCase):
                 any("redis_url does not match" in error for error in errors)
             )
 
-    def test_live_validation_requires_well_formed_exchange_secrets(self) -> None:
+    def test_live_static_secret_provisioning_is_retired(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             initialize(root)
-            for name in ("deepseek_api_key", "openai_api_key", "x_bearer_token"):
-                (root / name).write_text("provider-key\n", encoding="utf-8")
-            (root / "evedex_jwt").write_text("short\n", encoding="utf-8")
-            (root / "evedex_private_key").write_text("invalid\n", encoding="utf-8")
-
-            errors = validate(root, live=True)
-
-            self.assertTrue(any("unexpectedly short" in error for error in errors))
-            self.assertTrue(any("64 hexadecimal" in error for error in errors))
+            with self.assertRaisesRegex(ValueError, "static LIVE credential"):
+                validate(root, live=True)
 
     def test_paper_requires_only_dev_credentials_and_never_static_jwt(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -85,6 +78,11 @@ class SecretProvisioningTests(unittest.TestCase):
             self.assertEqual(validate(root, live=False, paper=True), [])
             self.assertFalse((root / "evedex_jwt").exists())
             self.assertFalse((root / "evedex_private_key").exists())
+
+            (root / "evedex_jwt").write_text("stale-static-token\n", encoding="utf-8")
+            errors = validate(root, live=False, paper=True)
+            self.assertTrue(any("must be removed" in error for error in errors))
+            (root / "evedex_jwt").unlink()
 
             (root / "evedex_dev_private_key").write_text("invalid\n", encoding="utf-8")
             errors = validate(root, live=False, paper=True)
@@ -156,7 +154,9 @@ class SecretProvisioningTests(unittest.TestCase):
                 import_labelled_secrets(root / "other", source, ["openai_api_key"])
 
             malformed = root / "malformed.txt"
-            malformed.write_text("EVEDEX DEV Private Key: not-a-key\n", encoding="utf-8")
+            malformed.write_text(
+                "EVEDEX DEV Private Key: not-a-key\n", encoding="utf-8"
+            )
             with self.assertRaisesRegex(ValueError, "64 hexadecimal"):
                 import_labelled_secrets(
                     root / "paper", malformed, ["evedex_dev_private_key"]

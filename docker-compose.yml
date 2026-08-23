@@ -65,6 +65,7 @@ x-python-service: &python-service
 services:
   redis:
     image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    user: redis:redis
     pull_policy: always
     command:
       - /bin/sh
@@ -99,6 +100,7 @@ services:
 
   timescaledb:
     image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    user: postgres:postgres
     pull_policy: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
@@ -127,11 +129,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#c6d5d61515bd6adc31f7f45e05c5c88cc27ac162
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#d71d34db569e9441842f1ef4d6c9cfd8628aaea0
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: c6d5d61515bd6adc31f7f45e05c5c88cc27ac162
+        SOURCE_REVISION: d71d34db569e9441842f1ef4d6c9cfd8628aaea0
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
@@ -141,22 +143,43 @@ services:
       - egress
       - observability
 
+  strategy-engine:
+    <<: *python-service
+    build:
+      <<: *python-build
+      additional_contexts:
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#c1bfd51e6efb7942a583196751b89e4c22a4a5e6
+      args:
+        PACKAGE_DIR: kairos_strategy
+        SERVICE_EXTRA: runtime
+        SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
+        SOURCE_REVISION: c1bfd51e6efb7942a583196751b89e4c22a4a5e6
+    command: ["kairos-strategy-engine"]
+    environment:
+      <<: *common-environment
+      KAIROS_TRADING_MODE: DRY_RUN
+      KAIROS_ENABLED_STRATEGY_IDS: '[]'
+    networks:
+      - bus
+      - data
+      - observability
+
   text-scouts:
     <<: *python-service
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#e5b0bf601169d11495a86efb8039d67870900962
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#2d53cd555f6dcf6456161a694a16023a59f75e19
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: e5b0bf601169d11495a86efb8039d67870900962
+        SOURCE_REVISION: 2d53cd555f6dcf6456161a694a16023a59f75e19
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
       KAIROS_SECRET_BINDINGS: KAIROS_REDIS_URL=/run/secrets/redis_url,KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key,KAIROS_X_BEARER_TOKEN=/run/secrets/x_bearer_token
       KAIROS_REDDIT_USER_AGENT: ${KAIROS_REDDIT_USER_AGENT:-kairos-text-scouts/0.1 by Kairos-cryptoAI}
-      KAIROS_X_MONTHLY_BUDGET_MICROUSD: ${KAIROS_X_MONTHLY_BUDGET_MICROUSD:-9000000}
+      KAIROS_X_MONTHLY_BUDGET_MICROUSD: ${KAIROS_X_MONTHLY_BUDGET_MICROUSD:-2000000}
       KAIROS_X_POST_READ_UNIT_COST_MICROUSD: ${KAIROS_X_POST_READ_UNIT_COST_MICROUSD:-5000}
       KAIROS_X_USER_READ_UNIT_COST_MICROUSD: ${KAIROS_X_USER_READ_UNIT_COST_MICROUSD:-10000}
     secrets:
@@ -175,11 +198,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-router.git#b575d5d1a1e0613ea2bc07ce95b984b55bb4d0fe
+        service: https://github.com/Kairos-cryptoAI/kairos-router.git#25a33e37902c00c6bcd65bd7774a819893b67523
       args:
         PACKAGE_DIR: kairos_router
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-router
-        SOURCE_REVISION: b575d5d1a1e0613ea2bc07ce95b984b55bb4d0fe
+        SOURCE_REVISION: 25a33e37902c00c6bcd65bd7774a819893b67523
     command: ["kairos-router"]
     environment:
       <<: *common-environment
@@ -193,11 +216,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#fe857ace5816d46b3a65049acf0f79f6ba5f0ff4
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#75cb3cfc4b0ddde4805b3e5b460a842c638314c3
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: fe857ace5816d46b3a65049acf0f79f6ba5f0ff4
+        SOURCE_REVISION: 75cb3cfc4b0ddde4805b3e5b460a842c638314c3
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -217,11 +240,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#8aadf33fd23468ef261643df6e59eb2daed641c0
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#65c81efd6010f237a22430a87b816dbf3891e21c
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 8aadf33fd23468ef261643df6e59eb2daed641c0
+        SOURCE_REVISION: 65c81efd6010f237a22430a87b816dbf3891e21c
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
@@ -241,11 +264,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#abd5f7bc4bfededad4c1605027be0231215fb220
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#d311872438c35b0eed76fba1eec799ac5999a107
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: abd5f7bc4bfededad4c1605027be0231215fb220
+        SOURCE_REVISION: d311872438c35b0eed76fba1eec799ac5999a107
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment
@@ -262,17 +285,17 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#639c2406344527b1c099037c5132f8c93af65dd0
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#de168290a9331accaf4c3aa2b62407b5adf7c614
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 639c2406344527b1c099037c5132f8c93af65dd0
+        SOURCE_REVISION: de168290a9331accaf4c3aa2b62407b5adf7c614
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
       KAIROS_EXCHANGE: evedex
-      KAIROS_DRY_RUN: ${KAIROS_DRY_RUN:-true}
+      KAIROS_TRADING_MODE: DRY_RUN
       KAIROS_ACCOUNT_ID: ${KAIROS_ACCOUNT_ID:-primary}
       KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S: ${KAIROS_ACCOUNT_SNAPSHOT_INTERVAL_S:-15}
       KAIROS_DRY_RUN_EQUITY_USD: ${KAIROS_DRY_RUN_EQUITY_USD:-10000}
@@ -289,11 +312,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#2e85bcac7529ca78b79dec5aa64a4f3d021a0ac0
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#e36a3c01aa8aa3847bfbc8fa42eb4f98794d28a5
       args:
         PACKAGE_DIR: kairos_persistence
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
-        SOURCE_REVISION: 2e85bcac7529ca78b79dec5aa64a4f3d021a0ac0
+        SOURCE_REVISION: e36a3c01aa8aa3847bfbc8fa42eb4f98794d28a5
     command: ["kairos-persistence-exporter"]
     environment:
       <<: *common-environment
@@ -324,7 +347,7 @@ services:
       - --storage.tsdb.retention.time=15d
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./monitoring/alerts.base.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - 127.0.0.1:${PROMETHEUS_PORT:-9090}:9090
@@ -396,6 +419,7 @@ networks:
   observability:
     internal: true
   management:
+    internal: true
   egress:
 
 volumes:

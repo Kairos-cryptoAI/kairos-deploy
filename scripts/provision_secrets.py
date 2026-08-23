@@ -17,8 +17,7 @@ GENERATED = ("redis_password", "postgres_password", "grafana_admin_password")
 DERIVED = ("redis_url", "persistence_database_url")
 EXTERNAL = ("deepseek_api_key", "openai_api_key", "x_bearer_token")
 PAPER = ("evedex_dev_api_key", "evedex_dev_private_key")
-LIVE = ("evedex_jwt", "evedex_private_key")
-PROMPTABLE = (*EXTERNAL, *PAPER, *LIVE)
+PROMPTABLE = (*EXTERNAL, *PAPER)
 PRIVATE_KEY = re.compile(r"^0x[0-9A-Fa-f]{64}$")
 IMPORT_LABELS = {
     "deepseek_api_key": {"deepseek", "deepseekapi", "deepseekapikey"},
@@ -147,12 +146,8 @@ def _validated_secret_value(name: str, value: str) -> str:
     normalized = value.strip()
     if not normalized or "\n" in normalized or "\r" in normalized:
         raise ValueError(f"{name} must contain exactly one non-empty line")
-    if name in {"evedex_dev_private_key", "evedex_private_key"} and not PRIVATE_KEY.fullmatch(
-        normalized
-    ):
+    if name == "evedex_dev_private_key" and not PRIVATE_KEY.fullmatch(normalized):
         raise ValueError(f"{name} must be 0x followed by 64 hexadecimal characters")
-    if name == "evedex_jwt" and len(normalized) < 20:
-        raise ValueError("evedex_jwt is unexpectedly short")
     return normalized
 
 
@@ -174,7 +169,7 @@ def import_labelled_secrets(directory: Path, source: Path, names: list[str]) -> 
     requested = tuple(dict.fromkeys(names))
     if not requested:
         raise ValueError("at least one import name is required")
-    supported = set((*EXTERNAL, *PAPER))
+    supported = {*EXTERNAL, *PAPER}
     unsupported = sorted(set(requested) - supported)
     if unsupported:
         raise ValueError(f"unsupported import names: {', '.join(unsupported)}")
@@ -230,10 +225,21 @@ def _read(path: Path) -> str:
 def validate(directory: Path, *, live: bool, paper: bool = False) -> list[str]:
     if live and paper:
         raise ValueError("live and paper secret profiles are mutually exclusive")
+    if live:
+        raise ValueError(
+            "static LIVE credential provisioning is retired; "
+            "LIVE requires a future managed KMS/Vault"
+        )
     root = directory.resolve()
     provider_secrets = PAPER if paper else EXTERNAL
-    required = (*GENERATED, *DERIVED, *provider_secrets, *(LIVE if live else ()))
+    required = (*GENERATED, *DERIVED, *provider_secrets)
     errors: list[str] = []
+    for legacy_name in ("evedex_jwt", "evedex_private_key"):
+        if (root / legacy_name).exists():
+            errors.append(
+                f"{legacy_name}: retired static LIVE credential file must be removed "
+                "from the secret directory"
+            )
     values: dict[str, str] = {}
     for name in required:
         path = root / name
@@ -258,16 +264,6 @@ def validate(directory: Path, *, live: bool, paper: bool = False) -> list[str]:
         f"postgresql://kairos:{values['postgres_password']}@timescaledb:5432/kairos"
     ):
         errors.append("persistence_database_url does not match postgres_password")
-    if (
-        live
-        and "evedex_private_key" in values
-        and not PRIVATE_KEY.fullmatch(values["evedex_private_key"])
-    ):
-        errors.append(
-            "evedex_private_key must be 0x followed by 64 hexadecimal characters"
-        )
-    if live and 0 < len(values.get("evedex_jwt", "")) < 20:
-        errors.append("evedex_jwt is unexpectedly short")
     if (
         paper
         and "evedex_dev_private_key" in values

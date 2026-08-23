@@ -1,0 +1,59 @@
+groups:
+  - name: kairos-durable-runtime
+    rules:
+      - alert: KairosDurableExporterUnavailable
+        expr: up{job="kairos-durable-runtime"} != 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos durable runtime metrics exporter is unavailable
+      - alert: KairosPersistenceUnavailable
+        expr: kairos_persistence_up != 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos TimescaleDB is unavailable to the durable runtime exporter
+      - alert: KairosRedisUnavailable
+        expr: kairos_redis_up != 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos Redis is unavailable to the durable runtime exporter
+      - alert: KairosOutboxBacklog
+        expr: kairos_outbox_pending > 0 and kairos_outbox_oldest_age_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kairos durable outbox is not draining
+      - alert: KairosDeadLetters
+        expr: kairos_outbox_dead_lettered_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos outbox contains dead-lettered messages
+      - alert: KairosInboxFailures
+        expr: kairos_inbox_failed > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos durable inbox contains failed messages
+      - alert: KairosExpiredInboxLease
+        expr: kairos_inbox_processing_expired > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kairos inbox contains an expired processing lease requiring recovery
+      - alert: KairosUnresolvedExecutionMutation
+        expr: kairos_execution_effects_prepared > 0 or kairos_execution_effects_failed > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: An exchange mutation requires reconciliation

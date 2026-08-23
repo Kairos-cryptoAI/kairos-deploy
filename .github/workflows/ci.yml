@@ -29,7 +29,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Validate source lock
-        run: python scripts/validate_deployment.py
+        run: |
+          python scripts/validate_deployment.py
+          python scripts/validate_paper_deployment.py
       - name: Run validator tests
         run: python -m unittest discover -s tests -v
 
@@ -46,17 +48,24 @@ jobs:
       - name: Validate source lock and remote lockfiles
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/validate_deployment.py --verify-remote
+        run: |
+          python scripts/validate_deployment.py --verify-remote
+          python scripts/validate_paper_deployment.py --verify-remote
       - name: Render Compose configuration
         run: docker compose --env-file .env.example -f docker-compose.yml config --format json > compose.json
       - name: Validate rendered Compose security
         run: python scripts/validate_deployment.py --compose-json compose.json
       - name: Validate Compose model
         run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
-      - name: Validate explicit live overlay
+      - name: Validate fail-closed LIVE overlay
         run: |
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.live.yml config --format json > compose-live.json
           python scripts/validate_deployment.py --compose-json compose-live.json --live
+      - name: Validate isolated EVEDEX DEV PAPER topology
+        run: |
+          docker compose --profile canary --env-file .env.paper.example -f docker-compose.paper.yml config --format json > compose-paper.json
+          python scripts/validate_paper_deployment.py --compose-json compose-paper.json --env-file .env.paper.example --allow-example-values
+          docker compose --profile canary --env-file .env.paper.example -f docker-compose.paper.yml config --quiet
       - name: Validate Prometheus rules
         run: >-
           docker run --rm
@@ -64,13 +73,20 @@ jobs:
           --entrypoint promtool
           prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
           check config /etc/prometheus/prometheus.yml
+      - name: Validate base and PAPER alert rules
+        run: >-
+          docker run --rm
+          -v "$PWD/monitoring:/etc/prometheus:ro"
+          --entrypoint promtool
+          prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+          check rules /etc/prometheus/alerts.base.yml /etc/prometheus/alerts.yml
       - name: Lint Dockerfile
         run: >-
           docker run --rm
           -v "$PWD:/work:ro"
           -w /work
           hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
-          hadolint docker/Dockerfile
+          hadolint docker/Dockerfile docker/Dockerfile.paper-execution
 
   build:
     needs: validate
@@ -80,6 +96,7 @@ jobs:
       matrix:
         service:
           - quant-scouts
+          - strategy-engine
           - text-scouts
           - router
           - aggregator
@@ -94,3 +111,26 @@ jobs:
         env:
           DOCKER_BUILD_SUMMARY: "false"
         run: docker compose --env-file .env.example -f docker-compose.yml build --pull ${{ matrix.service }}
+
+  build-paper:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - quant-scouts
+          - strategy-engine
+          - risk-manager
+          - canary-controller
+          - execution-engine
+          - ops-exporter
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Build pinned PAPER service image
+        env:
+          DOCKER_BUILD_SUMMARY: "false"
+        run: >-
+          docker compose --profile canary --env-file .env.paper.example
+          -f docker-compose.paper.yml build --pull ${{ matrix.service }}

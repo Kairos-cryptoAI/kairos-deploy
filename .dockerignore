@@ -1,0 +1,7 @@
+# The local build context supplies only the reviewed Dockerfiles/entrypoint.
+# Application code comes from immutable named Git contexts; local credentials,
+# reports, backups and repository metadata must never reach BuildKit.
+**
+!docker/
+!docker/**
+!.dockerignore

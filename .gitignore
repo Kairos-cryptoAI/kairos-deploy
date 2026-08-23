@@ -1,9 +1,11 @@
 *.env
 .env
+.env.paper
 !.env.example
 .compose.resolved.json
 .compose.*.resolved.json
 secrets/
+secrets-paper/
 backups/
 reports/
 __pycache__/

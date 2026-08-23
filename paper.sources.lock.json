@@ -2,11 +2,11 @@
   "schema_version": 1,
   "build": {
     "python": "3.11.15",
-    "uv": "0.12.3"
+    "uv": "0.12.3",
+    "node": "22"
   },
   "dependencies": {
     "kairos-core": "a4f427cdd44184fac62a842320133ac5a3e11fbe",
-    "kairos-llm": "0777bbbcc541e2ac95d2fe965c1c2201845de17c",
     "kairos-persistence": "e36a3c01aa8aa3847bfbc8fa42eb4f98794d28a5"
   },
   "infrastructure": {
@@ -29,35 +29,17 @@
       "command": "kairos-strategy-engine",
       "extra": "runtime"
     },
-    "text-scouts": {
-      "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "2d53cd555f6dcf6456161a694a16023a59f75e19",
-      "package_dir": "kairos_text",
-      "command": "kairos-text-scouts"
-    },
-    "router": {
-      "repository": "https://github.com/Kairos-cryptoAI/kairos-router",
-      "revision": "25a33e37902c00c6bcd65bd7774a819893b67523",
-      "package_dir": "kairos_router",
-      "command": "kairos-router"
-    },
-    "aggregator": {
-      "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "75cb3cfc4b0ddde4805b3e5b460a842c638314c3",
-      "package_dir": "kairos_aggregator",
-      "command": "kairos-aggregator"
-    },
-    "macro-strategist": {
-      "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "65c81efd6010f237a22430a87b816dbf3891e21c",
-      "package_dir": "kairos_macro",
-      "command": "kairos-macro-strategist"
-    },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
       "revision": "d311872438c35b0eed76fba1eec799ac5999a107",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
+    },
+    "canary-controller": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
+      "revision": "d311872438c35b0eed76fba1eec799ac5999a107",
+      "package_dir": "kairos_risk",
+      "command": "kairos-paper-canary"
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
