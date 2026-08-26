@@ -120,16 +120,17 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#4e6553800facef0e014d5f3a2855ce774289b5e5
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#c1df5fee6a448058cc1cd3f227c35d598d6e473c
       args:
         PACKAGE_DIR: kairos_quant
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: 4e6553800facef0e014d5f3a2855ce774289b5e5
+        SOURCE_REVISION: c1df5fee6a448058cc1cd3f227c35d598d6e473c
     command: ["kairos-quant-scouts"]
     environment:
       <<: *paper-environment
       KAIROS_ENABLE_VENUE_QUALITY_GATE: "true"
+      KAIROS_KLINE_RECONCILIATION_INTERVAL_S: "60"
       KAIROS_EVEDEX_DEV_BASE_URL: https://trading-api.evedex.tech
       KAIROS_VENUE_QUALITY_INTERVAL_S: "30"
       KAIROS_MAXIMUM_ABS_BASIS_BPS: "25"
@@ -148,12 +149,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#dc74aa47ef9d3e36d4cd247a0daf0da09c6e928e
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#1dfb85b3438bde81d5a374010f380aa08816d6d7
       args:
         PACKAGE_DIR: kairos_strategy
         SERVICE_EXTRA: runtime
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
-        SOURCE_REVISION: dc74aa47ef9d3e36d4cd247a0daf0da09c6e928e
+        SOURCE_REVISION: 1dfb85b3438bde81d5a374010f380aa08816d6d7
     command: ["kairos-strategy-engine"]
     environment:
       <<: *paper-environment
