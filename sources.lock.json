@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "656c83229b5fe8ce729bc6b3af51dac525289a76",
+      "revision": "c0ab42c414d9e87936ef10179914e3f35a537466",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },

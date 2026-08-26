@@ -169,11 +169,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#656c83229b5fe8ce729bc6b3af51dac525289a76
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#c0ab42c414d9e87936ef10179914e3f35a537466
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 656c83229b5fe8ce729bc6b3af51dac525289a76
+        SOURCE_REVISION: c0ab42c414d9e87936ef10179914e3f35a537466
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
