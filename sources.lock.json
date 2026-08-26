@@ -49,7 +49,7 @@
     },
     "macro-strategist": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "9689186475d65dc1dc60d06068933b43ffb56d0b",
+      "revision": "2a5bee94048d3764a0288ad96a7b8286855fb46f",
       "package_dir": "kairos_macro",
       "command": "kairos-macro-strategist"
     },

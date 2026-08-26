@@ -240,11 +240,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#9689186475d65dc1dc60d06068933b43ffb56d0b
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#2a5bee94048d3764a0288ad96a7b8286855fb46f
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 9689186475d65dc1dc60d06068933b43ffb56d0b
+        SOURCE_REVISION: 2a5bee94048d3764a0288ad96a7b8286855fb46f
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
