@@ -120,17 +120,18 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#c1df5fee6a448058cc1cd3f227c35d598d6e473c
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#2cd528266ed3a32ab11ef3b769bd9e9048a1f7af
       args:
         PACKAGE_DIR: kairos_quant
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: c1df5fee6a448058cc1cd3f227c35d598d6e473c
+        SOURCE_REVISION: 2cd528266ed3a32ab11ef3b769bd9e9048a1f7af
     command: ["kairos-quant-scouts"]
     environment:
       <<: *paper-environment
       KAIROS_ENABLE_VENUE_QUALITY_GATE: "true"
       KAIROS_KLINE_RECONCILIATION_INTERVAL_S: "60"
+      KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS: "2000"
       KAIROS_EVEDEX_DEV_BASE_URL: https://trading-api.evedex.tech
       KAIROS_VENUE_QUALITY_INTERVAL_S: "30"
       KAIROS_MAXIMUM_ABS_BASIS_BPS: "25"

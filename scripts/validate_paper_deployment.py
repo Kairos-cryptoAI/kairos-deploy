@@ -141,6 +141,7 @@ PAPER_SOURCE_ENVIRONMENT_KEYS = {
         "KAIROS_SECRET_BINDINGS",
         "KAIROS_ENABLE_VENUE_QUALITY_GATE",
         "KAIROS_KLINE_RECONCILIATION_INTERVAL_S",
+        "KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS",
         "KAIROS_EVEDEX_DEV_BASE_URL",
         "KAIROS_VENUE_QUALITY_INTERVAL_S",
         "KAIROS_MAXIMUM_ABS_BASIS_BPS",
@@ -552,6 +553,7 @@ def validate_paper_compose(config: dict[str, Any], lock: dict[str, Any]) -> list
     expected_quant = {
         "KAIROS_ENABLE_VENUE_QUALITY_GATE": "true",
         "KAIROS_KLINE_RECONCILIATION_INTERVAL_S": "60",
+        "KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS": "2000",
         "KAIROS_EVEDEX_DEV_BASE_URL": "https://trading-api.evedex.tech",
         "KAIROS_VENUE_QUALITY_INTERVAL_S": "30",
         "KAIROS_MAXIMUM_ABS_BASIS_BPS": "25",
