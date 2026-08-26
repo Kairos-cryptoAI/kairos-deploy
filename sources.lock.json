@@ -43,13 +43,13 @@
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "a514020e82d2af42428bea6cc9b112e9956a4957",
+      "revision": "224f68e67dcd8aaa5b9c2752cd7bb79d96f7132f",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
     "macro-strategist": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "025a4e35768f330bfae9b39060df169ea1758af5",
+      "revision": "9689186475d65dc1dc60d06068933b43ffb56d0b",
       "package_dir": "kairos_macro",
       "command": "kairos-macro-strategist"
     },
