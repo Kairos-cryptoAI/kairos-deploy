@@ -11,8 +11,8 @@ are pinned by tag and digest.
 | Redis 8.2.8 | Authenticated durable Streams transport | Internal `bus` only |
 | TimescaleDB | Inbox/outbox, audit, snapshots, execution journal | Internal `data` only |
 | Eight application services | Shared Strategy Engine plus signal-to-execution pipeline | Allow-listed egress only |
-| Ops exporter | Read-only durable state and Redis health metrics | Loopback port 9108 |
-| Prometheus/Grafana | Alerts and dashboards | Loopback ports 9090/3000 |
+| Ops exporter | Read-only durable state and Redis health metrics | Internal; optional verified loopback |
+| Prometheus/Grafana | Alerts and dashboards | Internal; optional verified loopback |
 
 Every application service mounts authenticated Redis and PostgreSQL URLs as Docker
 secret files. It waits for both stores, migrates the same durable schema, records inbound
@@ -82,9 +82,10 @@ docker compose --env-file .env -f docker-compose.yml up --detach
 ```
 
 Safety invariants include read-only application roots, UID/GID 10001, no Linux
-capabilities, `no-new-privileges`, internal Redis/Timescale networks, loopback-only
-operations ports, authenticated Redis health checks, bounded logs, reconciliation and
-strategic-allocation gates, and EVEDEX credentials absent from base execution.
+capabilities, `no-new-privileges`, internal Redis/Timescale networks, internal Compose
+metrics access (and loopback-only ports when an engine actually publishes them),
+authenticated Redis health checks, bounded logs, reconciliation and strategic-allocation
+gates, and EVEDEX credentials absent from base execution.
 
 ## Qualification tools
 
@@ -169,7 +170,7 @@ them and never enable `LIVE`.
 
 ```powershell
 python scripts\soak_reconnect.py --paper `
-  --metrics-url http://127.0.0.1:19108/metrics `
+  --metrics-via-compose `
   --duration-s 86400 --interval-s 5 --minimum-availability 0.99 `
   --compose-project kairos-paper --compose-file docker-compose.paper.yml `
   --env-file .env.paper --report reports/paper-read-only-24h.json
@@ -190,7 +191,7 @@ with the internal Prometheus datasource.
 
 ```powershell
 python scripts\soak_reconnect.py `
-  --metrics-url http://127.0.0.1:9108/metrics `
+  --metrics-via-compose `
   --duration-s 1800 --interval-s 5 `
   --restart-at-s 300 --restart-redis `
   --compose-project kairos --env-file .env `
@@ -201,6 +202,13 @@ Redis restart is never implicit: both `--restart-at-s` and `--restart-redis` are
 The report fails if Redis does not recover or any terminal durable failure counter is
 non-zero. A 30-minute local pass is a staging check, not proof of production reliability;
 use a substantially longer soak before capital is enabled.
+
+The Compose metrics transport is the qualification default on Docker Desktop. Docker does
+not expose published ports from containers attached only to internal bridge networks on
+that platform. Reading the exporter with `docker compose exec` preserves the internal
+network boundary. `--metrics-url` remains available for engines where a verified loopback
+publication is reachable; never make the observability networks externally routable just
+to satisfy the probe.
 
 ## Backup and recovery drill
 

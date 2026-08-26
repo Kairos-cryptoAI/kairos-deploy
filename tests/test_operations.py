@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.soak_reconnect import fetch_metrics, health_errors, parse_metrics, run_soak
+from scripts.soak_reconnect import (
+    fetch_metrics,
+    fetch_metrics_command,
+    health_errors,
+    parse_metrics,
+    run_soak,
+)
 
 
 class MetricsTests(unittest.TestCase):
@@ -125,6 +131,39 @@ kairos_outbox_oldest_age_seconds 0
     def test_metrics_url_rejects_non_http_scheme(self) -> None:
         with self.assertRaisesRegex(ValueError, "http or https"):
             fetch_metrics("file:///run/secrets/redis_url")
+
+    @patch("scripts.soak_reconnect.subprocess.run")
+    def test_metrics_can_be_read_inside_an_isolated_compose_service(self, run) -> None:
+        run.return_value.stdout = "kairos_persistence_up 1\nkairos_redis_up 1\n"
+        command = ["docker", "compose", "exec", "-T", "ops-exporter", "python"]
+
+        metrics = fetch_metrics_command(command)
+
+        self.assertEqual(metrics["kairos_persistence_up"], 1)
+        run.assert_called_once_with(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def test_soak_requires_exactly_one_metrics_transport(self) -> None:
+        for metrics_url, metrics_command in (
+            (None, None),
+            ("http://metrics", ["docker", "compose", "exec"]),
+        ):
+            with self.subTest(
+                metrics_url=metrics_url, metrics_command=metrics_command
+            ), self.assertRaisesRegex(ValueError, "exactly one"):
+                run_soak(
+                    metrics_url=metrics_url,
+                    metrics_command=metrics_command,
+                    duration_s=1,
+                    interval_s=1,
+                    restart_at_s=None,
+                    restart_command=None,
+                )
 
     @patch("scripts.soak_reconnect.time.sleep")
     @patch("scripts.soak_reconnect.time.monotonic", side_effect=[0, 0, 1, 2, 3, 4, 5])

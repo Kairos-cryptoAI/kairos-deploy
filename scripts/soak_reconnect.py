@@ -136,6 +136,19 @@ def fetch_metrics(url: str) -> dict[str, float]:
         return parse_metrics(response.read().decode("utf-8"))
 
 
+def fetch_metrics_command(command: Sequence[str]) -> dict[str, float]:
+    if not command:
+        raise ValueError("metrics command must not be empty")
+    completed = subprocess.run(  # nosec B603
+        list(command),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return parse_metrics(completed.stdout)
+
+
 def health_errors(metrics: dict[str, float], *, paper: bool = False) -> list[str]:
     errors: list[str] = []
     for name in REQUIRED_METRICS:
@@ -262,7 +275,8 @@ def _write_atomic(path: Path, payload: dict[str, object]) -> None:
 
 def run_soak(
     *,
-    metrics_url: str,
+    metrics_url: str | None,
+    metrics_command: Sequence[str] | None = None,
     duration_s: float,
     interval_s: float,
     restart_at_s: float | None,
@@ -272,6 +286,8 @@ def run_soak(
 ) -> SoakSummary:
     if not 0 < minimum_availability <= 1:
         raise ValueError("minimum_availability must be in (0, 1]")
+    if (metrics_url is None) == (metrics_command is None):
+        raise ValueError("exactly one metrics transport must be configured")
     started = time.monotonic()
     samples = healthy = transport_errors = 0
     restarted = recovered = False
@@ -285,7 +301,11 @@ def run_soak(
             subprocess.run(list(restart_command), check=True)  # nosec B603
             restarted = True
         try:
-            metrics = fetch_metrics(metrics_url)
+            metrics = (
+                fetch_metrics(metrics_url)
+                if metrics_url is not None
+                else fetch_metrics_command(metrics_command or ())
+            )
             samples += 1
             last_errors = health_errors(metrics, paper=paper)
             durable_failures.update(
@@ -297,7 +317,7 @@ def run_soak(
                 healthy += 1
                 if restarted:
                     recovered = True
-        except (OSError, TimeoutError):
+        except (OSError, subprocess.SubprocessError, TimeoutError):
             transport_errors += 1
             last_errors = ["metrics_unavailable"]
         if time.monotonic() - started < duration_s:
@@ -321,7 +341,9 @@ def run_soak(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--metrics-url", default="http://127.0.0.1:9108/metrics")
+    metrics_source = parser.add_mutually_exclusive_group()
+    metrics_source.add_argument("--metrics-url")
+    metrics_source.add_argument("--metrics-via-compose", action="store_true")
     parser.add_argument("--duration-s", type=float, default=1800)
     parser.add_argument("--interval-s", type=float, default=5)
     parser.add_argument("--restart-at-s", type=float)
@@ -353,8 +375,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             "restart",
             "redis",
         ]
+    metrics_command = None
+    metrics_url = args.metrics_url
+    if args.metrics_via_compose:
+        metrics_command = [
+            "docker",
+            "compose",
+            "-p",
+            args.compose_project,
+            "--env-file",
+            str(args.env_file.resolve()),
+            "-f",
+            str(args.compose_file.resolve()),
+            "exec",
+            "-T",
+            "ops-exporter",
+            "python",
+            "-c",
+            (
+                "import urllib.request; "
+                "print(urllib.request.urlopen("
+                "'http://127.0.0.1:9108/metrics', timeout=5"
+                ").read().decode(), end='')"
+            ),
+        ]
+    elif metrics_url is None:
+        metrics_url = "http://127.0.0.1:9108/metrics"
     summary = run_soak(
-        metrics_url=args.metrics_url,
+        metrics_url=metrics_url,
+        metrics_command=metrics_command,
         duration_s=args.duration_s,
         interval_s=args.interval_s,
         restart_at_s=args.restart_at_s,
