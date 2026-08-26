@@ -216,11 +216,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#224f68e67dcd8aaa5b9c2752cd7bb79d96f7132f
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#46add20f68e4c9a20fbff05fe362e8bc3fc0e35c
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: 224f68e67dcd8aaa5b9c2752cd7bb79d96f7132f
+        SOURCE_REVISION: 46add20f68e4c9a20fbff05fe362e8bc3fc0e35c
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment

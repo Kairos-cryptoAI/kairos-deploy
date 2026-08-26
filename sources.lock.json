@@ -43,7 +43,7 @@
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "224f68e67dcd8aaa5b9c2752cd7bb79d96f7132f",
+      "revision": "46add20f68e4c9a20fbff05fe362e8bc3fc0e35c",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
