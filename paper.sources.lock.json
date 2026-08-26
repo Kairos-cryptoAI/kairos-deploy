@@ -24,7 +24,7 @@
     },
     "strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "1dfb85b3438bde81d5a374010f380aa08816d6d7",
+      "revision": "01f3a9dd58e28fd588c3929a0cdf88ee791c7d88",
       "package_dir": "kairos_strategy",
       "command": "kairos-strategy-engine",
       "extra": "runtime"
