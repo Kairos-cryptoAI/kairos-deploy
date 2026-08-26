@@ -140,7 +140,10 @@ PAPER_SOURCE_ENVIRONMENT_KEYS = {
         *PAPER_COMMON_ENVIRONMENT,
         "KAIROS_SECRET_BINDINGS",
         "KAIROS_ENABLE_VENUE_QUALITY_GATE",
+        "KAIROS_SNAPSHOT_INTERVAL_S",
+        "KAIROS_FUNDING_INTERVAL_S",
         "KAIROS_KLINE_RECONCILIATION_INTERVAL_S",
+        "KAIROS_KLINE_FINALITY_DELAY_S",
         "KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS",
         "KAIROS_EVEDEX_DEV_BASE_URL",
         "KAIROS_VENUE_QUALITY_INTERVAL_S",
@@ -552,7 +555,10 @@ def validate_paper_compose(config: dict[str, Any], lock: dict[str, Any]) -> list
     quant_env = (services.get("quant-scouts", {}) or {}).get("environment", {}) or {}
     expected_quant = {
         "KAIROS_ENABLE_VENUE_QUALITY_GATE": "true",
-        "KAIROS_KLINE_RECONCILIATION_INTERVAL_S": "60",
+        "KAIROS_SNAPSHOT_INTERVAL_S": "5",
+        "KAIROS_FUNDING_INTERVAL_S": "30",
+        "KAIROS_KLINE_RECONCILIATION_INTERVAL_S": "5",
+        "KAIROS_KLINE_FINALITY_DELAY_S": "5",
         "KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS": "2000",
         "KAIROS_EVEDEX_DEV_BASE_URL": "https://trading-api.evedex.tech",
         "KAIROS_VENUE_QUALITY_INTERVAL_S": "30",

@@ -152,7 +152,10 @@ def paper_compose(lock: dict) -> dict:
     services["quant-scouts"]["environment"].update(
         {
             "KAIROS_ENABLE_VENUE_QUALITY_GATE": "true",
-            "KAIROS_KLINE_RECONCILIATION_INTERVAL_S": "60",
+            "KAIROS_SNAPSHOT_INTERVAL_S": "5",
+            "KAIROS_FUNDING_INTERVAL_S": "30",
+            "KAIROS_KLINE_RECONCILIATION_INTERVAL_S": "5",
+            "KAIROS_KLINE_FINALITY_DELAY_S": "5",
             "KAIROS_MAXIMUM_BINANCE_FUTURE_SKEW_MS": "2000",
             "KAIROS_EVEDEX_DEV_BASE_URL": "https://trading-api.evedex.tech",
             "KAIROS_VENUE_QUALITY_INTERVAL_S": "30",
