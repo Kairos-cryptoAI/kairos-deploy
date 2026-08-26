@@ -61,7 +61,7 @@
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "de168290a9331accaf4c3aa2b62407b5adf7c614",
+      "revision": "f73d8e1b0669de464edb8c99cfc32766ed7c7894",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
