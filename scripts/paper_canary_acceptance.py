@@ -50,6 +50,7 @@ REQUIRED_EXIT_REASONS = frozenset({"STOP", "TARGET", "TIMEOUT"})
 FILL_EVENTS = frozenset({"ENTRY_FILLED", "ENTRY_PARTIAL_FILL"})
 FORBIDDEN_PUBLIC_EVENTS = frozenset({"FAILED", "RECOVERY_BLOCKED", "EMERGENCY_CLOSE"})
 ACCOUNT_PATTERN = re.compile(r"kairos-paper-dev-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?")
+COMPOSE_PROJECT_PATTERN = re.compile(r"kairos-paper(?:-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?)?")
 DATABASE_IDENTIFIER_PATTERN = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 
@@ -875,6 +876,7 @@ def collect_evidence(
     database_user: str,
     database_name: str,
     timeout_seconds: int,
+    project_name: str = "kairos-paper",
 ) -> Mapping[str, Any]:
     """Collect one read-only database snapshot without exposing process output."""
 
@@ -882,6 +884,8 @@ def collect_evidence(
         raise ValueError("account must use the dedicated kairos-paper-dev-* namespace")
     if kairos_environment not in {"paper", "paper-dev"}:
         raise ValueError("Kairos environment must be paper or paper-dev")
+    if COMPOSE_PROJECT_PATTERN.fullmatch(project_name) is None:
+        raise ValueError("Compose project must use the dedicated kairos-paper namespace")
     if DATABASE_IDENTIFIER_PATTERN.fullmatch(database_user) is None:
         raise ValueError("database user is not a safe PostgreSQL identifier")
     if DATABASE_IDENTIFIER_PATTERN.fullmatch(database_name) is None:
@@ -893,7 +897,7 @@ def collect_evidence(
         "docker",
         "compose",
         "-p",
-        "kairos-paper",
+        project_name,
         "--env-file",
         str(env_file),
         "-f",
@@ -972,6 +976,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compose-file", type=Path, default=repository / "docker-compose.paper.yml"
     )
+    parser.add_argument(
+        "--project-name",
+        default=os.environ.get("KAIROS_PAPER_COMPOSE_PROJECT", "kairos-paper"),
+        help="Dedicated kairos-paper Compose project to inspect.",
+    )
     parser.add_argument("--env-file", type=Path, default=repository / ".env.paper")
     parser.add_argument("--database-user", default="kairos")
     parser.add_argument("--database-name", default="kairos")
@@ -1001,6 +1010,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_user=args.database_user,
             database_name=args.database_name,
             timeout_seconds=args.timeout_seconds,
+            project_name=args.project_name,
         )
         report = evaluate_evidence(evidence)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):

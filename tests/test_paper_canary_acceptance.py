@@ -320,10 +320,11 @@ class CollectorTests(unittest.TestCase):
                 database_user="kairos",
                 database_name="kairos",
                 timeout_seconds=30,
+                project_name="kairos-paper-gate",
             )
         self.assertEqual(result, evidence)
         command = run.call_args.args[0]
-        self.assertEqual(command[:4], ["docker", "compose", "-p", "kairos-paper"])
+        self.assertEqual(command[:4], ["docker", "compose", "-p", "kairos-paper-gate"])
         self.assertIn("exec", command)
         self.assertIn("-T", command)
         self.assertEqual(
@@ -353,6 +354,23 @@ class CollectorTests(unittest.TestCase):
                 database_user="kairos",
                 database_name="kairos",
                 timeout_seconds=30,
+            )
+        run.assert_not_called()
+
+    def test_collector_rejects_project_outside_paper_namespace(self) -> None:
+        with (
+            patch.object(MODULE.subprocess, "run") as run,
+            self.assertRaisesRegex(ValueError, "Compose project"),
+        ):
+            MODULE.collect_evidence(
+                compose_file=Path("docker-compose.paper.yml"),
+                env_file=Path(".env.paper"),
+                account_id="kairos-paper-dev-01",
+                kairos_environment="paper",
+                database_user="kairos",
+                database_name="kairos",
+                timeout_seconds=30,
+                project_name="production",
             )
         run.assert_not_called()
 
