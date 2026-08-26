@@ -464,6 +464,23 @@ class PaperEnvironmentTests(unittest.TestCase):
 
 
 class PaperExecutionDockerfileTests(unittest.TestCase):
+    def test_source_revision_invalidates_execution_and_sidecar_cache(self) -> None:
+        dockerfile = (
+            Path(__file__).resolve().parents[1]
+            / "docker"
+            / "Dockerfile.paper-execution"
+        ).read_text(encoding="utf-8")
+        identity_write = dockerfile.index("> /tmp/kairos-source-identity")
+        source_copy = dockerfile.index("COPY --from=service pyproject.toml")
+
+        self.assertLess(identity_write, source_copy)
+        self.assertIn('printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"', dockerfile)
+        self.assertIn(
+            "COPY --from=builder --chown=kairos:kairos "
+            "/tmp/kairos-source-identity /app/.source-identity",
+            dockerfile,
+        )
+
     def test_recreates_npm_entrypoints_after_copying_node_modules(self) -> None:
         dockerfile = (
             Path(__file__).resolve().parents[1]

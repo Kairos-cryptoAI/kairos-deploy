@@ -35,6 +35,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Bind the remote source identity into the builder filesystem so a revision
+# change invalidates all later source, Python and sidecar layers.
+RUN test -n "${SOURCE_REPOSITORY}" \
+    && test -n "${SOURCE_REVISION}" \
+    && printf '%s\n%s\n' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}" \
+        > /tmp/kairos-source-identity
+
 # `service` is a remote Git build context pinned to an immutable reviewed SHA.
 # hadolint ignore=DL3022
 COPY --from=service pyproject.toml uv.lock README.md ./
@@ -68,6 +75,7 @@ RUN groupadd --gid 10001 kairos \
 WORKDIR /app
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=builder --chown=kairos:kairos /app/.venv /app/.venv
+COPY --from=builder --chown=kairos:kairos /tmp/kairos-source-identity /app/.source-identity
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/kairos-entrypoint
 
 USER 10001:10001
