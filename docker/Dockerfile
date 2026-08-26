@@ -31,6 +31,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Make the immutable source identity part of the builder filesystem before any
+# remote-context COPY.  This prevents BuildKit from reusing a prior revision's
+# source layer while only refreshing the final OCI labels.
+RUN test -n "${SOURCE_REPOSITORY}" \
+    && test -n "${SOURCE_REVISION}" \
+    && printf '%s\n%s\n' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}" \
+        > /tmp/kairos-source-identity
+
 # `service` is a named remote Git build context pinned in docker-compose.yml.
 # Copy only package metadata and runtime source; tests, local .env files and VCS
 # metadata never enter the image context or runtime layer.
@@ -65,6 +73,7 @@ RUN groupadd --gid 10001 kairos \
 
 WORKDIR /app
 COPY --from=builder --chown=kairos:kairos /app/.venv /app/.venv
+COPY --from=builder --chown=kairos:kairos /tmp/kairos-source-identity /app/.source-identity
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/kairos-entrypoint
 
 USER 10001:10001

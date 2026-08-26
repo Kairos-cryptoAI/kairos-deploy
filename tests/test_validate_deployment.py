@@ -75,6 +75,20 @@ def source_lock(revision: str = "a" * 40) -> dict[str, object]:
 
 
 class SourceLockValidationTests(unittest.TestCase):
+    def test_source_revision_invalidates_remote_context_copy_cache(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        identity_write = dockerfile.index("> /tmp/kairos-source-identity")
+        source_copy = dockerfile.index("COPY --from=service pyproject.toml")
+
+        self.assertLess(identity_write, source_copy)
+        self.assertIn('printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"', dockerfile)
+        self.assertIn(
+            "COPY --from=builder --chown=kairos:kairos "
+            "/tmp/kairos-source-identity /app/.source-identity",
+            dockerfile,
+        )
+
     def test_docker_context_is_deny_by_default_and_never_sends_local_secrets(
         self,
     ) -> None:
