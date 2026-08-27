@@ -153,12 +153,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#01f3a9dd58e28fd588c3929a0cdf88ee791c7d88
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#fb7d406c6e1a3060f481b91668ff3bc23a1b4b0d
       args:
         PACKAGE_DIR: kairos_strategy
         SERVICE_EXTRA: runtime
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
-        SOURCE_REVISION: 01f3a9dd58e28fd588c3929a0cdf88ee791c7d88
+        SOURCE_REVISION: fb7d406c6e1a3060f481b91668ff3bc23a1b4b0d
     command: ["kairos-strategy-engine"]
     environment:
       <<: *paper-environment
