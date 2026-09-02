@@ -64,7 +64,7 @@ x-python-service: &python-service
 
 services:
   redis:
-    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    image: redis:8.4.6-alpine3.22@sha256:12da49daa000c2be4d55118574f889c8cc298140ecf343d04f345c818f227823
     user: redis:redis
     pull_policy: always
     command:
@@ -99,7 +99,7 @@ services:
     logging: *default-logging
 
   timescaledb:
-    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    image: timescale/timescaledb:2.29.2-pg16@sha256:289d55704b1b3ee8263cd3805c6930f9cd54506835a8f19f9b85dad17d5c5a8a
     user: postgres:postgres
     pull_policy: always
     environment:
@@ -339,7 +339,7 @@ services:
       start_period: 15s
 
   prometheus:
-    image: prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     pull_policy: always
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -374,7 +374,7 @@ services:
     logging: *default-logging
 
   grafana:
-    image: grafana/grafana:12.4.8@sha256:7753ad493720e33560077e8bc5e05fbce4ade777f1387b19ab5050b6777111dd
+    image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
     pull_policy: always
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-kairos-admin}
