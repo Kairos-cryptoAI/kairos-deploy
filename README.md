@@ -4,6 +4,30 @@ Reproducible, fail-closed Docker Compose deployment for Kairos. Application imag
 built from reviewed full Git SHAs and committed `uv.lock` files; infrastructure images
 are pinned by tag and digest.
 
+## Recovering an offline Binance bar gap
+
+Use `scripts/Invoke-LongGapRecovery.ps1` only for `kairos-paper-gate`, with its
+explicit `-EnvFile`, a closed UTC `-EndExclusiveMs` and `-MaximumBars` (at most
+150000). Stop quant, strategy, risk and any execution/canary consumers first,
+preserve a new PostgreSQL backup, and build the manifest-pinned quant image.
+The wrapper refuses any active non-infrastructure service or stale image.
+`-ValidateOnly` checks these conditions without launching data repair.
+
+The actual job uses only the existing infrastructure secrets and public Binance
+REST. It verifies a contiguous persisted prefix and two identical REST responses
+per page, then writes through the original atomic audit/outbox path. A shared
+PostgreSQL producer lease prevents a second updated quant/recovery writer.
+No strategy, venue order, paid API, secret import or cursor deletion is performed.
+Output records start, per-symbol progress/retrieval time and completion/failure.
+Run long jobs in a hidden supervised process with preserved stdout/stderr.
+
+After completion, independently verify bar continuity and pending outbox state
+before restarting only the previously stopped read-only services. Do not count
+retrospective recovery as uninterrupted uptime or a 24-hour DEV qualification.
+`scripts/Test-LongGapRecovery.ps1` checks offline preflight; the separate Docker
+integration harness requires an explicitly disposable `kairos_gap_drill_*`
+database and validates commit-before-ACK recovery, deduplication and the lease.
+
 ## Runtime topology
 
 | Container | Responsibility | External access |

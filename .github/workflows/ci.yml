@@ -34,6 +34,10 @@ jobs:
           python scripts/validate_paper_deployment.py
       - name: Run validator tests
         run: python -m unittest discover -s tests -v
+      - name: Test offline bar recovery preflight
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/Test-LongGapRecovery.ps1
 
   validate:
     needs: static-python

@@ -129,11 +129,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#bbfede21860e2ef7c20e3250c1422a6660b4dcc5
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#68e917b2f8cbffba262bd62dd318e09834bf88c2
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: bbfede21860e2ef7c20e3250c1422a6660b4dcc5
+        SOURCE_REVISION: 68e917b2f8cbffba262bd62dd318e09834bf88c2
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
