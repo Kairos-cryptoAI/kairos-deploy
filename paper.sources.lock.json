@@ -18,7 +18,7 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "68e917b2f8cbffba262bd62dd318e09834bf88c2",
+      "revision": "230522dface6e73689ab5f836e78f0f632630884",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
@@ -43,7 +43,7 @@
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "325d518b3b67b4501b54f04bcdddf9f7d0ae20a3",
+      "revision": "7328583b998c28e0baa96f88115bb5b1ea56479e",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
