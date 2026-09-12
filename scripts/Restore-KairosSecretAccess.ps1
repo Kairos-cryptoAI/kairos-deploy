@@ -23,8 +23,12 @@ $receiptRoot = 'D:\Kairos\runtime\access-recovery'
 New-Item -ItemType Directory -Path $receiptRoot -Force | Out-Null
 $receipt = Join-Path $receiptRoot ((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + [Guid]::NewGuid().ToString('N') + '.json')
 [IO.File]::WriteAllText($receipt, (@{ directory = $SecretDirectory; operator_sid = $OperatorSid; previous_acls = $before } | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-& icacls.exe $SecretDirectory /grant:r ('*' + $OperatorSid + ':(OI)(CI)F') /T /C /Q | Out-Null
+# Imported secret files deliberately have protected inheritance. A directory's
+# inheritable OI/CI grant does not add an effective ACE to those existing files.
+& icacls.exe $SecretDirectory /grant:r ('*' + $OperatorSid + ':F') /T /C /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Secret access restoration failed; inspect the saved ACL receipt.' }
+& icacls.exe $SecretDirectory /grant:r ('*' + $OperatorSid + ':(OI)(CI)F') /C /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Secret directory inheritance restoration failed; inspect the saved ACL receipt.' }
 & icacls.exe $SecretDirectory /setowner ('*' + $OperatorSid) /T /C /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Secret ownership restoration failed; inspect the saved ACL receipt.' }
 Write-Output ('Restored scoped access. Previous ACLs: ' + $receipt)
