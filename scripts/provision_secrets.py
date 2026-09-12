@@ -21,8 +21,9 @@ PROMPTABLE = (*EXTERNAL, *PAPER)
 PRIVATE_KEY = re.compile(r"^0x[0-9A-Fa-f]{64}$")
 IMPORT_LABELS = {
     "deepseek_api_key": {"deepseek", "deepseekapi", "deepseekapikey"},
-    "openai_api_key": {"openai", "openaiapi", "openaiapikey"},
+    "openai_api_key": {"openai", "openaiapi", "openaiapikey", "chatgpt"},
     "x_bearer_token": {
+        "x",
         "twitter",
         "twitterapi",
         "twitterbearertoken",

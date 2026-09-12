@@ -143,6 +143,31 @@ class SecretProvisioningTests(unittest.TestCase):
                 ["evedex_dev_api_key", "evedex_dev_private_key"],
             )
 
+    def test_short_provider_labels_do_not_promote_generic_evedex_to_dev(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "providers.txt"
+            source.write_text(
+                "ChatGPT: openai-value\nDeepSeek: deepseek-value\n"
+                "X: bearer-value\nEvedex: unspecified-environment\n",
+                encoding="utf-8",
+            )
+            before = source.read_bytes()
+            import_labelled_secrets(
+                root / "providers", source,
+                ["openai_api_key", "deepseek_api_key", "x_bearer_token"],
+            )
+            self.assertEqual(source.read_bytes(), before)
+            self.assertEqual(
+                (root / "providers" / "x_bearer_token").read_text().strip(),
+                "bearer-value",
+            )
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                import_labelled_secrets(
+                    root / "dev", source, ["evedex_dev_api_key"]
+                )
+            self.assertFalse((root / "dev").exists())
+
     def test_labelled_import_rejects_missing_or_duplicate_provider(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
