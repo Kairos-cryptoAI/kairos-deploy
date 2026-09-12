@@ -18,7 +18,7 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "230522dface6e73689ab5f836e78f0f632630884",
+      "revision": "375a355ace20c747fd36a5d3fa09dcc1b618ee03",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
