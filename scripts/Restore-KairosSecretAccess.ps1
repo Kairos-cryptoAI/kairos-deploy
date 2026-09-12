@@ -5,7 +5,7 @@ param(
     [ValidatePattern('^S-1-5-21-\d+-\d+-\d+-\d+$')]
     [string]$OperatorSid,
     [Parameter(Mandatory)]
-    [ValidateSet('D:\Kairos\runtime\paper-gate\secrets', 'D:\Kairos\kairos-deploy\secrets-paper')]
+    [ValidateSet('D:\Kairos\runtime\paper-gate\secrets', 'D:\Kairos\runtime\shadow-gate\secrets', 'D:\Kairos\kairos-deploy\secrets-paper')]
     [string]$SecretDirectory
 )
 
