@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!policy.py
+!witness.py
+!test_policy.py
+!test_pipeline.py
+!test_witness.py
+!compose.yml

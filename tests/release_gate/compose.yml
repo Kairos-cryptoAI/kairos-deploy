@@ -1,0 +1,62 @@
+name: kairos-release-gate-20260912
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9
+    environment:
+      POSTGRES_USER: kairos
+      POSTGRES_PASSWORD: synthetic_release_gate_only
+      POSTGRES_DB: kairos_execution_test_202609120003
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40", "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4"]
+    tmpfs:
+      - /var/lib/postgresql/data:rw,nosuid,size=512m
+    shm_size: 128m
+    mem_limit: 768m
+    networks: [isolated]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_execution_test_202609120003"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+  redis:
+    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    tmpfs: ["/data:rw,nosuid,size=64m"]
+    networks: [isolated]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+  gate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kairos-release-gate-tests:20260912
+    environment:
+      KAIROS_RELEASE_GATE_CONFIRM: ISOLATED_SYNTHETIC_RELEASE_GATE_ONLY
+      KAIROS_RELEASE_GATE_PROJECT: kairos-release-gate-20260912
+      KAIROS_EXECUTION_TEST_DATABASE: kairos_execution_test_202609120003
+      KAIROS_PERSISTENCE_DATABASE_URL: postgresql://kairos:synthetic_release_gate_only@timescaledb:5432/kairos_execution_test_202609120003
+      KAIROS_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      timescaledb: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    read_only: true
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 128
+    tmpfs: ["/tmp:rw,nosuid,size=256m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [isolated]
+    restart: "no"
+
+networks:
+  isolated:
+    internal: true

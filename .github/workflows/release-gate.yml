@@ -1,0 +1,146 @@
+name: release-gate
+
+on:
+  push:
+    branches: [main]
+    paths: ["tests/release_gate/**", ".github/workflows/release-gate.yml"]
+  pull_request:
+    paths: ["tests/release_gate/**", ".github/workflows/release-gate.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Release isolation / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: tests/release_gate
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+          python-version: "3.11.15"
+          enable-cache: true
+          cache-dependency-glob: tests/release_gate/uv.lock
+      - run: uv sync --locked --no-editable
+      - name: Hermetic policy checks without data services
+        run: uv run --locked --no-sync python -m pytest -q -p no:cacheprovider test_policy.py test_witness.py
+
+  risk-execution:
+    name: Actual Risk / Redis / PostgreSQL / Execution
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Require a fresh hosted-runner project
+        id: fresh_project
+        timeout-minutes: 2
+        run: |
+          mkdir release-gate-evidence
+          git rev-parse HEAD > release-gate-evidence/deploy-revision.txt
+          containers=$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=kairos-release-gate-20260912)
+          test -z "$containers"
+          networks=$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260912)
+          test -z "$networks"
+          volumes=$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260912)
+          test -z "$volumes"
+          timeout --kill-after=5s 10s docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml config --quiet
+      - name: Build only the pinned test image
+        timeout-minutes: 10
+        run: |
+          docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml build gate 2>&1 | tee release-gate-evidence/build.log
+      - name: Start only the fresh synthetic data services
+        timeout-minutes: 3
+        run: |
+          docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
+      - name: Run one bounded pipeline verification
+        timeout-minutes: 5
+        run: |
+          docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml up -d --no-deps gate
+          gate_id=$(docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml ps -a -q gate)
+          test -n "$gate_id"
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-release-gate-20260912
+          set +e
+          gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
+          wait_exit=$?
+          set -e
+          if [ "$wait_exit" -ne 0 ]; then
+            docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml stop --timeout 30 gate
+          fi
+          docker logs --timestamps "$gate_id" 2>&1 | tee release-gate-evidence/pipeline.log
+          printf '%s\n' "wait_exit=$wait_exit" "container_exit=$gate_exit" > release-gate-evidence/exit-status.txt
+          test "$wait_exit" -eq 0
+          test "$gate_exit" = 0
+      - name: Preserve synthetic evidence before hosted-runner disposal
+        if: always()
+        timeout-minutes: 3
+        run: |
+          mkdir -p release-gate-evidence
+          status_file=release-gate-evidence/capture-status.tsv
+          printf 'operation\tstatus\texit_code\n' > "$status_file"
+          if [ "${{ steps.fresh_project.outcome }}" != success ]; then
+            printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\t-\n' >> "$status_file"
+            exit 0
+          fi
+          compose=(docker compose --env-file /dev/null -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml)
+          capture_failures=0
+          capture() {
+            local operation=$1 duration=$2 output=$3
+            shift 3
+            if timeout --signal=TERM --kill-after=5s "$duration" "$@" > "release-gate-evidence/$output" 2> "release-gate-evidence/$operation.stderr.log"; then
+              capture_exit=0
+              printf '%s\tCOMPLETE\t0\n' "$operation" >> "$status_file"
+            else
+              capture_exit=$?
+              capture_failures=$((capture_failures + 1))
+              printf '%s\tFAILED\t%s\n' "$operation" "$capture_exit" >> "$status_file"
+            fi
+          }
+          capture services 10s services.log "${compose[@]}" logs --no-color --timestamps
+          capture containers 10s containers.json "${compose[@]}" ps -a --format json
+          capture images 10s images.json "${compose[@]}" images --format json
+          capture postgres_lookup 10s postgres-container.txt "${compose[@]}" ps -q timescaledb
+          if [ "$capture_exit" -eq 0 ] && [ -s release-gate-evidence/postgres-container.txt ]; then
+            capture pg_dump 80s synthetic-database.dump.partial "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_execution_test_202609120003 --format=custom
+            if [ "$capture_exit" -eq 0 ]; then
+              mv release-gate-evidence/synthetic-database.dump.partial release-gate-evidence/synthetic-database.dump
+              sha256sum release-gate-evidence/synthetic-database.dump > release-gate-evidence/synthetic-database.dump.sha256
+            else
+              printf 'FAILED: pg_dump exit %s; partial bytes are not a completed backup.\n' "$capture_exit" > release-gate-evidence/synthetic-database.dump.FAILED.txt
+            fi
+          else
+            printf 'pg_dump\tSKIPPED_POSTGRES_UNAVAILABLE\t-\n' >> "$status_file"
+            capture_failures=$((capture_failures + 1))
+          fi
+          test "$capture_failures" -eq 0
+      - name: Upload test-only evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-gate-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
