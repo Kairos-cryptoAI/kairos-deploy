@@ -1,0 +1,125 @@
+name: current-release-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "current-release-gate.sources.lock.json"
+      - "docker-compose.current-release-gate.yml"
+      - "scripts/validate_current_release_gate.py"
+      - "tests/current_release_gate/**"
+      - "tests/test_validate_current_release_gate.py"
+      - ".github/workflows/current-release-gate.yml"
+  pull_request:
+    paths:
+      - "current-release-gate.sources.lock.json"
+      - "docker-compose.current-release-gate.yml"
+      - "scripts/validate_current_release_gate.py"
+      - "tests/current_release_gate/**"
+      - "tests/test_validate_current_release_gate.py"
+      - ".github/workflows/current-release-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Current source isolation / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - name: Validate immutable current-source identity
+        run: python scripts/validate_current_release_gate.py
+      - name: Run hermetic source-gate policy tests
+        run: python -m unittest tests/test_validate_current_release_gate.py -v
+
+  docker-integration:
+    name: Current source bar-to-REJECT_ALL proof
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Require a fresh isolated source-gate project
+        id: fresh_project
+        timeout-minutes: 2
+        run: |
+          mkdir current-release-gate-evidence
+          git rev-parse HEAD > current-release-gate-evidence/deploy-revision.txt
+          project=kairos-current-release-gate-20260919-r1
+          test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
+          docker compose -p "$project" -f docker-compose.current-release-gate.yml config --format json > current-release-gate-evidence/compose.json
+          python scripts/validate_current_release_gate.py --compose-json current-release-gate-evidence/compose.json
+          docker compose -p "$project" -f docker-compose.current-release-gate.yml config --quiet
+      - name: Build only the immutable source-gate image
+        timeout-minutes: 10
+        run: |
+          docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml build gate 2>&1 | tee current-release-gate-evidence/build.log
+      - name: Run one bounded bar-to-refusal proof
+        timeout-minutes: 5
+        run: |
+          compose=(docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml)
+          "${compose[@]}" up -d --no-deps gate
+          gate_id=$("${compose[@]}" ps -a -q gate)
+          test -n "$gate_id"
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-current-release-gate-20260919-r1
+          set +e
+          gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
+          wait_exit=$?
+          set -e
+          if [ "$wait_exit" -ne 0 ]; then
+            "${compose[@]}" stop --timeout 30 gate
+          fi
+          docker logs --timestamps "$gate_id" 2>&1 | tee current-release-gate-evidence/gate.log
+          printf '%s\n' "wait_exit=$wait_exit" "container_exit=$gate_exit" > current-release-gate-evidence/exit-status.txt
+          test "$wait_exit" -eq 0
+          test "$gate_exit" = 0
+      - name: Preserve source-gate evidence before hosted-runner disposal
+        if: always()
+        timeout-minutes: 2
+        run: |
+          mkdir -p current-release-gate-evidence
+          if [ "${{ steps.fresh_project.outcome }}" != success ]; then
+            printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\n' > current-release-gate-evidence/capture-status.tsv
+            exit 0
+          fi
+          compose=(docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml)
+          printf 'operation\tstatus\n' > current-release-gate-evidence/capture-status.tsv
+          "${compose[@]}" logs --no-color --timestamps > current-release-gate-evidence/services.log
+          printf 'services\tCOMPLETE\n' >> current-release-gate-evidence/capture-status.tsv
+          "${compose[@]}" ps -a --format json > current-release-gate-evidence/containers.json
+          printf 'containers\tCOMPLETE\n' >> current-release-gate-evidence/capture-status.tsv
+          "${compose[@]}" images --format json > current-release-gate-evidence/images.json
+          printf 'images\tCOMPLETE\n' >> current-release-gate-evidence/capture-status.tsv
+      - name: Upload test-only source-gate evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: current-release-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: current-release-gate-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false

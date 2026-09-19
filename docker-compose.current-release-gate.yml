@@ -1,0 +1,27 @@
+name: kairos-current-release-gate-20260919-r1
+
+# A one-shot source-identity verification. The image build may fetch immutable
+# Git revisions; at runtime this gate has one read-only process on an
+# internal-only network and receives no provider, venue, Docker, or secret input.
+services:
+  gate:
+    build:
+      context: tests/current_release_gate
+      dockerfile: Dockerfile
+    image: kairos-current-release-gate-tests:20260919-r1
+    environment:
+      KAIROS_CURRENT_RELEASE_GATE_CONFIRM: CURRENT_RELEASE_REJECT_ALL_GATE_ONLY
+      KAIROS_CURRENT_RELEASE_GATE_PROJECT: kairos-current-release-gate-20260919-r1
+    read_only: true
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 96
+    tmpfs: ["/tmp:rw,nosuid,size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [isolated]
+    restart: "no"
+
+networks:
+  isolated:
+    internal: true

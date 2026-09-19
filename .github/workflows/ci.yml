@@ -33,6 +33,7 @@ jobs:
           python scripts/validate_deployment.py
           python scripts/validate_paper_deployment.py
           python scripts/validate_sim_deployment.py
+          python scripts/validate_current_release_gate.py
       - name: Run validator tests
         run: python -m unittest discover -s tests -v
       - name: Test offline bar recovery preflight
@@ -57,6 +58,7 @@ jobs:
           python scripts/validate_deployment.py --verify-remote
           python scripts/validate_paper_deployment.py --verify-remote
           python scripts/validate_sim_deployment.py --verify-remote
+          python scripts/validate_current_release_gate.py --verify-remote
       - name: Render Compose configuration
         run: docker compose --env-file .env.example -f docker-compose.yml config --format json > compose.json
       - name: Validate rendered Compose security
@@ -77,6 +79,11 @@ jobs:
           docker compose --env-file tests/sim_gate/empty.env -p kairos-sim -f docker-compose.sim.yml config --format json > compose-sim.json
           python scripts/validate_sim_deployment.py --compose-json compose-sim.json --dockerfile tests/sim_gate/Dockerfile
           docker compose --env-file tests/sim_gate/empty.env -p kairos-sim -f docker-compose.sim.yml config --quiet
+      - name: Validate current-source REJECT_ALL topology
+        run: |
+          docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml config --format json > compose-current-release-gate.json
+          python scripts/validate_current_release_gate.py --compose-json compose-current-release-gate.json --dockerfile tests/current_release_gate/Dockerfile
+          docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml config --quiet
       - name: Validate Prometheus rules
         run: >-
           docker run --rm
@@ -97,7 +104,7 @@ jobs:
           -v "$PWD:/work:ro"
           -w /work
           hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
-          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile
+          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile tests/current_release_gate/Dockerfile
 
   build:
     needs: validate

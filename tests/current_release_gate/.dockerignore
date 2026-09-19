@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!policy.py
+!source-lock.json
+!compose.fixture.json
+!test_policy.py
+!test_reject_all_path.py
