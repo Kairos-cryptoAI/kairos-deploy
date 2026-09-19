@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!compose.fixture.json
+!policy.py
+!pyproject.toml
+!pytest.ini
+!source-lock.json
+!test_full_path.py
+!test_policy.py
+!uv.lock

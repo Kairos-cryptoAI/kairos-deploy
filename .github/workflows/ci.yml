@@ -33,6 +33,7 @@ jobs:
           python scripts/validate_deployment.py
           python scripts/validate_paper_deployment.py
           python scripts/validate_sim_deployment.py
+          python scripts/validate_sim_full_path_deployment.py
           python scripts/validate_current_release_gate.py
           python scripts/validate_offline_outbox_reconciliation.py
       - name: Run validator tests
@@ -59,6 +60,7 @@ jobs:
           python scripts/validate_deployment.py --verify-remote
           python scripts/validate_paper_deployment.py --verify-remote
           python scripts/validate_sim_deployment.py --verify-remote
+          python scripts/validate_sim_full_path_deployment.py --verify-remote
           python scripts/validate_current_release_gate.py --verify-remote
           python scripts/validate_offline_outbox_reconciliation.py --verify-remote
       - name: Render Compose configuration
@@ -81,6 +83,11 @@ jobs:
           docker compose --env-file tests/sim_gate/empty.env -p kairos-sim -f docker-compose.sim.yml config --format json > compose-sim.json
           python scripts/validate_sim_deployment.py --compose-json compose-sim.json --dockerfile tests/sim_gate/Dockerfile
           docker compose --env-file tests/sim_gate/empty.env -p kairos-sim -f docker-compose.sim.yml config --quiet
+      - name: Validate isolated full-path simulator topology
+        run: |
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
+          python scripts/validate_sim_full_path_deployment.py --compose-json compose-sim-full-path.json --dockerfile tests/sim_full_path_gate/Dockerfile
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml config --quiet
       - name: Validate current-source REJECT_ALL topology
         run: |
           docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml config --format json > compose-current-release-gate.json
@@ -113,7 +120,7 @@ jobs:
           -v "$PWD:/work:ro"
           -w /work
           hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
-          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile tests/current_release_gate/Dockerfile tests/offline_outbox_reconciliation/Dockerfile
+          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile tests/sim_full_path_gate/Dockerfile tests/current_release_gate/Dockerfile tests/offline_outbox_reconciliation/Dockerfile
 
   build:
     needs: validate

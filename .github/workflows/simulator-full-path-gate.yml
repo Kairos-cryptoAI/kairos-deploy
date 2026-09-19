@@ -1,0 +1,138 @@
+name: simulator-full-path-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.sim-full-path.yml"
+      - "sim-full-path.sources.lock.json"
+      - "current-release-gate.sources.lock.json"
+      - "scripts/validate_sim_full_path_deployment.py"
+      - "tests/sim_full_path_gate/**"
+      - "tests/test_validate_sim_full_path_deployment.py"
+      - ".github/workflows/simulator-full-path-gate.yml"
+  pull_request:
+    paths:
+      - "docker-compose.sim-full-path.yml"
+      - "sim-full-path.sources.lock.json"
+      - "current-release-gate.sources.lock.json"
+      - "scripts/validate_sim_full_path_deployment.py"
+      - "tests/sim_full_path_gate/**"
+      - "tests/test_validate_sim_full_path_deployment.py"
+      - ".github/workflows/simulator-full-path-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Full-path SIM isolation / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - name: Validate sealed full-path SIM manifest and Dockerfile
+        run: python scripts/validate_sim_full_path_deployment.py
+      - name: Run hermetic full-path manifest tests
+        run: python -m unittest tests/test_validate_sim_full_path_deployment.py -v
+
+  docker-integration:
+    name: Actual full-path SIM / PostgreSQL / controller
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Require a fresh isolated full-path simulator project
+        id: fresh_project
+        timeout-minutes: 2
+        run: |
+          mkdir simulator-full-path-gate-evidence
+          git rev-parse HEAD > simulator-full-path-gate-evidence/deploy-revision.txt
+          project=kairos-sim-full-path-gate-20260919-r1
+          test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p "$project" -f docker-compose.sim-full-path.yml config --format json > simulator-full-path-gate-evidence/compose.json
+          python scripts/validate_sim_full_path_deployment.py --compose-json simulator-full-path-gate-evidence/compose.json
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p "$project" -f docker-compose.sim-full-path.yml config --quiet
+      - name: Build only the pinned full-path simulator test image
+        timeout-minutes: 10
+        run: |
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml build gate 2>&1 | tee simulator-full-path-gate-evidence/build.log
+      - name: Start only the disposable internal database
+        timeout-minutes: 3
+        run: |
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml up -d --wait --wait-timeout 90 timescaledb
+      - name: Run one bounded sealed full-path simulator proof
+        timeout-minutes: 5
+        run: |
+          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml)
+          "${compose[@]}" up -d --no-deps gate
+          gate_id=$("${compose[@]}" ps -a -q gate)
+          test -n "$gate_id"
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-sim-full-path-gate-20260919-r1
+          set +e
+          gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
+          wait_exit=$?
+          set -e
+          if [ "$wait_exit" -ne 0 ]; then
+            "${compose[@]}" stop --timeout 30 gate || true
+          fi
+          docker logs --timestamps "$gate_id" 2>&1 | tee simulator-full-path-gate-evidence/controller.log
+          printf '%s\n' "wait_exit=$wait_exit" "container_exit=$gate_exit" > simulator-full-path-gate-evidence/exit-status.txt
+          test "$wait_exit" -eq 0
+          test "$gate_exit" = 0
+      - name: Preserve synthetic evidence before hosted-runner disposal
+        if: always()
+        timeout-minutes: 3
+        run: |
+          mkdir -p simulator-full-path-gate-evidence
+          printf 'operation\tstatus\n' > simulator-full-path-gate-evidence/capture-status.tsv
+          if [ "${{ steps.fresh_project.outcome }}" != success ]; then
+            printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\n' >> simulator-full-path-gate-evidence/capture-status.tsv
+            exit 0
+          fi
+          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml)
+          set +e
+          "${compose[@]}" logs --no-color --timestamps > simulator-full-path-gate-evidence/services.log 2>&1
+          printf 'services\t%s\n' "$?" >> simulator-full-path-gate-evidence/capture-status.tsv
+          "${compose[@]}" ps -a --format json > simulator-full-path-gate-evidence/containers.json 2>&1
+          printf 'containers\t%s\n' "$?" >> simulator-full-path-gate-evidence/capture-status.tsv
+          "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_sim_full_path_gate_202609190001 --format=custom > simulator-full-path-gate-evidence/simulator.dump 2> simulator-full-path-gate-evidence/pg_dump.stderr
+          dump_status=$?
+          printf 'pg_dump\t%s\n' "$dump_status" >> simulator-full-path-gate-evidence/capture-status.tsv
+          if [ "$dump_status" -eq 0 ]; then
+            sha256sum simulator-full-path-gate-evidence/simulator.dump > simulator-full-path-gate-evidence/simulator.dump.sha256
+            printf 'pg_dump_sha256\t%s\n' "$?" >> simulator-full-path-gate-evidence/capture-status.tsv
+          fi
+          set -e
+      - name: Upload disposable synthetic evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: simulator-full-path-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: simulator-full-path-gate-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false

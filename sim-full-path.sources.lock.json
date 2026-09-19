@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "purpose": "isolated-full-path-market-data-simulator",
+  "classification": "SIMULATED",
+  "readiness": {
+    "paper_qualified": false,
+    "alpha_ready": false,
+    "live_ready": false,
+    "strategy_policy": "REJECT_ALL"
+  },
+  "build": {
+    "python": "3.11.15",
+    "uv": "0.12.3"
+  },
+  "dependencies": {
+    "kairos-core": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
+      "revision": "52aba6b158a52754784162987e7af4ad24c06669"
+    },
+    "kairos-persistence": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
+      "revision": "61c1483032ba4520f54f04618bbc2d0e830e27ae"
+    },
+    "kairos-strategy-engine": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
+      "revision": "6ccbd053b07833f301e7c3beaf08ffe36f1467c4"
+    },
+    "kairos-router": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-router",
+      "revision": "cb744270b27788e9eefc8945179a46030c48a83b"
+    },
+    "kairos-llm": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
+      "revision": "99f153bc9dddb13099c940e9a49d394140147d25"
+    },
+    "kairos-aggregator": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
+      "revision": "2d187b0ad391cd8db50beb824e507b439e10c41d"
+    },
+    "kairos-risk-manager": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
+      "revision": "a689e129ebf8f226f886995f3ea136a412bb58f5"
+    },
+    "kairos-execution-engine": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
+      "revision": "5f37b99758d53cb0b23b7d2e08679858700f3b76"
+    }
+  },
+  "infrastructure": {
+    "timescaledb": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
+  },
+  "gate": {
+    "project": "kairos-sim-full-path-gate-20260919-r1",
+    "database": "kairos_sim_full_path_gate_202609190001",
+    "confirmation": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
+  }
+}
