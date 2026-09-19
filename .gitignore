@@ -1,4 +1,5 @@
 *.env
+!tests/sim_gate/empty.env
 .env
 .env.paper
 !.env.example
