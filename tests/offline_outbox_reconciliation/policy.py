@@ -134,7 +134,10 @@ def validate_trusted_signer(path: Path, lock: dict[str, Any]) -> list[str]:
     except OSError:
         return ["offline outbox trusted signer file is missing"]
     signer = lock.get("trusted_receipt_signer") or {}
-    if hashlib.sha256(content).hexdigest() != signer.get("public_key_sha256"):
+    # Git's Windows checkout may safely convert ASCII-armored LF records to
+    # CRLF.  Pin the cryptographic material, not that transport-only choice.
+    canonical_content = content.replace(b"\r\n", b"\n")
+    if hashlib.sha256(canonical_content).hexdigest() != signer.get("public_key_sha256"):
         errors.append("offline outbox trusted signer file hash differs from source lock")
     text = content.decode("ascii", errors="replace")
     if not text.startswith("-----BEGIN PGP PUBLIC KEY BLOCK-----") or not text.rstrip().endswith(

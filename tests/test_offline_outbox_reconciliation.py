@@ -58,6 +58,13 @@ class OfflineOutboxPolicyTests(unittest.TestCase):
         self.assertEqual(policy.validate_dockerignore((TOOL_ROOT / ".dockerignore").read_text(encoding="utf-8")), [])
         self.assertEqual(policy.validate_compose(self.compose), [])
 
+    def test_ascii_armored_signer_hash_is_line_ending_invariant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            converted = Path(directory) / "trusted-signer.asc"
+            source = (TOOL_ROOT / "trusted-signer.asc").read_bytes().replace(b"\r\n", b"\n")
+            converted.write_bytes(source.replace(b"\n", b"\r\n"))
+            self.assertEqual(policy.validate_trusted_signer(converted, self.lock), [])
+
     def test_normal_up_cannot_start_a_reconciliation_service(self) -> None:
         self.assertEqual(policy.normal_up_services(self.compose), set())
         for service in self.compose["services"].values():
