@@ -298,10 +298,10 @@ dependencies = [
 requires-dist = [
     { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=2d187b0ad391cd8db50beb824e507b439e10c41d" },
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=52aba6b158a52754784162987e7af4ad24c06669" },
-    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=ec0a817097dbc654336b3308da6092e6db25514b" },
+    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=5f37b99758d53cb0b23b7d2e08679858700f3b76" },
     { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=99f153bc9dddb13099c940e9a49d394140147d25" },
     { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=61c1483032ba4520f54f04618bbc2d0e830e27ae" },
-    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=483f7857d2d2b2eb5440959d66fbf4fc1182d1dd" },
+    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=a689e129ebf8f226f886995f3ea136a412bb58f5" },
     { name = "kairos-router", git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=cb744270b27788e9eefc8945179a46030c48a83b" },
     { name = "kairos-strategy-engine", git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git?rev=6ccbd053b07833f301e7c3beaf08ffe36f1467c4" },
     { name = "pytest", specifier = "==9.1.1" },
@@ -311,7 +311,7 @@ requires-dist = [
 [[package]]
 name = "kairos-execution-engine"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=ec0a817097dbc654336b3308da6092e6db25514b#ec0a817097dbc654336b3308da6092e6db25514b" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=5f37b99758d53cb0b23b7d2e08679858700f3b76#5f37b99758d53cb0b23b7d2e08679858700f3b76" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
@@ -348,7 +348,7 @@ dependencies = [
 [[package]]
 name = "kairos-risk-manager"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=483f7857d2d2b2eb5440959d66fbf4fc1182d1dd#483f7857d2d2b2eb5440959d66fbf4fc1182d1dd" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=a689e129ebf8f226f886995f3ea136a412bb58f5#a689e129ebf8f226f886995f3ea136a412bb58f5" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
