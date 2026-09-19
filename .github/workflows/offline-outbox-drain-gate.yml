@@ -1,0 +1,139 @@
+name: offline-outbox-drain-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.outbox-drain.yml"
+      - "outbox-drain.sources.lock.json"
+      - ".env.outbox-drain.example"
+      - "scripts/Invoke-OfflineOutboxDrain.ps1"
+      - "scripts/validate_offline_outbox_drain.py"
+      - "tests/offline_outbox_drain/**"
+      - "tests/test_offline_outbox_drain.py"
+      - ".github/workflows/offline-outbox-drain-gate.yml"
+  pull_request:
+    paths:
+      - "docker-compose.outbox-drain.yml"
+      - "outbox-drain.sources.lock.json"
+      - ".env.outbox-drain.example"
+      - "scripts/Invoke-OfflineOutboxDrain.ps1"
+      - "scripts/validate_offline_outbox_drain.py"
+      - "tests/offline_outbox_drain/**"
+      - "tests/test_offline_outbox_drain.py"
+      - ".github/workflows/offline-outbox-drain-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Signed prefix policy / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - name: Validate sealed drain source and Dockerfile
+        run: python scripts/validate_offline_outbox_drain.py --verify-remote
+      - name: Run hermetic drain policy tests
+        run: python -m unittest tests/test_offline_outbox_drain.py -v
+
+  docker-integration:
+    name: Actual signed-prefix primitive / PostgreSQL / Redis
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Require a fresh disposable integration project
+        id: fresh_project
+        timeout-minutes: 2
+        run: |
+          mkdir offline-outbox-drain-evidence
+          git rev-parse HEAD > offline-outbox-drain-evidence/deploy-revision.txt
+          project=kairos-offline-outbox-drain-gate
+          test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
+          docker compose -p "$project" -f tests/offline_outbox_drain/integration-compose.yml config --format json > offline-outbox-drain-evidence/integration-compose.json
+          docker compose -p "$project" -f tests/offline_outbox_drain/integration-compose.yml config --quiet
+          docker compose --profile offline-outbox-drain-inspect --profile offline-outbox-drain-apply --env-file .env.outbox-drain.example -f docker-compose.outbox-drain.yml config --format json > offline-outbox-drain-evidence/operational-compose.json
+          python scripts/validate_offline_outbox_drain.py --compose-json offline-outbox-drain-evidence/operational-compose.json --dockerfile tests/offline_outbox_drain/Dockerfile
+      - name: Build only the sealed drain image
+        timeout-minutes: 12
+        run: |
+          docker compose --profile offline-outbox-drain-apply --env-file .env.outbox-drain.example -f docker-compose.outbox-drain.yml build outbox-drainer 2>&1 | tee offline-outbox-drain-evidence/build.log
+      - name: Start only disposable isolated data services
+        timeout-minutes: 3
+        run: |
+          docker compose -p kairos-offline-outbox-drain-gate -f tests/offline_outbox_drain/integration-compose.yml up -d --wait --wait-timeout 90 timescaledb redis
+      - name: Exercise an exact cap with real durable state and Redis streams
+        timeout-minutes: 5
+        run: |
+          project=kairos-offline-outbox-drain-gate
+          image=kairos-offline-outbox-drain:20260920-r1
+          data_network=${project}_data
+          bus_network=${project}_bus
+          container_id=$(docker create \
+            --network "$data_network" \
+            --mount "type=bind,src=$PWD/tests/offline_outbox_drain/integration.py,dst=/app/integration.py,readonly" \
+            --env KAIROS_DRAIN_TEST_DATABASE_URL=postgresql://kairos:kairos_test@timescaledb:5432/kairos_outbox_drain_test_20260920 \
+            --env KAIROS_DRAIN_TEST_REDIS_URL=redis://redis:6379/0 \
+            --entrypoint python \
+            "$image" /app/integration.py)
+          docker network connect "$bus_network" "$container_id"
+          set +e
+          set -o pipefail
+          run_exit=0
+          timeout --signal=TERM --kill-after=15s 180s docker start -a "$container_id" 2>&1 | tee offline-outbox-drain-evidence/integration.log || run_exit=$?
+          set -e
+          docker inspect "$container_id" > offline-outbox-drain-evidence/integration-container.json
+          printf 'run_exit=%s\n' "$run_exit" > offline-outbox-drain-evidence/exit-status.txt
+          test "$run_exit" -eq 0
+      - name: Preserve disposable synthetic evidence before hosted-runner disposal
+        if: always()
+        timeout-minutes: 3
+        run: |
+          mkdir -p offline-outbox-drain-evidence
+          if [ "${{ steps.fresh_project.outcome }}" != success ]; then
+            printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\n' > offline-outbox-drain-evidence/capture-status.tsv
+            exit 0
+          fi
+          compose=(docker compose -p kairos-offline-outbox-drain-gate -f tests/offline_outbox_drain/integration-compose.yml)
+          printf 'operation\tstatus\n' > offline-outbox-drain-evidence/capture-status.tsv
+          "${compose[@]}" logs --no-color --timestamps > offline-outbox-drain-evidence/services.log
+          printf 'services\tCOMPLETE\n' >> offline-outbox-drain-evidence/capture-status.tsv
+          "${compose[@]}" ps -a --format json > offline-outbox-drain-evidence/containers.json
+          printf 'containers\tCOMPLETE\n' >> offline-outbox-drain-evidence/capture-status.tsv
+          "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_outbox_drain_test_20260920 --format=custom > offline-outbox-drain-evidence/synthetic.dump
+          sha256sum offline-outbox-drain-evidence/synthetic.dump > offline-outbox-drain-evidence/synthetic.dump.sha256
+          printf 'pg_dump\tCOMPLETE\n' >> offline-outbox-drain-evidence/capture-status.tsv
+      - name: Upload disposable synthetic evidence
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-outbox-drain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: offline-outbox-drain-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false

@@ -68,6 +68,29 @@ ID. The profile has no egress network, no ports, no volume, no background
 dispatcher, and no EVEDEX, provider or general PAPER secrets. It is unexecuted
 engineering support until a future independently authorized recovery procedure.
 
+## Signed bounded outbox drain
+
+[`docker-compose.outbox-drain.yml`](docker-compose.outbox-drain.yml) is a
+separate recovery-only tool for the backlog *after* an expired lease has been
+resolved by the exact-row procedure above. It cannot run against the historical
+`001`--`012` recovery profile: the inspector requires the explicitly reviewed
+`001`--`018` schema, including the durable `PUBLISHING` and
+`PUBLISH_OUTCOME_UNKNOWN` states. Reaching that profile therefore requires a
+separate backuped, reviewed migration window; the drain never runs migrations.
+
+Its v1 scope is intentionally narrow: only the precommitted
+`kairos-quant-scouts` prefix on `kairos.market.closed_bar.v1`, at most 100 rows
+and 300 seconds per signed plan. The read-only inspector records a redacted,
+ordered exact prefix. Apply requires its fresh (five-minute), detached-GPG-signed
+receipt, exact file SHA-256, and `-ArmApply`. Each row becomes durable
+`PUBLISHING` before one Redis publish attempt. A Redis timeout, cancellation, or
+database ACK uncertainty becomes `PUBLISH_OUTCOME_UNKNOWN` and ends the whole
+run; no wrapper retry or ordinary dispatcher is permitted.
+
+The acceptance receipt proves only Redis submission and durable ACK for the
+signed prefix. It is not evidence that downstream services processed the bars,
+does not restart consumers, and cannot change PAPER, alpha, or LIVE readiness.
+
 ## Runtime topology
 
 | Container | Responsibility | External access |

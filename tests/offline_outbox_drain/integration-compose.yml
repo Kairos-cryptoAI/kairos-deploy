@@ -1,0 +1,33 @@
+name: kairos-offline-outbox-drain-gate
+
+# Disposable CI/local integration fixture. It is not the operational drain
+# profile and contains no application service or host-published port.
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    environment:
+      POSTGRES_USER: kairos
+      POSTGRES_PASSWORD: kairos_test
+      POSTGRES_DB: kairos_outbox_drain_test_20260920
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_outbox_drain_test_20260920"]
+      interval: 5s
+      timeout: 3s
+      retries: 18
+    networks: [data]
+
+  redis:
+    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 18
+    networks: [bus]
+
+networks:
+  data:
+    internal: true
+  bus:
+    internal: true

@@ -1,0 +1,81 @@
+name: kairos-offline-outbox-drain-20260920-r1
+
+# A recovery-only one-shot profile. It does not extend docker-compose.paper.yml
+# and cannot start a service without an explicit profile. The inspector reaches
+# PostgreSQL only; Redis is exposed to the drainer only after receipt signature
+# verification and the wrapper's explicit apply arm.
+x-outbox-drain-build: &outbox-drain-build
+  build:
+    context: tests/offline_outbox_drain
+    dockerfile: Dockerfile
+    pull: true
+    args:
+      PERSISTENCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
+      PERSISTENCE_REVISION: 9219e5ef46c748703d949b324d84f6814ba0f196
+
+x-outbox-drain-runtime: &outbox-drain-runtime
+  <<: *outbox-drain-build
+  image: kairos-offline-outbox-drain:20260920-r1
+  entrypoint: ["python", "/app/offline_outbox_drain.py"]
+  command:
+    - --mode
+    - inspect
+    - --plan
+    - /run/secrets/offline_outbox_drain_plan
+    - --database-url-file
+    - /run/secrets/offline_outbox_drain_database_url
+  read_only: true
+  mem_limit: 384m
+  cpus: 0.5
+  pids_limit: 64
+  tmpfs: ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: "no"
+
+services:
+  outbox-drain-inspector:
+    <<: *outbox-drain-runtime
+    profiles: [offline-outbox-drain-inspect]
+    secrets:
+      - source: offline_outbox_drain_plan
+        target: offline_outbox_drain_plan
+      - source: offline_outbox_drain_database_url
+        target: offline_outbox_drain_database_url
+    networks: [offline-data]
+
+  outbox-drainer:
+    <<: *outbox-drain-runtime
+    profiles: [offline-outbox-drain-apply]
+    secrets:
+      - source: offline_outbox_drain_plan
+        target: offline_outbox_drain_plan
+      - source: offline_outbox_drain_receipt
+        target: offline_outbox_drain_receipt
+      - source: offline_outbox_drain_receipt_signature
+        target: offline_outbox_drain_receipt_signature
+      - source: offline_outbox_drain_database_url
+        target: offline_outbox_drain_database_url
+      - source: offline_outbox_drain_redis_url
+        target: offline_outbox_drain_redis_url
+    networks: [offline-data, offline-bus]
+
+networks:
+  offline-data:
+    external: true
+    name: ${KAIROS_OFFLINE_OUTBOX_DRAIN_DATA_NETWORK:?set a verified isolated PostgreSQL network}
+  offline-bus:
+    external: true
+    name: ${KAIROS_OFFLINE_OUTBOX_DRAIN_BUS_NETWORK:?set a verified isolated Redis network}
+
+secrets:
+  offline_outbox_drain_plan:
+    file: ${KAIROS_OFFLINE_OUTBOX_DRAIN_INPUT_DIR:?set an explicit operator input directory}/plan.json
+  offline_outbox_drain_receipt:
+    file: ${KAIROS_OFFLINE_OUTBOX_DRAIN_INPUT_DIR:?set an explicit operator input directory}/inspection.json
+  offline_outbox_drain_receipt_signature:
+    file: ${KAIROS_OFFLINE_OUTBOX_DRAIN_INPUT_DIR:?set an explicit operator input directory}/inspection.json.asc
+  offline_outbox_drain_database_url:
+    file: ${KAIROS_OFFLINE_OUTBOX_DRAIN_SECRETS_DIR:?set a scoped drain secrets directory}/persistence_database_url
+  offline_outbox_drain_redis_url:
+    file: ${KAIROS_OFFLINE_OUTBOX_DRAIN_SECRETS_DIR:?set a scoped drain secrets directory}/redis_url

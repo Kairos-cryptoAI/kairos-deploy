@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "purpose": "operator-assisted-bounded-offline-outbox-drain",
+  "classification": "ENGINEERING_RECOVERY_ONLY",
+  "readiness": {
+    "paper_qualified": false,
+    "alpha_ready": false,
+    "live_ready": false,
+    "strategy_policy": "REJECT_ALL"
+  },
+  "build": {
+    "python": "3.11.15",
+    "uv": "0.12.3"
+  },
+  "dependencies": {
+    "kairos-core": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
+      "revision": "52aba6b158a52754784162987e7af4ad24c06669"
+    },
+    "kairos-persistence": {
+      "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
+      "revision": "9219e5ef46c748703d949b324d84f6814ba0f196"
+    }
+  },
+  "trusted_receipt_signer": {
+    "fingerprint": "40AF365C6682B73D056A6A274DBFF6B65BE9F827",
+    "public_key_file": "tests/offline_outbox_drain/trusted-signer.asc",
+    "public_key_sha256": "3d130656e0fdff59c5efd44cb0779ea89af49b5684a3435863d24d403ccf9358"
+  },
+  "profile": {
+    "project": "kairos-offline-outbox-drain-20260920-r1",
+    "inspect_profile": "offline-outbox-drain-inspect",
+    "apply_profile": "offline-outbox-drain-apply",
+    "apply_confirmation": "OFFLINE_OUTBOX_SIGNED_PREFIX_ONLY",
+    "maximum_receipt_age_seconds": 300,
+    "maximum_rows": 100,
+    "maximum_duration_seconds": 300,
+    "required_migrations": [
+      "001_audit_and_idempotency.sql",
+      "002_durable_runtime.sql",
+      "003_execution_effect_journal.sql",
+      "004_execution_recovery_delay.sql",
+      "005_source_state_and_usage.sql",
+      "006_paper_trade_lifecycle.sql",
+      "007_execution_runtime_health.sql",
+      "008_public_execution_events.sql",
+      "009_paper_canary_arms.sql",
+      "010_runtime_compensation_reserve.sql",
+      "011_execution_mutation_budget.sql",
+      "012_outbox_producer_order.sql",
+      "013_campaign_source_budgets.sql",
+      "014_bounded_canary_sessions.sql",
+      "015_canary_dispatch_claims.sql",
+      "016_global_canary_session_guard.sql",
+      "017_simulator_journal.sql",
+      "018_offline_outbox_reconciliation.sql"
+    ],
+    "allowed_producer": "kairos-quant-scouts",
+    "allowed_topic": "kairos.market.closed_bar.v1"
+  }
+}
