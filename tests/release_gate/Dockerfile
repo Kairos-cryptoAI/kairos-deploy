@@ -27,5 +27,5 @@ ENV PATH=/app/.venv/bin:${PATH} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYT
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /tmp/execution-fixtures/tests /work/execution-fixtures/tests
 WORKDIR /work/release_gate
-COPY policy.py witness.py test_policy.py test_witness.py test_pipeline.py pyproject.toml compose.yml Dockerfile ./
-CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--capture=tee-sys", "--tb=short", "test_policy.py", "test_witness.py", "test_pipeline.py"]
+COPY policy.py witness.py test_policy.py test_witness.py test_full_path.py test_pipeline.py pyproject.toml compose.yml Dockerfile ./
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--capture=tee-sys", "--tb=short", "test_policy.py", "test_witness.py", "test_full_path.py", "test_pipeline.py"]

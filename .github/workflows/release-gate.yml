@@ -39,7 +39,7 @@ jobs:
           cache-dependency-glob: tests/release_gate/uv.lock
       - run: uv sync --locked --no-editable
       - name: Hermetic policy checks without data services
-        run: uv run --locked --no-sync python -m pytest -q -p no:cacheprovider test_policy.py test_witness.py
+        run: uv run --locked --no-sync python -m pytest -q -p no:cacheprovider test_policy.py test_witness.py test_full_path.py
 
   risk-execution:
     name: Actual Risk / Redis / PostgreSQL / Execution

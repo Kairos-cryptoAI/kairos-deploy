@@ -200,6 +200,7 @@ def test_workflow_uses_the_same_isolated_targets_as_policy():
     text = workflow.read_text(encoding="utf-8")
     assert set(re.findall(r"kairos-release-gate-[a-z0-9-]+", text)) == {policy.PROJECT}
     assert set(re.findall(r"kairos_execution_test_[0-9]+", text)) == {policy.DATABASE}
+    assert "test_full_path.py" in text
 
 
 @pytest.mark.parametrize(

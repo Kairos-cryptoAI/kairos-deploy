@@ -11,44 +11,52 @@ is modified by this directory.
 ## Scope of evidence
 
 The gate uses the exact published, non-editable Git installations pinned in
-`pyproject.toml` and `uv.lock`: Core `91cd95c`, Persistence `526c30f`, Risk `a10649c`,
-and Execution `73122e8`. It checks Git provenance **and actual imported module
-paths** against each installed distribution in `site-packages`. `PYTHONPATH`
+`pyproject.toml` and `uv.lock`: Core `91cd95c`, Persistence `526c30f`, Strategy
+Engine `6a16440`, Router `053e90b`, LLM `d824343`, Aggregator `cef4928`, Risk
+`a10649c`, and Execution `73122e8`. It checks Git provenance **and actual imported
+module paths** against each installed distribution in `site-packages`. `PYTHONPATH`
 contains only this harness and the tests from the exact Execution commit; it does
 not contain a production source checkout.
 
 The intended test path is:
 
-1. An explicitly synthetic, hash-chained 24-hour receipt fixture is checked by
+1. A hermetic contract test runs one deterministic closed Binance 1m-bar stream
+   through the real Strategy generator, Router policy, Aggregator review boundary,
+   PAPER Risk policy and PAPER Execution rejection boundary. Its local gateway always
+   fails rather than calling an LLM, so the review must be `DEFER`, Risk must reject
+   the frozen strategy, and Execution must return without touching a venue or creating
+   even synthetic secret files.
+2. An explicitly synthetic, hash-chained 24-hour receipt fixture is checked by
    the real session repository. The real bounded session and arm transactions
    stage the review and bound canary allocation in the durable outbox.
-2. The real `RiskService.run()` restores persisted reservations and runs its
+3. The real `RiskService.run()` restores persisted reservations and runs its
    normal Redis consumers. Account and venue inputs arrive over the actual bus.
    Its real `PaperRiskCoordinator` computes the decision; the test does **not**
    inject a pre-approved risk decision.
-3. The real `DurableMessageBus`, PostgreSQL inbox/outbox, and Redis Streams carry
+4. The real `DurableMessageBus`, PostgreSQL inbox/outbox, and Redis Streams carry
    the decision to the actual Execution initialization/decision-consumer path.
    The actual engine uses the real arm, session, final-dispatch admission, journal
    and recovery repositories. Only the venue adapter is synthetic. The full
    `ExecutionService.run()` and sidecar network loops are deliberately not run.
-4. A thin real-Redis transport observer checks from a separate database
+5. A thin real-Redis transport observer checks from a separate database
    connection that Risk decisions/lifecycle facts and inbox completion are
    committed **before** Redis ACK. It then injects one lost execution ACK.
-5. Fresh Risk and Execution service instances recover from the durable state.
+6. Fresh Risk and Execution service instances recover from the durable state.
    Only that synthetic pending Redis message is aged to exercise the unchanged
    production reclaim threshold. Reclaim and new-ID duplicate deliveries must
    not produce a second decision, entry or dispatch claim.
-6. Admission is stopped. Existing protection and timeout recovery continue even
+7. Admission is stopped. Existing protection and timeout recovery continue even
    when the restarted engine has no scope file. The final trade must be flat,
    effects resolved, inboxes completed, outboxes published, and checked Redis
    pending lists empty.
 
 Technical canary sizing uses the exact arm-bound allocation (1x, 0.25% weight and
 99.75% reserve); this does not assert that an external Macro stream controls that
-canary. The receipt, market book, fills and account are synthetic. Neither the
-full Strategy/Router/LLM path nor venue authenticity, liquidity, slippage,
-profitability, five-symbol scenario coverage or genuine 24-hour/7-day gates are
-proven here. Paid LLM/X APIs and real exchange calls are absent.
+canary. The receipt, market book, fills and account are synthetic. The gate proves
+the fail-closed Strategy/Router/Aggregator/Risk/Execution path for the current frozen
+candidate; it does not prove a successful LLM approval, Macro allocation service,
+venue authenticity, liquidity, slippage, profitability, five-symbol scenario coverage
+or genuine 24-hour/7-day gates. Paid LLM/X APIs and real exchange calls are absent.
 
 Redis persistence is deliberately disabled and PostgreSQL uses tmpfs. This gate
 proves **application-service restart and commit-before-ACK semantics while the
@@ -76,7 +84,8 @@ Hermetic policy tests (no network/data service) can be run on Windows with the
 existing locked Python environment and an explicit test-file selector:
 
 ```powershell
-D:\Kairos\kairos-execution-engine\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider tests/release_gate/test_policy.py tests/release_gate/test_witness.py
+cd D:\Kairos\kairos-deploy\tests\release_gate
+uv run --locked python -m pytest -q -p no:cacheprovider test_policy.py test_witness.py test_full_path.py
 ```
 
 After approval and verifying that no prior resources carry this project's name,
