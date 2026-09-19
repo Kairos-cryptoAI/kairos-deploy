@@ -8,25 +8,30 @@ are pinned by tag and digest.
 
 Use `scripts/Invoke-LongGapRecovery.ps1` only for `kairos-paper-gate`, with its
 explicit `-EnvFile`, a closed UTC `-EndExclusiveMs` and `-MaximumBars` (at most
-150000). Stop quant, strategy, risk and any execution/canary consumers first,
+150000), and the exact `-ExpectedDatabaseName`. Stop quant, strategy, risk and any execution/canary consumers first,
 preserve a new PostgreSQL backup, and build the manifest-pinned quant image.
 The wrapper refuses any active non-infrastructure service or stale image.
 `-ValidateOnly` checks these conditions without launching data repair.
+For a resumable bounded increment, pass `-MaximumAppendBars` no greater than
+`-MaximumBars` and retain the same fixed end boundary for each invocation.
 
 The actual job uses only the existing infrastructure secrets and public Binance
 REST. It verifies a contiguous persisted prefix and two identical REST responses
-per page, then writes through the original atomic audit/outbox path. A shared
-PostgreSQL producer lease prevents a second updated quant/recovery writer.
-No strategy, venue order, paid API, secret import or cursor deletion is performed.
-Output records start, per-symbol progress/retrieval time and completion/failure.
-Run long jobs in a hidden supervised process with preserved stdout/stderr.
+per page, then writes through an isolated atomic audit/outbox writer. The writer
+requires exactly migrations `001` through `012`, never performs a migration or
+starts Redis/outbox dispatch, and holds the migration guard plus the shared
+PostgreSQL producer lease. No strategy, venue order, paid API, secret import or
+cursor deletion is performed. Output records start, per-symbol progress/retrieval
+time and completion/failure. Run long jobs in a hidden supervised process with
+preserved stdout/stderr.
 
 After completion, independently verify bar continuity and pending outbox state
 before restarting only the previously stopped read-only services. Do not count
 retrospective recovery as uninterrupted uptime or a 24-hour DEV qualification.
 `scripts/Test-LongGapRecovery.ps1` checks offline preflight; the separate Docker
 integration harness requires an explicitly disposable `kairos_gap_drill_*`
-database and validates commit-before-ACK recovery, deduplication and the lease.
+database, seeds its exact `001`--`012` profile outside the writer, and validates
+commit-before-ACK recovery, deduplication and the exclusive offline-writer lease.
 
 ## Runtime topology
 

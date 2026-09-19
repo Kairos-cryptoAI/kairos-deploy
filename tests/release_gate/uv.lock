@@ -172,7 +172,7 @@ dependencies = [
 [[package]]
 name = "kairos-execution-engine"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=641a08045c70f15ab9d7a5b04e54ed0928a71529#641a08045c70f15ab9d7a5b04e54ed0928a71529" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=73122e825b333281d4fd4acce1c57f90c4cc511c#73122e825b333281d4fd4acce1c57f90c4cc511c" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
@@ -186,7 +186,7 @@ dependencies = [
 [[package]]
 name = "kairos-persistence"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=730ff1a878305ffef80a07a615795208a0372091#730ff1a878305ffef80a07a615795208a0372091" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=526c30feddcaf4b7147449e6e513fec61c43d75f#526c30feddcaf4b7147449e6e513fec61c43d75f" }
 dependencies = [
     { name = "asyncpg" },
     { name = "kairos-core" },
@@ -211,9 +211,9 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=91cd95c8e5bd4393ed04606df08c205583092df7" },
-    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=641a08045c70f15ab9d7a5b04e54ed0928a71529" },
-    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=730ff1a878305ffef80a07a615795208a0372091" },
-    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=145c3b1deba381a966374867e43c734fdc5e7211" },
+    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=73122e825b333281d4fd4acce1c57f90c4cc511c" },
+    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=526c30feddcaf4b7147449e6e513fec61c43d75f" },
+    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=a10649ce2e6b802214ff48436c93fd2322f140bf" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-asyncio", specifier = "==1.4.0" },
     { name = "pyyaml", specifier = "==6.0.3" },
@@ -222,7 +222,7 @@ requires-dist = [
 [[package]]
 name = "kairos-risk-manager"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=145c3b1deba381a966374867e43c734fdc5e7211#145c3b1deba381a966374867e43c734fdc5e7211" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=a10649ce2e6b802214ff48436c93fd2322f140bf#a10649ce2e6b802214ff48436c93fd2322f140bf" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },

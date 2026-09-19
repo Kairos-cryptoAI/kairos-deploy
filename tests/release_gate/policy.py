@@ -30,9 +30,9 @@ RESOURCE_LIMITS = {
 }
 PINS = {
     "kairos-core": "91cd95c8e5bd4393ed04606df08c205583092df7",
-    "kairos-persistence": "730ff1a878305ffef80a07a615795208a0372091",
-    "kairos-risk-manager": "145c3b1deba381a966374867e43c734fdc5e7211",
-    "kairos-execution-engine": "641a08045c70f15ab9d7a5b04e54ed0928a71529",
+    "kairos-persistence": "526c30feddcaf4b7147449e6e513fec61c43d75f",
+    "kairos-risk-manager": "a10649ce2e6b802214ff48436c93fd2322f140bf",
+    "kairos-execution-engine": "73122e825b333281d4fd4acce1c57f90c4cc511c",
 }
 MODULES = {
     "kairos-core": "kairos_core",

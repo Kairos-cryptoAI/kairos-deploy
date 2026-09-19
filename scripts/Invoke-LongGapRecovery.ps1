@@ -3,10 +3,16 @@ param(
     [ValidateSet('kairos-paper-gate')][string]$ComposeProject = 'kairos-paper-gate',
     [Parameter(Mandatory)][string]$EnvFile,
     [Parameter(Mandatory)][long]$EndExclusiveMs,
+    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z_][A-Za-z0-9_-]{0,62}$')][string]$ExpectedDatabaseName,
     [ValidateRange(1, 150000)][int]$MaximumBars = 150000,
+    [ValidateRange(1, 150000)][int]$MaximumAppendBars,
     [switch]$ValidateOnly
 )
 $ErrorActionPreference = 'Stop'
+
+if ($PSBoundParameters.ContainsKey('MaximumAppendBars') -and $MaximumAppendBars -gt $MaximumBars) {
+    throw 'MaximumAppendBars cannot exceed MaximumBars.'
+}
 
 function Assert-RecoveryIsolation([string[]]$RunningServices) {
     $allowed = @('redis', 'timescaledb', 'ops-exporter', 'prometheus', 'grafana')
@@ -40,6 +46,15 @@ if ($actual -ne $expected) { throw 'Quant image does not match the pinned manife
 if ($ValidateOnly) { Write-Output 'Recovery isolation, deadline and pinned image checks passed.'; return }
 $name = 'kairos-gap-recovery-' + [Guid]::NewGuid().ToString('N')
 Write-Output ('Recovery container: ' + $name)
-& docker @compose run --rm --no-deps -T --name $name quant-scouts python -m kairos_quant.long_gap_recovery --end-exclusive-ms $EndExclusiveMs --maximum-bars $MaximumBars --offline-consumers-confirmed
+$recoveryArguments = @(
+    '--end-exclusive-ms', $EndExclusiveMs,
+    '--maximum-bars', $MaximumBars,
+    '--expected-database-name', $ExpectedDatabaseName
+)
+if ($PSBoundParameters.ContainsKey('MaximumAppendBars')) {
+    $recoveryArguments += @('--maximum-append-bars', $MaximumAppendBars)
+}
+$recoveryArguments += '--offline-consumers-confirmed'
+& docker @compose run --rm --no-deps -T --name $name quant-scouts python -m kairos_quant.long_gap_recovery @recoveryArguments
 if ($LASTEXITCODE -ne 0) { throw 'Bar recovery failed; preserve logs and resume only after diagnosis.' }
 Write-Output 'Bar recovery completed. Validate durable continuity before restarting read-only consumers.'
