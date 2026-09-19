@@ -8,8 +8,8 @@ import json
 import os
 from pathlib import Path
 
-PROJECT = "kairos-release-gate-20260919-r2"
-DATABASE = "kairos_execution_test_202609190002"
+PROJECT = "kairos-release-gate-20260919-r3"
+DATABASE = "kairos_execution_test_202609190003"
 # Deliberately public synthetic credential, valid only in this new internal project.
 DATABASE_URL = f"postgresql://kairos:synthetic_release_gate_only@timescaledb:5432/{DATABASE}"
 REDIS_URL = "redis://redis:6379/0"

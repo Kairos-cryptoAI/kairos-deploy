@@ -1,4 +1,4 @@
-name: kairos-release-gate-20260919-r2
+name: kairos-release-gate-20260919-r3
 
 services:
   timescaledb:
@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: kairos
       POSTGRES_PASSWORD: synthetic_release_gate_only
-      POSTGRES_DB: kairos_execution_test_202609190002
+      POSTGRES_DB: kairos_execution_test_202609190003
     command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40", "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4"]
     tmpfs:
       - /var/lib/postgresql/data:rw,nosuid,size=512m
@@ -14,7 +14,7 @@ services:
     mem_limit: 768m
     networks: [isolated]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_execution_test_202609190002"]
+      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_execution_test_202609190003"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -37,12 +37,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: kairos-release-gate-tests:20260919-r2
+    image: kairos-release-gate-tests:20260919-r3
     environment:
       KAIROS_RELEASE_GATE_CONFIRM: ISOLATED_SYNTHETIC_RELEASE_GATE_ONLY
-      KAIROS_RELEASE_GATE_PROJECT: kairos-release-gate-20260919-r2
-      KAIROS_EXECUTION_TEST_DATABASE: kairos_execution_test_202609190002
-      KAIROS_PERSISTENCE_DATABASE_URL: postgresql://kairos:synthetic_release_gate_only@timescaledb:5432/kairos_execution_test_202609190002
+      KAIROS_RELEASE_GATE_PROJECT: kairos-release-gate-20260919-r3
+      KAIROS_EXECUTION_TEST_DATABASE: kairos_execution_test_202609190003
+      KAIROS_PERSISTENCE_DATABASE_URL: postgresql://kairos:synthetic_release_gate_only@timescaledb:5432/kairos_execution_test_202609190003
       KAIROS_REDIS_URL: redis://redis:6379/0
     depends_on:
       timescaledb: {condition: service_healthy}

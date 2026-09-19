@@ -67,8 +67,8 @@ real DEV qualification remain necessary. A passing result never sets
 
 ## Isolation and execution policy
 
-- New project: `kairos-release-gate-20260919-r2`; exact database:
-  `kairos_execution_test_202609190002`.
+- New project: `kairos-release-gate-20260919-r3`; exact database:
+  `kairos_execution_test_202609190003`.
 - Internal, unshared network; no host ports, host mounts, existing volumes,
   external networks, `.env`, inherited secrets or production credentials.
 - Public synthetic credentials exist only in this test configuration.
@@ -92,9 +92,9 @@ After approval and verifying that no prior resources carry this project's name,
 the isolated Linux gate can be invoked from the deploy repository:
 
 ```powershell
-docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml build gate
-docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
-docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml run --no-deps -T gate
+docker compose -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml build gate
+docker compose -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
+docker compose -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml run --no-deps -T gate
 ```
 
 Capture the full output and exact image/revision identities before inspecting or

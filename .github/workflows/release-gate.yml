@@ -59,34 +59,34 @@ jobs:
         run: |
           mkdir release-gate-evidence
           git rev-parse HEAD > release-gate-evidence/deploy-revision.txt
-          containers=$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=kairos-release-gate-20260919-r2)
+          containers=$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=kairos-release-gate-20260919-r3)
           test -z "$containers"
-          networks=$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260919-r2)
+          networks=$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260919-r3)
           test -z "$networks"
-          volumes=$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260919-r2)
+          volumes=$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=kairos-release-gate-20260919-r3)
           test -z "$volumes"
-          timeout --kill-after=5s 10s docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml config --quiet
+          timeout --kill-after=5s 10s docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml config --quiet
       - name: Build only the pinned test image
         timeout-minutes: 10
         run: |
-          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml build gate 2>&1 | tee release-gate-evidence/build.log
+          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml build gate 2>&1 | tee release-gate-evidence/build.log
       - name: Start only the fresh synthetic data services
         timeout-minutes: 3
         run: |
-          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
+          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
       - name: Run one bounded pipeline verification
         timeout-minutes: 5
         run: |
-          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml up -d --no-deps gate
-          gate_id=$(docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml ps -a -q gate)
+          docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml up -d --no-deps gate
+          gate_id=$(docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml ps -a -q gate)
           test -n "$gate_id"
-          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-release-gate-20260919-r2
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-release-gate-20260919-r3
           set +e
           gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
           wait_exit=$?
           set -e
           if [ "$wait_exit" -ne 0 ]; then
-            docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml stop --timeout 30 gate
+            docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml stop --timeout 30 gate
           fi
           docker logs --timestamps "$gate_id" 2>&1 | tee release-gate-evidence/pipeline.log
           printf '%s\n' "wait_exit=$wait_exit" "container_exit=$gate_exit" > release-gate-evidence/exit-status.txt
@@ -103,7 +103,7 @@ jobs:
             printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\t-\n' >> "$status_file"
             exit 0
           fi
-          compose=(docker compose --env-file /dev/null -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml)
+          compose=(docker compose --env-file /dev/null -p kairos-release-gate-20260919-r3 -f tests/release_gate/compose.yml)
           capture_failures=0
           capture() {
             local operation=$1 duration=$2 output=$3
@@ -122,7 +122,7 @@ jobs:
           capture images 10s images.json "${compose[@]}" images --format json
           capture postgres_lookup 10s postgres-container.txt "${compose[@]}" ps -q timescaledb
           if [ "$capture_exit" -eq 0 ] && [ -s release-gate-evidence/postgres-container.txt ]; then
-            capture pg_dump 80s synthetic-database.dump.partial "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_execution_test_202609190002 --format=custom
+            capture pg_dump 80s synthetic-database.dump.partial "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_execution_test_202609190003 --format=custom
             if [ "$capture_exit" -eq 0 ]; then
               mv release-gate-evidence/synthetic-database.dump.partial release-gate-evidence/synthetic-database.dump
               sha256sum release-gate-evidence/synthetic-database.dump > release-gate-evidence/synthetic-database.dump.sha256
