@@ -15,6 +15,14 @@ The wrapper refuses any active non-infrastructure service or stale image.
 For a resumable bounded increment, pass `-MaximumAppendBars` no greater than
 `-MaximumBars` and retain the same fixed end boundary for each invocation.
 
+Before an original database is repaired, run the backup through
+`Test-Recovery.ps1 -RuntimePreflight`.  It restores only a disposable drill clone,
+checks the exact offline `001`--`012` migration profile, five contiguous Binance
+bar prefixes, inbox/outbox identity and advisory leases, then emits a sanitized
+receipt beside the immutable backup.  An expired outbox lease is recorded rather
+than silently cleared: it blocks restarting read-only consumers, but does not
+permit a dispatcher or any trading service to start during the offline repair.
+
 The actual job uses only the existing infrastructure secrets and public Binance
 REST. It verifies a contiguous persisted prefix and two identical REST responses
 per page, then writes through an isolated atomic audit/outbox writer. The writer
@@ -254,11 +262,17 @@ For the isolated PAPER project, both the project and database identity are expli
 must match the integrity manifest:
 
 ```powershell
-$manifest = scripts\Backup-Kairos.ps1 -ComposeProject kairos-paper `
-  -ComposeFile docker-compose.paper.yml -EnvFile .env.paper -Database kairos
-scripts\Test-Recovery.ps1 -ManifestPath $manifest -ComposeProject kairos-paper `
-  -ComposeFile docker-compose.paper.yml -EnvFile .env.paper -Database kairos
+$manifest = scripts\Backup-Kairos.ps1 -ComposeProject kairos-paper-gate `
+  -ComposeFile docker-compose.paper.yml -EnvFile ..\runtime\paper-gate\.env.paper -Database kairos
+scripts\Test-Recovery.ps1 -ManifestPath $manifest -ComposeProject kairos-paper-gate `
+  -ComposeFile docker-compose.paper.yml -EnvFile ..\runtime\paper-gate\.env.paper -Database kairos `
+  -RuntimePreflight
 ```
+
+The preflight receipt must be a PASS before `Invoke-LongGapRecovery.ps1` is
+considered.  It is a recovery fact, not a read-only uptime receipt or a PAPER
+qualification: no application service may be restarted until pending/expired
+outbox effects have separately been reconciled.
 
 Copy backup plus manifest to encrypted off-host storage under a separate retention policy.
 The local script does not itself provide encryption, scheduling, or remote replication.

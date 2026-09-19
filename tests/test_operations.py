@@ -293,6 +293,14 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertIn("Refusing to qualify an empty backup", backup)
         self.assertIn("Restored row count differs", recovery)
         self.assertIn("public_execution_events_max_sequence", recovery)
+        self.assertIn("[switch]$RuntimePreflight", recovery)
+        self.assertIn("Assert-OffLineRecoveryIsolation", recovery)
+        self.assertIn("offline-closed-bar-v1", recovery)
+        self.assertIn("closed-bar-producer:kairos-quant-scouts", recovery)
+        self.assertIn("Runtime recovery requires an authoritative contiguous anchor for all five symbols", recovery)
+        self.assertIn("read_only_consumer_restart_permitted", recovery)
+        self.assertIn("offline_bar_recovery_permitted", recovery)
+        self.assertIn("Runtime recovery receipt must remain beside the immutable backup manifest", recovery)
         for table in (
             "event_audit",
             "execution_orders",
