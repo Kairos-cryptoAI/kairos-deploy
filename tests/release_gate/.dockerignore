@@ -5,6 +5,7 @@
 !policy.py
 !witness.py
 !test_policy.py
+!test_full_path.py
 !test_pipeline.py
 !test_witness.py
 !compose.yml
