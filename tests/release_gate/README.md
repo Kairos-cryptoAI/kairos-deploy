@@ -11,8 +11,8 @@ is modified by this directory.
 ## Scope of evidence
 
 The gate uses the exact published, non-editable Git installations pinned in
-`pyproject.toml` and `uv.lock`: Core `91cd95c`, Persistence `730ff1a`, Risk `145c3b1`,
-and Execution `641a080`. It checks Git provenance **and actual imported module
+`pyproject.toml` and `uv.lock`: Core `91cd95c`, Persistence `526c30f`, Risk `a10649c`,
+and Execution `73122e8`. It checks Git provenance **and actual imported module
 paths** against each installed distribution in `site-packages`. `PYTHONPATH`
 contains only this harness and the tests from the exact Execution commit; it does
 not contain a production source checkout.
@@ -59,8 +59,8 @@ real DEV qualification remain necessary. A passing result never sets
 
 ## Isolation and execution policy
 
-- New project: `kairos-release-gate-20260912`; exact database:
-  `kairos_execution_test_202609120003`.
+- New project: `kairos-release-gate-20260919-r2`; exact database:
+  `kairos_execution_test_202609190002`.
 - Internal, unshared network; no host ports, host mounts, existing volumes,
   external networks, `.env`, inherited secrets or production credentials.
 - Public synthetic credentials exist only in this test configuration.
@@ -83,9 +83,9 @@ After approval and verifying that no prior resources carry this project's name,
 the isolated Linux gate can be invoked from the deploy repository:
 
 ```powershell
-docker compose -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml build gate
-docker compose -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
-docker compose -p kairos-release-gate-20260912 -f tests/release_gate/compose.yml run --no-deps -T gate
+docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml build gate
+docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml up -d --wait --wait-timeout 90 timescaledb redis
+docker compose -p kairos-release-gate-20260919-r2 -f tests/release_gate/compose.yml run --no-deps -T gate
 ```
 
 Capture the full output and exact image/revision identities before inspecting or

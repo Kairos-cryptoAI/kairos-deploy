@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-editable
 # execution revision is copied; no current working tree enters this image.
 RUN git init /tmp/execution-fixtures \
     && git -C /tmp/execution-fixtures remote add origin https://github.com/Kairos-cryptoAI/kairos-execution-engine.git \
-    && git -C /tmp/execution-fixtures fetch --depth=1 origin 641a08045c70f15ab9d7a5b04e54ed0928a71529 \
+    && git -C /tmp/execution-fixtures fetch --depth=1 origin 73122e825b333281d4fd4acce1c57f90c4cc511c \
     && git -C /tmp/execution-fixtures checkout --detach FETCH_HEAD
 
 FROM python:3.11.15-slim-bookworm@sha256:d29f48a31a8b408ed19272ca1e7b10ebae13b240a27e862d3d4217c528e2e0c3
@@ -27,5 +27,5 @@ ENV PATH=/app/.venv/bin:${PATH} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYT
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /tmp/execution-fixtures/tests /work/execution-fixtures/tests
 WORKDIR /work/release_gate
-COPY policy.py witness.py test_policy.py test_witness.py test_pipeline.py pyproject.toml compose.yml ./
+COPY policy.py witness.py test_policy.py test_witness.py test_pipeline.py pyproject.toml compose.yml Dockerfile ./
 CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--capture=tee-sys", "--tb=short", "test_policy.py", "test_witness.py", "test_pipeline.py"]

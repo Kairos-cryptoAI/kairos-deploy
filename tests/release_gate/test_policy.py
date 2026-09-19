@@ -186,6 +186,12 @@ def test_installed_git_metadata_and_actual_module_paths_checked(installed):
     policy.validate_installed_sources()
 
 
+def test_execution_fixture_revision_matches_pinned_distribution():
+    dockerfile = Path(__file__).with_name("Dockerfile").read_text(encoding="utf-8")
+    revision = policy.PINS["kairos-execution-engine"]
+    assert f"fetch --depth=1 origin {revision}" in dockerfile
+
+
 @pytest.mark.parametrize(
     "change", ["wrong_revision", "wrong_repository", "editable", "source_override", "no_file"]
 )
