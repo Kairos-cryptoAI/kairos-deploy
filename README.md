@@ -41,6 +41,33 @@ integration harness requires an explicitly disposable `kairos_gap_drill_*`
 database, seeds its exact `001`--`012` profile outside the writer, and validates
 commit-before-ACK recovery, deduplication and the exclusive offline-writer lease.
 
+## Exact offline outbox reconciliation
+
+An expired outbox lease is not a licence to restart a dispatcher or replay a
+queue. [`docker-compose.outbox-reconciliation.yml`](docker-compose.outbox-reconciliation.yml)
+is an entirely separate, profile-only recovery tool. A normal `docker compose up`
+starts neither of its services. The default `offline-outbox-inspect` profile sees
+only a supplied internal PostgreSQL network and opens a read-only transaction for
+one fully specified row. It writes a redacted, SHA-256-bound inspection receipt;
+it never sends to Redis.
+
+The distinct `offline-outbox-apply` profile is not a bulk repair mechanism. Its
+wrapper, [`Invoke-OfflineOutboxReconciliation.ps1`](scripts/Invoke-OfflineOutboxReconciliation.ps1),
+requires a supplied exact expectation containing every immutable row field, a
+fresh receipt (maximum five minutes), its exact SHA-256, a detached signature by
+the reviewed local GPG signer, and an explicit `-ArmApply`. Before it can attach
+the one-shot container, it verifies that the supplied Docker-internal data and
+bus networks contain only TimescaleDB and Redis, and that every producer,
+consumer, collector and execution service is stopped. The runner calls the
+version-pinned persistence exact-row API once only. A transport or ACK ambiguity
+ends as `PUBLISH_OUTCOME_UNKNOWN`; it is quarantined by persistence and is never
+retried by the wrapper.
+
+This repository contains no row-specific authority, including no default outbox
+ID. The profile has no egress network, no ports, no volume, no background
+dispatcher, and no EVEDEX, provider or general PAPER secrets. It is unexecuted
+engineering support until a future independently authorized recovery procedure.
+
 ## Runtime topology
 
 | Container | Responsibility | External access |

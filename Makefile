@@ -9,11 +9,13 @@ PAPER_COMPOSE_FILE ?= docker-compose.paper.yml
 PAPER_ENV_FILE ?= .env.paper
 PAPER_STATIC_ENV_FILE ?= .env.paper.example
 PAPER_SECRETS_DIR ?= secrets-paper
+OUTBOX_RECONCILIATION_COMPOSE_FILE ?= docker-compose.outbox-reconciliation.yml
+OUTBOX_RECONCILIATION_STATIC_ENV_FILE ?= .env.outbox-reconciliation.example
 
 COMPOSE_CMD = $(COMPOSE) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 STATIC_COMPOSE_CMD = $(COMPOSE) --env-file $(STATIC_ENV_FILE) -f $(COMPOSE_FILE)
 
-.PHONY: validate validate-config validate-sources preflight live-boundary live-preflight paper-validate paper-preflight paper-canary-report build up down logs ps pull
+.PHONY: validate validate-config validate-sources preflight live-boundary live-preflight paper-validate paper-preflight paper-canary-report outbox-reconciliation-validate build up down logs ps pull
 
 validate: validate-sources
 	$(STATIC_COMPOSE_CMD) config --quiet
@@ -21,6 +23,7 @@ validate: validate-sources
 	$(PYTHON) scripts/validate_deployment.py --compose-json .compose.resolved.json
 	$(COMPOSE) --env-file $(STATIC_ENV_FILE) -f $(COMPOSE_FILE) -f $(LIVE_COMPOSE_FILE) config --format json > .compose.resolved.json
 	$(PYTHON) scripts/validate_deployment.py --compose-json .compose.resolved.json --live
+	$(MAKE) outbox-reconciliation-validate
 	$(PYTHON) -m unittest discover -s tests -v
 	$(RM) .compose.resolved.json
 
@@ -29,6 +32,7 @@ validate-config:
 
 validate-sources:
 	$(PYTHON) scripts/validate_deployment.py --verify-remote
+	$(PYTHON) scripts/validate_offline_outbox_reconciliation.py --verify-remote
 
 preflight: validate validate-config
 	$(PYTHON) scripts/provision_secrets.py --secrets-dir $(SECRETS_DIR)
@@ -56,6 +60,16 @@ paper-preflight: paper-validate
 
 paper-canary-report:
 	$(PYTHON) scripts/paper_canary_acceptance.py --compose-file $(PAPER_COMPOSE_FILE) --env-file $(PAPER_ENV_FILE)
+
+outbox-reconciliation-validate:
+	$(PYTHON) scripts/validate_offline_outbox_reconciliation.py --verify-remote
+	$(COMPOSE) --env-file $(OUTBOX_RECONCILIATION_STATIC_ENV_FILE) -f $(OUTBOX_RECONCILIATION_COMPOSE_FILE) config --format json > .compose.outbox-reconciliation-normal-up.resolved.json
+	$(PYTHON) scripts/validate_offline_outbox_reconciliation.py --normal-up-compose-json .compose.outbox-reconciliation-normal-up.resolved.json
+	$(COMPOSE) --profile offline-outbox-inspect --profile offline-outbox-apply --env-file $(OUTBOX_RECONCILIATION_STATIC_ENV_FILE) -f $(OUTBOX_RECONCILIATION_COMPOSE_FILE) config --format json > .compose.outbox-reconciliation.resolved.json
+	$(PYTHON) scripts/validate_offline_outbox_reconciliation.py --compose-json .compose.outbox-reconciliation.resolved.json
+	$(COMPOSE) --profile offline-outbox-inspect --profile offline-outbox-apply --env-file $(OUTBOX_RECONCILIATION_STATIC_ENV_FILE) -f $(OUTBOX_RECONCILIATION_COMPOSE_FILE) config --quiet
+	$(RM) .compose.outbox-reconciliation-normal-up.resolved.json
+	$(RM) .compose.outbox-reconciliation.resolved.json
 
 build: preflight
 	$(COMPOSE_CMD) build --pull

@@ -1,0 +1,95 @@
+{
+  "name": "kairos-offline-outbox-reconciliation-20260919-r1",
+  "networks": {
+    "offline-data": {
+      "name": "verified-data-network",
+      "external": true
+    },
+    "offline-bus": {
+      "name": "verified-bus-network",
+      "external": true
+    }
+  },
+  "secrets": {
+    "offline_outbox_expectation": {"file": "input/expectation.json"},
+    "offline_outbox_receipt": {"file": "input/receipt.json"},
+    "offline_outbox_receipt_signature": {"file": "input/receipt.json.asc"},
+    "offline_outbox_database_url": {"file": "secrets/persistence_database_url"},
+    "offline_outbox_redis_url": {"file": "secrets/redis_url"}
+  },
+  "services": {
+    "outbox-inspector": {
+      "profiles": ["offline-outbox-inspect"],
+      "build": {
+        "context": "tests/offline_outbox_reconciliation",
+        "dockerfile": "Dockerfile",
+        "pull": true,
+        "args": {
+          "PERSISTENCE_REPOSITORY": "https://github.com/Kairos-cryptoAI/kairos-persistence",
+          "PERSISTENCE_REVISION": "61c1483032ba4520f54f04618bbc2d0e830e27ae"
+        }
+      },
+      "image": "kairos-offline-outbox-reconciler:20260919-r1",
+      "entrypoint": ["python", "/app/offline_outbox_reconciliation.py"],
+      "command": [
+        "--mode",
+        "inspect",
+        "--expectation",
+        "/run/secrets/offline_outbox_expectation",
+        "--database-url-file",
+        "/run/secrets/offline_outbox_database_url"
+      ],
+      "read_only": true,
+      "mem_limit": "384m",
+      "cpus": 0.5,
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m"],
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "restart": "no",
+      "secrets": [
+        {"source": "offline_outbox_expectation", "target": "offline_outbox_expectation"},
+        {"source": "offline_outbox_database_url", "target": "offline_outbox_database_url"}
+      ],
+      "networks": {"offline-data": null}
+    },
+    "outbox-reconciler": {
+      "profiles": ["offline-outbox-apply"],
+      "build": {
+        "context": "tests/offline_outbox_reconciliation",
+        "dockerfile": "Dockerfile",
+        "pull": true,
+        "args": {
+          "PERSISTENCE_REPOSITORY": "https://github.com/Kairos-cryptoAI/kairos-persistence",
+          "PERSISTENCE_REVISION": "61c1483032ba4520f54f04618bbc2d0e830e27ae"
+        }
+      },
+      "image": "kairos-offline-outbox-reconciler:20260919-r1",
+      "entrypoint": ["python", "/app/offline_outbox_reconciliation.py"],
+      "command": [
+        "--mode",
+        "inspect",
+        "--expectation",
+        "/run/secrets/offline_outbox_expectation",
+        "--database-url-file",
+        "/run/secrets/offline_outbox_database_url"
+      ],
+      "read_only": true,
+      "mem_limit": "384m",
+      "cpus": 0.5,
+      "pids_limit": 64,
+      "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m"],
+      "cap_drop": ["ALL"],
+      "security_opt": ["no-new-privileges:true"],
+      "restart": "no",
+      "secrets": [
+        {"source": "offline_outbox_expectation", "target": "offline_outbox_expectation"},
+        {"source": "offline_outbox_receipt", "target": "offline_outbox_receipt"},
+        {"source": "offline_outbox_receipt_signature", "target": "offline_outbox_receipt_signature"},
+        {"source": "offline_outbox_database_url", "target": "offline_outbox_database_url"},
+        {"source": "offline_outbox_redis_url", "target": "offline_outbox_redis_url"}
+      ],
+      "networks": {"offline-data": null, "offline-bus": null}
+    }
+  }
+}

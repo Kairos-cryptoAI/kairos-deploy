@@ -1,0 +1,81 @@
+name: kairos-offline-outbox-reconciliation-20260919-r1
+
+# This file is deliberately not an extension of docker-compose.paper.yml.
+# Both services require an explicit profile and are invoked only through the
+# one-shot wrapper.  The inspector can reach PostgreSQL only.  The separate
+# reconciler gets Redis only after a signed, fresh receipt has been verified.
+x-outbox-reconciler-build: &outbox-reconciler-build
+  build:
+    context: tests/offline_outbox_reconciliation
+    dockerfile: Dockerfile
+    pull: true
+    args:
+      PERSISTENCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
+      PERSISTENCE_REVISION: 61c1483032ba4520f54f04618bbc2d0e830e27ae
+
+x-outbox-reconciler-runtime: &outbox-reconciler-runtime
+  <<: *outbox-reconciler-build
+  image: kairos-offline-outbox-reconciler:20260919-r1
+  entrypoint: ["python", "/app/offline_outbox_reconciliation.py"]
+  command:
+    - --mode
+    - inspect
+    - --expectation
+    - /run/secrets/offline_outbox_expectation
+    - --database-url-file
+    - /run/secrets/offline_outbox_database_url
+  read_only: true
+  mem_limit: 384m
+  cpus: 0.5
+  pids_limit: 64
+  tmpfs: ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: "no"
+
+services:
+  outbox-inspector:
+    <<: *outbox-reconciler-runtime
+    profiles: [offline-outbox-inspect]
+    secrets:
+      - source: offline_outbox_expectation
+        target: offline_outbox_expectation
+      - source: offline_outbox_database_url
+        target: offline_outbox_database_url
+    networks: [offline-data]
+
+  outbox-reconciler:
+    <<: *outbox-reconciler-runtime
+    profiles: [offline-outbox-apply]
+    secrets:
+      - source: offline_outbox_expectation
+        target: offline_outbox_expectation
+      - source: offline_outbox_receipt
+        target: offline_outbox_receipt
+      - source: offline_outbox_receipt_signature
+        target: offline_outbox_receipt_signature
+      - source: offline_outbox_database_url
+        target: offline_outbox_database_url
+      - source: offline_outbox_redis_url
+        target: offline_outbox_redis_url
+    networks: [offline-data, offline-bus]
+
+networks:
+  offline-data:
+    external: true
+    name: ${KAIROS_OFFLINE_OUTBOX_DATA_NETWORK:?set a verified isolated PostgreSQL network}
+  offline-bus:
+    external: true
+    name: ${KAIROS_OFFLINE_OUTBOX_BUS_NETWORK:?set a verified isolated Redis network}
+
+secrets:
+  offline_outbox_expectation:
+    file: ${KAIROS_OFFLINE_OUTBOX_INPUT_DIR:?set an explicit operator input directory}/expectation.json
+  offline_outbox_receipt:
+    file: ${KAIROS_OFFLINE_OUTBOX_INPUT_DIR:?set an explicit operator input directory}/receipt.json
+  offline_outbox_receipt_signature:
+    file: ${KAIROS_OFFLINE_OUTBOX_INPUT_DIR:?set an explicit operator input directory}/receipt.json.asc
+  offline_outbox_database_url:
+    file: ${KAIROS_OFFLINE_OUTBOX_SECRETS_DIR:?set a scoped reconciliation secrets directory}/persistence_database_url
+  offline_outbox_redis_url:
+    file: ${KAIROS_OFFLINE_OUTBOX_SECRETS_DIR:?set a scoped reconciliation secrets directory}/redis_url
