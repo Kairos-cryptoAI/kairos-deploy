@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -190,6 +191,15 @@ def test_execution_fixture_revision_matches_pinned_distribution():
     dockerfile = Path(__file__).with_name("Dockerfile").read_text(encoding="utf-8")
     revision = policy.PINS["kairos-execution-engine"]
     assert f"fetch --depth=1 origin {revision}" in dockerfile
+
+
+def test_workflow_uses_the_same_isolated_targets_as_policy():
+    workflow = Path(__file__).parents[2] / ".github" / "workflows" / "release-gate.yml"
+    if not workflow.exists():
+        pytest.skip("narrow runtime image intentionally excludes the repository workflow source")
+    text = workflow.read_text(encoding="utf-8")
+    assert set(re.findall(r"kairos-release-gate-[a-z0-9-]+", text)) == {policy.PROJECT}
+    assert set(re.findall(r"kairos_execution_test_[0-9]+", text)) == {policy.DATABASE}
 
 
 @pytest.mark.parametrize(
