@@ -19,11 +19,11 @@
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "61c1483032ba4520f54f04618bbc2d0e830e27ae"
+      "revision": "1ca8bf38d265ece7a95f749a268075549f80c043"
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "5f37b99758d53cb0b23b7d2e08679858700f3b76"
+      "revision": "53b65bb372dc7f7eb5527c844f70d577665ab96d"
     }
   },
   "infrastructure": {

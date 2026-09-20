@@ -26,7 +26,7 @@ from kairos_core.contracts import (
 )
 from kairos_core.enums import ReasoningEffort, ReviewDecision, Side
 from kairos_execution.simulation import SimulationExecutionController
-from kairos_persistence import Database, PersistenceSettings, SimulationRepository
+from kairos_persistence import Database, MigrationProfile, PersistenceSettings, SimulationRepository
 from kairos_persistence.database_target import connect_verified_database, require_database_target_url
 from kairos_risk import SimulationRiskPolicy
 from kairos_router.aggregation import TextAggregate
@@ -288,7 +288,7 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
     policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
     policy.validate_installed_sources()
     settings, database_name = _settings()
-    database = Database(settings)
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
     await connect_verified_database(database, database_name, local_only=True)
     try:
         await database.migrate()
@@ -328,7 +328,7 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         assert entry.lifecycle_state == "ACTIVE" and not entry.replayed
 
         await database.close()
-        database = Database(settings)
+        database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
         await connect_verified_database(database, database_name, local_only=True)
         repository = SimulationRepository(database.pool)
         restarted = SimulationExecutionController(repository, source="sim-full-path-gate-controller")
@@ -364,7 +364,7 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
 async def test_veto_persists_rejected_sim_evidence_without_admission_or_command() -> None:
     policy.validate_environment()
     settings, database_name = _settings()
-    database = Database(settings)
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
     await connect_verified_database(database, database_name, local_only=True)
     try:
         await database.migrate()
