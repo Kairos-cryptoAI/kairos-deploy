@@ -16,19 +16,22 @@ credentials. Docker may fetch immutable public Git revisions only while building
 The bundled `source-lock.json` is verified byte-for-byte against the canonical root
 lock before build and again by the static gate.
 
+The `20260920-r2` project identity is a new source snapshot; artifacts from the
+earlier `r1` identity remain historical evidence and are not rewritten.
+
 Run the static checks from `D:\Kairos\kairos-deploy`:
 
 ```powershell
 python scripts/validate_current_release_gate.py
-docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml config --quiet
+docker compose -p kairos-current-release-gate-20260920-r2 -f docker-compose.current-release-gate.yml config --quiet
 ```
 
 The Docker test is a one-shot operation only after confirming the Compose project
 has no existing resources:
 
 ```powershell
-docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml build gate
-docker compose -p kairos-current-release-gate-20260919-r1 -f docker-compose.current-release-gate.yml up --no-deps gate
+docker compose -p kairos-current-release-gate-20260920-r2 -f docker-compose.current-release-gate.yml build gate
+docker compose -p kairos-current-release-gate-20260920-r2 -f docker-compose.current-release-gate.yml up --no-deps gate
 ```
 
 Do not reuse this project name for PAPER, research data or a long-running service.

@@ -43,11 +43,11 @@
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "cfcba17519952bcbdd6ef6e3b2386b6474c89b72"
+      "revision": "0df4ef150d3194321a72c255b3b9365af1fa2995"
     }
   },
   "gate": {
-    "project": "kairos-current-release-gate-20260919-r1",
+    "project": "kairos-current-release-gate-20260920-r2",
     "confirmation": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
   }
 }

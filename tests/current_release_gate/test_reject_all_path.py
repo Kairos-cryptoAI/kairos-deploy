@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +25,12 @@ from kairos_strategy.runtime import (
 from kairos_strategy.sleeves.regime_aligned_right_tail import RegimeAlignedRightTailConfig
 
 import policy
+
+
+def _synthetic_sidecar_node() -> Path:
+    if os.name == "nt":
+        return Path(r"C:\kairos-current-release-gate\node.exe")
+    return Path("/usr/local/bin/node")
 
 
 class _FailClosedGateway:
@@ -174,6 +182,7 @@ async def test_current_reject_all_path_is_deterministic_and_has_no_effect(tmp_pa
             evedex_dev_api_key_file=api_path,
             evedex_dev_private_key_file=signing_path,
             evedex_dev_expected_account_id="synthetic-remote-account",
+            evedex_sidecar_node=_synthetic_sidecar_node(),
         ),
     )
     result = await engine.handle(decision)
