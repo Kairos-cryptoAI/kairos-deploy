@@ -47,10 +47,24 @@ def validate(controller: str, runner: str) -> list[str]:
         "fresh two-hour runtime snapshot",
         "legacy inspection receipt is not eligible",
         "simulator_relations_present\": False",
+        "timescaledb_bgw_owner_placeholder_roles_verified\": True",
         "timescaledb_pre_restore()",
         "timescaledb_post_restore()",
         "pg_restore",
         "--single-transaction",
+        "LoopbackDatabaseOnlyGuard",
+        "forbidden_network_calls",
+        "loopback_database_connections",
+        "_assert_identity",
+        "_expectation_identity",
+        "_verify_worker_result",
+        "json_build_object",
+        "_snapshot_evidence",
+        "_cleanup_evidence_stage",
+        "EXPECTED_MIGRATION_RUNNER_IMAGE",
+        "EXPECTED_PERSISTENCE_REPOSITORY_SHA256",
+        "repository_module_sha256",
+        "CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
     )
     for item in required:
         if item not in controller and item not in runner:
@@ -83,8 +97,12 @@ def validate(controller: str, runner: str) -> list[str]:
         errors.append("clone worker must not include a Redis client route")
     if "import requests" in runner or "httpx" in runner or "websocket" in runner:
         errors.append("clone worker must not include an external transport route")
-    if "FailingNoNetworkPublisher" not in runner or "publisher.calls != 0" not in runner:
-        errors.append("clone worker must prove zero publisher calls")
+    if "FailingNoNetworkPublisher" in runner or "publisher.calls" in runner:
+        errors.append("clone worker must not use a disconnected publisher sentinel")
+    if "LoopbackDatabaseOnlyGuard" not in runner or "forbidden_network_calls" not in runner or "loopback_database_connections" not in runner:
+        errors.append("clone worker must prove its DB-only network boundary")
+    if "_assert_identity(row, identity)" not in runner:
+        errors.append("clone worker must verify every immutable outbox identity field before and after quarantine")
     if "lease_owner_sha256" not in runner or "lease_owner\"" not in runner:
         errors.append("clone worker must bind and redact the raw legacy lease owner")
     if "print(json.dumps(result" not in runner or "except (CloneRunnerInputError" not in runner:
@@ -97,11 +115,23 @@ def validate(controller: str, runner: str) -> list[str]:
         errors.append("clone controller must pin the exact reviewed worker bytes")
     if '"--network", "none"' not in controller or '"--network", f"container:{clone}"' not in controller:
         errors.append("clone database and worker namespace isolation is not explicit")
-    if "_verify_signature" not in controller or "--status-fd" not in controller or "VALIDSIG" not in controller:
+    if "_verify_signature" not in controller or "--status-fd" not in controller or "VALIDSIG" not in controller or "--no-auto-key-retrieve" not in controller or "--no-options" not in controller:
         errors.append("clone controller must verify the detached legacy receipt signature")
+    if "shell=False" not in controller or any(value in controller for value in ("shell=True", "subprocess.list2cmdline", "gpg.program", "KAIROS_CLONE_GPG_EXECUTABLE")):
+        errors.append("clone controller must invoke only its direct GnuPG binary with an argv vector")
+    if "if image != EXPECTED_MIGRATION_RUNNER_IMAGE" not in controller or "EXPECTED_MIGRATION_RUNNER_IMAGE not in digest_values" not in controller:
+        errors.append("clone controller must require the reviewed immutable migration-runner digest")
+    if "_snapshot_evidence" not in controller or "_cleanup_evidence_stage(inputs.staging_directory)" not in controller or "inputs.receipt_directory" not in controller:
+        errors.append("clone controller must snapshot mutable evidence and clean it after the final receipt")
+    if "_verify_worker_result" not in controller or "set(after) != WORKER_AFTER_FIELDS" not in controller or "any(after.get(field) != expected_identity[field]" not in controller:
+        errors.append("clone controller must verify every immutable identity field returned by the worker")
+    if "json_build_object" not in controller or "restored clone does not preserve the exact quarantine state" not in controller:
+        errors.append("clone controller must verify the full immutable identity after restore")
+    if "_ensure_timescaledb_job_owners" not in controller or "NOLOGIN NOSUPERUSER" not in controller:
+        errors.append("clone controller must create and verify constrained TimescaleDB owner placeholders")
     if "_assert_checkpoints" not in controller or "source dump changed during the clone-only rehearsal" not in controller:
         errors.append("clone controller must validate source checkpoints and immutable dump bytes")
-    if "_cleanup(clone, data_volume, stage_volume, suffix)" not in controller or "_assert_labels" not in controller:
+    if '"create", "--name", worker_name' not in controller or "_cleanup((worker, runner_probe, clone), data_volume, stage_volume, suffix)" not in controller or "_assert_labels" not in controller:
         errors.append("clone controller must remove only exact labelled generated resources")
     return errors
 

@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -51,10 +52,17 @@ EXPECTED_TIMESCALE_IMAGE = (
 EXPECTED_SIGNER = "40AF365C6682B73D056A6A274DBFF6B65BE9F827"
 EXPECTED_LEGACY_FINGERPRINT = "a2fec9fe81d6af73a1e44038a0e71c21d9aaf2e3933ea8c76793d9e6f25b9adf"
 EXPECTED_RUNNER_USER = "10001:10001"
-EXPECTED_RUNNER_SHA256 = "1412b5952690925c17cac12036f8c863fa5e5d1acb952d30ad9aca77bc3803ba"
+EXPECTED_RUNNER_SHA256 = "4667fac75725dadfed8e28454bea6d954a985f92495d981eb1cb60af47c148e2"
+EXPECTED_PERSISTENCE_REPOSITORY_SHA256 = "9eaff27041ca14da617b9d665b2e3e4409ea8fb9abecd3f19da4d8dc442672e1"
+EXPECTED_MIGRATION_RUNNER_IMAGE = (
+    "ghcr.io/kairos-cryptoai/kairos-runtime-schema-profile-runner@sha256:"
+    "2e10e9e936eae3a4a411f65d8b0bd14670ba808368eeff94b4e24021aa291077"
+)
 MAXIMUM_EVIDENCE_AGE = timedelta(hours=2)
 CLONE_SCOPE = "legacy-outbox-quarantine-clone-rehearsal"
 SCHEMA_ADVISORY_LOCK = "4907627681104115019"
+DEFAULT_WINDOWS_GPG_EXECUTABLE = Path(r"C:\Program Files\Git\usr\bin\gpg.exe")
+DEFAULT_POSIX_GPG_EXECUTABLE = Path("/usr/bin/gpg")
 
 LEGACY_MIGRATIONS = (
     "001_audit_and_idempotency.sql",
@@ -127,6 +135,26 @@ CHECKPOINT_TABLES = {
     "execution_mutation_budget_scopes",
     "execution_mutation_reservations",
 }
+
+IDENTITY_FIELDS = (
+    "id",
+    "producer",
+    "message_id",
+    "topic",
+    "payload_sha256",
+    "publish_attempts",
+)
+WORKER_AFTER_FIELDS = frozenset(
+    IDENTITY_FIELDS
+    + (
+        "published",
+        "dead_lettered",
+        "lease_owner_sha256",
+        "lease_until_utc",
+        "reconciliation_state",
+        "reconciliation_id",
+    )
+)
 
 LEGACY_INVENTORY_QUERY = r"""
 WITH inventory AS (
@@ -259,33 +287,47 @@ def _assert_labels(labels: Mapping[str, Any], suffix: str) -> None:
         raise RehearsalError("refusing an object with mismatched clone rehearsal labels")
 
 
-def _gpg_command() -> str:
-    result = subprocess.run(
-        ["git", "-C", str(ROOT), "config", "--get", "gpg.program"],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    command = result.stdout.strip() if result.returncode == 0 else ""
-    if not command:
-        raise RehearsalError("configured GPG program is unavailable")
-    return command
+def _gpg_executable() -> Path:
+    """Resolve one direct GnuPG binary; never execute a configurable shell wrapper."""
+
+    # The verification boundary deliberately has no environment or Git-config
+    # override: a wrapper can manufacture a successful-looking VALIDSIG line.
+    program = DEFAULT_WINDOWS_GPG_EXECUTABLE if os.name == "nt" else DEFAULT_POSIX_GPG_EXECUTABLE
+    if not program.is_absolute():
+        raise RehearsalError("direct GPG executable must be an absolute path")
+    try:
+        program = program.resolve(strict=True)
+    except OSError as exc:
+        raise RehearsalError("direct GPG executable is unavailable") from exc
+    if not program.is_file():
+        raise RehearsalError("direct GPG executable is not a regular file")
+    if os.name == "nt":
+        if program.suffix.lower() != ".exe" or program.name.lower() != "gpg.exe":
+            raise RehearsalError("direct GPG executable is not a vetted gpg.exe file")
+    elif program.name not in {"gpg", "gpg2"} or not os.access(program, os.X_OK):
+        raise RehearsalError("direct GPG executable is not a vetted GnuPG binary")
+    return program
 
 
 def _gpg(arguments: list[str], label: str) -> subprocess.CompletedProcess[str]:
-    program = _gpg_command()
-    # The configured loopback wrapper accepts the standard GnuPG argument
-    # contract.  Paths below are resolved local files and never include shell
-    # metacharacters supplied by an untrusted source.
-    command = subprocess.list2cmdline([program, *arguments])
+    """Call GnuPG through an argv vector with no shell interpretation."""
+
+    if any(item.startswith("--passphrase") for item in arguments):
+        raise RehearsalError("clone rehearsal does not accept caller-supplied GPG passphrase flags")
+    command = [str(_gpg_executable()), *arguments]
+    input_value: str | None = None
+    if "--detach-sign" in arguments:
+        passphrase = os.environ.get("KAIROS_GPG_PASSPHRASE")
+        if not isinstance(passphrase, str) or not passphrase:
+            raise RehearsalError("GPG signing passphrase is unavailable")
+        command[1:1] = ["--pinentry-mode", "loopback", "--passphrase-fd", "0"]
+        input_value = passphrase + "\n"
     result = subprocess.run(
         command,
-        shell=True,
+        shell=False,
         check=False,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if input_value is not None else subprocess.DEVNULL,
+        input=input_value,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -298,7 +340,7 @@ def _gpg(arguments: list[str], label: str) -> subprocess.CompletedProcess[str]:
 
 
 def _verify_signature(receipt: Path, signature: Path) -> None:
-    status = _gpg(["--batch", "--status-fd", "1", "--verify", str(signature), str(receipt)], "receipt signature verification").stdout
+    status = _gpg(["--batch", "--no-options", "--no-auto-key-retrieve", "--status-fd", "1", "--verify", str(signature), str(receipt)], "receipt signature verification").stdout
     valid = [line.split() for line in status.splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
     if len(valid) != 1 or len(valid[0]) < 12 or valid[0][11] != EXPECTED_SIGNER:
         raise RehearsalError("receipt signature does not bind the reviewed signer")
@@ -306,6 +348,8 @@ def _verify_signature(receipt: Path, signature: Path) -> None:
 
 @dataclass(frozen=True)
 class Inputs:
+    receipt_directory: Path
+    staging_directory: Path
     manifest_path: Path
     dump_path: Path
     manifest: Mapping[str, Any]
@@ -315,11 +359,85 @@ class Inputs:
     inspection_path: Path
     inspection_sha256: str
     inspection_signature_path: Path
+    inspection_signature_sha256: str
     expectation_path: Path
     expectation_sha256: str
     inspection: Mapping[str, Any]
     lease_owner_sha256: str
     lease_until_utc: str
+
+
+def _snapshot_file(source: Path, destination: Path, label: str) -> Path:
+    """Copy one operator input once into controller-owned staging bytes."""
+
+    try:
+        resolved = source.resolve(strict=True)
+    except OSError as exc:
+        raise RehearsalError(f"{label} is unavailable") from exc
+    if not resolved.is_file() or destination.exists():
+        raise RehearsalError(f"{label} cannot be snapshotted")
+    try:
+        shutil.copyfile(resolved, destination)
+    except OSError as exc:
+        raise RehearsalError(f"{label} snapshot failed") from exc
+    if not destination.is_file() or destination.is_symlink():
+        raise RehearsalError(f"{label} snapshot is not a regular file")
+    return destination
+
+
+def _snapshot_evidence(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
+    """Freeze every mutable operator input before any signature or JSON check."""
+
+    original_manifest = _ensure_below(Path(args.manifest_path), BACKUP_ROOT, "backup manifest")
+    original_manifest_value = _read_json(original_manifest, "backup manifest")
+    dump_name = original_manifest_value.get("file")
+    if not isinstance(dump_name, str) or not re.fullmatch(r"kairos-paper-gate-[0-9]{8}T[0-9]{6}Z\.dump", dump_name):
+        raise RehearsalError("backup manifest dump name is invalid before evidence snapshot")
+    original_dump = (original_manifest.parent / dump_name).resolve(strict=True)
+    if original_dump.parent != original_manifest.parent or not original_dump.is_file():
+        raise RehearsalError("backup dump is unavailable before evidence snapshot")
+    original_recovery = _ensure_below(Path(args.recovery_receipt_path), BACKUP_ROOT, "recovery receipt")
+    original_inspection = Path(args.legacy_inspection_receipt_path).resolve(strict=True)
+    original_signature = Path(args.legacy_inspection_signature_path).resolve(strict=True)
+    original_expectation = Path(args.expectation_path).resolve(strict=True)
+    if any(not item.is_file() for item in (original_inspection, original_signature, original_expectation)):
+        raise RehearsalError("legacy inspection evidence is unavailable before snapshot")
+
+    root = BACKUP_ROOT.resolve(strict=True)
+    stage = Path(tempfile.mkdtemp(prefix=".legacy-outbox-quarantine-evidence-", dir=root)).resolve(strict=True)
+    if stage.parent != root or not stage.name.startswith(".legacy-outbox-quarantine-evidence-"):
+        _cleanup_evidence_stage(stage)
+        raise RehearsalError("controller-owned evidence staging path is unsafe")
+    try:
+        manifest = _snapshot_file(original_manifest, stage / "backup-manifest.json", "backup manifest")
+        dump = _snapshot_file(original_dump, stage / dump_name, "backup dump")
+        recovery = _snapshot_file(original_recovery, stage / "recovery-receipt.json", "recovery receipt")
+        inspection = _snapshot_file(original_inspection, stage / "inspection-receipt.json", "legacy inspection receipt")
+        signature = _snapshot_file(original_signature, stage / "inspection-receipt.json.asc", "legacy inspection signature")
+        expectation = _snapshot_file(original_expectation, stage / "expectation.json", "legacy expectation")
+    except BaseException as original_error:
+        try:
+            _cleanup_evidence_stage(stage)
+        except BaseException as cleanup_error:
+            raise RehearsalError("evidence snapshot failed and its staging cleanup failed") from cleanup_error
+        raise original_error
+    return original_manifest.parent, stage, manifest, dump, recovery, inspection, signature, expectation
+
+
+def _cleanup_evidence_stage(stage: Path) -> None:
+    try:
+        root = BACKUP_ROOT.resolve(strict=True)
+        resolved = stage.resolve(strict=True)
+    except OSError as exc:
+        raise RehearsalError("controller-owned evidence staging directory is unavailable for cleanup") from exc
+    if resolved.parent != root or not resolved.name.startswith(".legacy-outbox-quarantine-evidence-"):
+        raise RehearsalError("refusing to remove an unexpected evidence staging directory")
+    try:
+        shutil.rmtree(resolved)
+    except OSError as exc:
+        raise RehearsalError("controller-owned evidence staging cleanup failed") from exc
+    if resolved.exists():
+        raise RehearsalError("controller-owned evidence staging cleanup failed")
 
 
 def _verify_manifest(manifest_path: Path) -> tuple[Mapping[str, Any], Path, str]:
@@ -334,6 +452,7 @@ def _verify_manifest(manifest_path: Path) -> tuple[Mapping[str, Any], Path, str]
         "bytes",
         "sha256",
         "checkpoints",
+        "timescaledb_bgw_owners",
     }
     if set(manifest) != required or manifest.get("schema_version") != 1:
         raise RehearsalError("backup manifest has an unexpected schema")
@@ -353,6 +472,12 @@ def _verify_manifest(manifest_path: Path) -> tuple[Mapping[str, Any], Path, str]
         raise RehearsalError("backup manifest checkpoint profile is not exact")
     if any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in manifest["checkpoints"].values()):
         raise RehearsalError("backup manifest checkpoint values are invalid")
+    owners = manifest.get("timescaledb_bgw_owners")
+    if not isinstance(owners, list) or not owners or any(
+        not isinstance(item, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", item) is None
+        for item in owners
+    ) or len(set(owners)) != len(owners):
+        raise RehearsalError("backup manifest TimescaleDB owner provenance is invalid")
     dump_path = (manifest_path.parent / filename).resolve(strict=True)
     if dump_path.parent != manifest_path.parent or _file_sha256(dump_path) != manifest["sha256"] or dump_path.stat().st_size != manifest["bytes"]:
         raise RehearsalError("backup dump does not match its manifest")
@@ -464,31 +589,81 @@ def _verify_inputs(args: argparse.Namespace) -> Inputs:
     profile = lock.get("profile")
     if not isinstance(profile, Mapping) or profile.get("schema_profile") != "LEGACY_BOOTSTRAPPED_RUNTIME_001_012" or profile.get("expected_schema_fingerprint_sha256") != EXPECTED_LEGACY_FINGERPRINT:
         raise RehearsalError("legacy source lock topology is not the reviewed bootstrap profile")
-    manifest, dump, manifest_hash = _verify_manifest(Path(args.manifest_path))
-    recovery_hash = _verify_recovery(Path(args.recovery_receipt_path), manifest, manifest_hash)
-    inspection, inspection_hash, expectation_hash, owner_sha, until = _verify_inspection(
-        Path(args.legacy_inspection_receipt_path),
-        Path(args.legacy_inspection_signature_path),
-        Path(args.expectation_path),
-        manifest,
-        manifest_hash,
-    )
-    return Inputs(
-        manifest_path=Path(args.manifest_path).resolve(strict=True),
-        dump_path=dump,
-        manifest=manifest,
-        manifest_sha256=manifest_hash,
-        recovery_path=Path(args.recovery_receipt_path).resolve(strict=True),
-        recovery_sha256=recovery_hash,
-        inspection_path=Path(args.legacy_inspection_receipt_path).resolve(strict=True),
-        inspection_sha256=inspection_hash,
-        inspection_signature_path=Path(args.legacy_inspection_signature_path).resolve(strict=True),
-        expectation_path=Path(args.expectation_path).resolve(strict=True),
-        expectation_sha256=expectation_hash,
-        inspection=inspection,
-        lease_owner_sha256=owner_sha,
-        lease_until_utc=until,
-    )
+    receipt_directory: Path | None = None
+    stage: Path | None = None
+    try:
+        (
+            receipt_directory,
+            stage,
+            manifest_path,
+            dump_path,
+            recovery_path,
+            inspection_path,
+            signature_path,
+            expectation_path,
+        ) = _snapshot_evidence(args)
+        manifest, dump, manifest_hash = _verify_manifest(manifest_path)
+        if dump != dump_path:
+            raise RehearsalError("snapshotted backup manifest does not bind its staged dump")
+        recovery_hash = _verify_recovery(recovery_path, manifest, manifest_hash)
+        inspection, inspection_hash, expectation_hash, owner_sha, until = _verify_inspection(
+            inspection_path,
+            signature_path,
+            expectation_path,
+            manifest,
+            manifest_hash,
+        )
+        return Inputs(
+            receipt_directory=receipt_directory,
+            staging_directory=stage,
+            manifest_path=manifest_path,
+            dump_path=dump,
+            manifest=manifest,
+            manifest_sha256=manifest_hash,
+            recovery_path=recovery_path,
+            recovery_sha256=recovery_hash,
+            inspection_path=inspection_path,
+            inspection_sha256=inspection_hash,
+            inspection_signature_path=signature_path,
+            inspection_signature_sha256=_file_sha256(signature_path),
+            expectation_path=expectation_path,
+            expectation_sha256=expectation_hash,
+            inspection=inspection,
+            lease_owner_sha256=owner_sha,
+            lease_until_utc=until,
+        )
+    except BaseException as original_error:
+        if stage is not None and stage.exists():
+            try:
+                _cleanup_evidence_stage(stage)
+            except BaseException as cleanup_error:
+                raise RehearsalError("input verification failed and evidence staging cleanup failed") from cleanup_error
+        raise original_error
+
+
+def _expectation_identity(inputs: Inputs) -> tuple[dict[str, object], str]:
+    """Parse the snapshotted, signed identity before it reaches SQL or a receipt."""
+
+    expectation = _read_json(inputs.expectation_path, "clone expectation")
+    if set(expectation) != {"schema_version", "identity", "reconciliation_id"} or expectation.get("schema_version") != 1:
+        raise RehearsalError("clone expectation has an unexpected schema")
+    identity = expectation.get("identity")
+    reconciliation_id = expectation.get("reconciliation_id")
+    if not isinstance(identity, Mapping) or set(identity) != set(IDENTITY_FIELDS):
+        raise RehearsalError("clone expectation does not bind every immutable identity field")
+    value = dict(identity)
+    if not isinstance(value["id"], int) or isinstance(value["id"], bool) or value["id"] <= 0:
+        raise RehearsalError("clone expectation outbox ID is invalid")
+    if not isinstance(value["publish_attempts"], int) or isinstance(value["publish_attempts"], bool) or value["publish_attempts"] < 0:
+        raise RehearsalError("clone expectation publish attempts are invalid")
+    for field in ("producer", "message_id", "topic"):
+        if not isinstance(value[field], str) or not value[field] or len(value[field]) > 512:
+            raise RehearsalError("clone expectation text identity is invalid")
+    if not isinstance(value["payload_sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", value["payload_sha256"]) is None:
+        raise RehearsalError("clone expectation payload hash is invalid")
+    if not isinstance(reconciliation_id, str) or not reconciliation_id.strip() or len(reconciliation_id) > 200:
+        raise RehearsalError("clone expectation reconciliation ID is invalid")
+    return value, reconciliation_id.strip()
 
 
 def _wait_postgres(container: str, user: str) -> None:
@@ -562,16 +737,55 @@ def _restore_dump(container: str, user: str, database: str, dump_path: str, labe
         _docker(arguments, step)
 
 
-def _inspect_migration_runner(image: str, probe_name: str, suffix: str) -> str:
-    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image):
-        raise RehearsalError("migration runner must use an immutable repository@sha256 digest")
+def _ensure_timescaledb_job_owners(container: str, clone_user: str, owners: object) -> tuple[str, ...]:
+    """Create only constrained clone-local roles needed by TimescaleDB restore."""
+
+    if not isinstance(owners, list) or not owners or any(
+        not isinstance(owner, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", owner) is None
+        for owner in owners
+    ) or len(set(owners)) != len(owners):
+        raise RehearsalError("TimescaleDB background-job owner provenance is invalid")
+    if clone_user in owners:
+        raise RehearsalError("TimescaleDB background-job owner conflicts with the generated clone superuser")
+    owner_array = ",".join("'" + owner + "'" for owner in owners)
+    query = (
+        "DO $owners$ DECLARE owner_name text; BEGIN "
+        f"FOREACH owner_name IN ARRAY ARRAY[{owner_array}]::text[] LOOP "
+        "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = owner_name) THEN "
+        "EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS', owner_name); "
+        "END IF; END LOOP; END $owners$;"
+    )
+    _docker(
+        ["exec", container, "psql", f"--username={clone_user}", "--dbname=postgres", "--set=ON_ERROR_STOP=1", "--command", query],
+        "create constrained TimescaleDB background-job owner placeholders",
+    )
+    rows = _psql(
+        container,
+        clone_user,
+        "postgres",
+        "SELECT rolname || '|' || rolcanlogin::text || '|' || rolsuper::text || '|' || rolcreatedb::text || '|' || rolcreaterole::text || '|' || rolinherit::text || '|' || rolreplication::text || '|' || rolbypassrls::text FROM pg_roles WHERE rolname = ANY(ARRAY["
+        + owner_array
+        + "]::text[]) ORDER BY rolname;",
+        "verify constrained TimescaleDB background-job owner placeholders",
+    )
+    expected = [f"{owner}|f|f|f|f|f|f|f" for owner in sorted(owners)]
+    if rows != expected:
+        raise RehearsalError("TimescaleDB background-job owner placeholders are not constrained clone-only roles")
+    return tuple(sorted(owners))
+
+
+def _inspect_migration_runner(image: str, probe_name: str, suffix: str, temporary: Path) -> str:
+    """Prove the locally resolved runner is the reviewed immutable artifact."""
+
+    if image != EXPECTED_MIGRATION_RUNNER_IMAGE:
+        raise RehearsalError("migration runner is not the reviewed immutable digest")
     digests = _docker_text(["image", "inspect", "--format", "{{json .RepoDigests}}", image], "migration runner digest inspection")
     try:
         digest_values = json.loads(digests)
     except json.JSONDecodeError as exc:
         raise RehearsalError("migration runner digest inventory is malformed") from exc
-    if not isinstance(digest_values, list) or not any(isinstance(item, str) and re.fullmatch(r".+@sha256:[0-9a-f]{64}", item) for item in digest_values):
-        raise RehearsalError("migration runner has no resolved repository digest")
+    if not isinstance(digest_values, list) or EXPECTED_MIGRATION_RUNNER_IMAGE not in digest_values:
+        raise RehearsalError("migration runner does not resolve to the reviewed repository digest")
     labels = _docker_json(["image", "inspect", "--format", "{{json .Config.Labels}}", image], "migration runner label inspection")
     if labels.get("org.opencontainers.image.source") != EXPECTED_PERSISTENCE_REPOSITORY or labels.get("org.opencontainers.image.revision") != EXPECTED_PERSISTENCE_REVISION:
         raise RehearsalError("migration runner does not identify the reviewed persistence source")
@@ -583,7 +797,8 @@ import hashlib,json
 from importlib.resources import files
 root=files('kairos_persistence').joinpath('migrations')
 items=[{'name':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(root.iterdir(),key=lambda p:p.name) if p.name.endswith('.sql')]
-print(json.dumps({'directory':str(root),'migrations':items},sort_keys=True,separators=(',',':')))
+repository=files('kairos_persistence').joinpath('repository.py')
+print(json.dumps({'directory':str(root),'migrations':items,'repository_sha256':hashlib.sha256(repository.read_bytes()).hexdigest()},sort_keys=True,separators=(',',':')))
 """
     _docker([
         "create", "--name", probe_name, "--network", "none", "--read-only", "--cap-drop", "ALL",
@@ -596,7 +811,12 @@ print(json.dumps({'directory':str(root),'migrations':items},sort_keys=True,separ
         observation = json.loads(output)
     except json.JSONDecodeError as exc:
         raise RehearsalError("migration runner probe returned malformed JSON") from exc
-    if not isinstance(observation, Mapping) or not isinstance(observation.get("directory"), str) or not isinstance(observation.get("migrations"), list):
+    if (
+        not isinstance(observation, Mapping)
+        or not isinstance(observation.get("directory"), str)
+        or not isinstance(observation.get("migrations"), list)
+        or observation.get("repository_sha256") != EXPECTED_PERSISTENCE_REPOSITORY_SHA256
+    ):
         raise RehearsalError("migration runner probe returned an invalid migration inventory")
     entries = observation["migrations"]
     names = tuple(item.get("name") for item in entries if isinstance(item, Mapping))
@@ -608,6 +828,15 @@ print(json.dumps({'directory':str(root),'migrations':items},sort_keys=True,separ
     directory = observation["directory"]
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", directory) or ".." in directory:
         raise RehearsalError("migration runner reported an unsafe resource directory")
+    package_directory = posixpath.dirname(directory)
+    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", package_directory) or ".." in package_directory:
+        raise RehearsalError("migration runner reported an unsafe package directory")
+    exported_repository = temporary / "reviewed-kairos-persistence-repository.py"
+    if exported_repository.exists():
+        raise RehearsalError("temporary repository provenance path already exists")
+    _docker(["cp", f"{probe_name}:{package_directory}/repository.py", str(exported_repository)], "export reviewed persistence repository module")
+    if _file_sha256(exported_repository) != EXPECTED_PERSISTENCE_REPOSITORY_SHA256:
+        raise RehearsalError("exported persistence repository module differs from the reviewed source")
     return directory
 
 
@@ -651,8 +880,58 @@ def _apply_runtime_migrations(container: str, user: str, database: str, stage_di
     _docker(["exec", container, "psql", f"--username={user}", f"--dbname={database}", "--set=ON_ERROR_STOP=1", "--single-transaction", f"--file={target}"], "apply pinned runtime profile on clone")
 
 
+def _verify_worker_result(payload: object, inputs: Inputs) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise RehearsalError("clone quarantine worker result is not an object")
+    required = {
+        "schema_version",
+        "kind",
+        "first_state",
+        "repeat_state",
+        "before_sha256",
+        "after_sha256",
+        "after",
+        "runtime_profile",
+        "simulator_relations",
+        "repository_module_sha256",
+        "forbidden_network_calls",
+        "loopback_database_connections",
+    }
+    if set(payload) != required or payload.get("schema_version") != 1 or payload.get("kind") != "kairos.legacy-outbox-clone-quarantine-result.v1":
+        raise RehearsalError("clone quarantine worker result has an unexpected schema")
+    after = payload.get("after")
+    expected_identity, reconciliation_id = _expectation_identity(inputs)
+    if (
+        payload.get("first_state") != "QUARANTINED"
+        or payload.get("repeat_state") != "ALREADY_QUARANTINED"
+        or payload.get("runtime_profile") != list(TARGET_MIGRATIONS)
+        or payload.get("simulator_relations") != 0
+        or payload.get("repository_module_sha256") != EXPECTED_PERSISTENCE_REPOSITORY_SHA256
+        or payload.get("forbidden_network_calls") != 0
+        or not isinstance(payload.get("loopback_database_connections"), int)
+        or isinstance(payload.get("loopback_database_connections"), bool)
+        or payload["loopback_database_connections"] < 1
+        or not isinstance(after, Mapping)
+        or set(after) != WORKER_AFTER_FIELDS
+        or any(after.get(field) != expected_identity[field] for field in IDENTITY_FIELDS)
+        or not isinstance(payload.get("before_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", payload["before_sha256"]) is None
+        or payload.get("after_sha256") != _sha256_json(after)
+        or after.get("published") is not False
+        or after.get("dead_lettered") is not False
+        or after.get("lease_owner_sha256") is not None
+        or after.get("lease_until_utc") is not None
+        or after.get("reconciliation_state") != "PUBLISH_OUTCOME_UNKNOWN"
+        or after.get("reconciliation_id") != reconciliation_id
+    ):
+        raise RehearsalError("clone quarantine worker postconditions are not exact")
+    return payload
+
+
 def _run_quarantine_worker(
     image: str,
+    worker_name: str,
+    suffix: str,
     clone: str,
     stage_volume: str,
     stage_directory: str,
@@ -671,18 +950,24 @@ def _run_quarantine_worker(
     quoted_user = urllib.parse.quote(user, safe="")
     quoted_password = urllib.parse.quote(password, safe="")
     dsn = f"postgresql://{quoted_user}:{quoted_password}@127.0.0.1:5432/{database}"
-    result = _docker(
+    _docker(
         [
-            "run", "--rm", "--network", f"container:{clone}", "--read-only", "--cap-drop", "ALL",
+            "create", "--name", worker_name, "--network", f"container:{clone}", "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges:true", "--pids-limit", "64", "--memory", "256m", "--cpus", "0.5",
             "--user", EXPECTED_RUNNER_USER, "--mount", f"type=volume,src={stage_volume},dst={stage_directory},readonly",
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777,size=32m",
+            "--label", f"com.kairos.scope={CLONE_SCOPE}", "--label", f"com.kairos.drill={suffix}",
             "--env", f"KAIROS_CLONE_EXPECTATION_PATH={expectation_target}",
             "--env", f"KAIROS_CLONE_LEASE_OWNER_SHA256={inputs.lease_owner_sha256}",
             "--env", f"KAIROS_CLONE_LEASE_UNTIL_UTC={inputs.lease_until_utc}",
             "--env", f"KAIROS_CLONE_DATABASE_URL={dsn}",
             "--entrypoint", "python", image, runner_target,
         ],
+        "create DB-only clone quarantine worker",
+    )
+    _assert_labels(_container_labels(worker_name), suffix)
+    result = _docker(
+        ["start", "-a", worker_name],
         "run DB-only clone quarantine worker",
         allow_failure=True,
     )
@@ -695,54 +980,60 @@ def _run_quarantine_worker(
         raise RehearsalError("clone quarantine worker result is malformed") from exc
     if result.returncode != 0:
         raise RehearsalError("clone quarantine worker rejected the exact lease")
-    if not isinstance(payload, Mapping):
-        raise RehearsalError("clone quarantine worker result is not an object")
-    required = {"schema_version", "kind", "first_state", "repeat_state", "before_sha256", "after_sha256", "after", "runtime_profile", "simulator_relations", "publisher_calls"}
-    if set(payload) != required or payload.get("schema_version") != 1 or payload.get("kind") != "kairos.legacy-outbox-clone-quarantine-result.v1":
-        raise RehearsalError("clone quarantine worker result has an unexpected schema")
-    after = payload.get("after")
-    if (
-        payload.get("first_state") != "QUARANTINED"
-        or payload.get("repeat_state") != "ALREADY_QUARANTINED"
-        or payload.get("runtime_profile") != list(TARGET_MIGRATIONS)
-        or payload.get("simulator_relations") != 0
-        or payload.get("publisher_calls") != 0
-        or not isinstance(after, Mapping)
-        or after.get("published") is not False
-        or after.get("dead_lettered") is not False
-        or after.get("lease_owner_sha256") is not None
-        or after.get("lease_until_utc") is not None
-        or after.get("reconciliation_state") != "PUBLISH_OUTCOME_UNKNOWN"
-        or after.get("reconciliation_id") != inputs.inspection.get("reconciliation_id")
-    ):
-        raise RehearsalError("clone quarantine worker postconditions are not exact")
-    return payload
+    return _verify_worker_result(payload, inputs)
 
 
 def _verify_restore_state(container: str, user: str, database: str, inputs: Inputs) -> str:
     _assert_runtime_shape(container, user, database)
-    # The exact identity stays in the expectation file; use a second bounded
-    # query with only the known public ID substituted after strict JSON parsing.
-    expectation = _read_json(inputs.expectation_path, "clone expectation")
-    identity = expectation.get("identity")
-    if not isinstance(identity, Mapping) or not isinstance(identity.get("id"), int) or identity["id"] <= 0:
-        raise RehearsalError("clone expectation identity is invalid")
+    # The exact identity stays in the snapshotted, signed expectation.  Only a
+    # validated positive numeric ID enters SQL; every other field is compared
+    # from structured output held locally and never emitted by this controller.
+    identity, reconciliation_id = _expectation_identity(inputs)
     values = _psql(
         container,
         user,
         database,
-        "SELECT publish_attempts::text || '|' || (published_at IS NULL)::text || '|' || (dead_lettered_at IS NULL)::text || '|' || (lease_owner IS NULL)::text || '|' || (lease_until IS NULL)::text || '|' || reconciliation_state || '|' || reconciliation_id FROM message_outbox WHERE id=" + str(identity["id"]) + ";",
+        "SELECT json_build_object("
+        "'id', id, "
+        "'producer', producer, "
+        "'message_id', message_id, "
+        "'topic', topic, "
+        "'payload_sha256', payload_sha256, "
+        "'publish_attempts', publish_attempts, "
+        "'published', published_at IS NOT NULL, "
+        "'dead_lettered', dead_lettered_at IS NOT NULL, "
+        "'lease_owner_cleared', lease_owner IS NULL, "
+        "'lease_until_cleared', lease_until IS NULL, "
+        "'reconciliation_state', reconciliation_state, "
+        "'reconciliation_id', reconciliation_id"
+        ")::text FROM message_outbox WHERE id=" + str(identity["id"]) + ";",
         "verify restored quarantine state",
     )
-    expected = f"{identity['publish_attempts']}|t|t|t|t|PUBLISH_OUTCOME_UNKNOWN|{expectation['reconciliation_id']}"
-    if values != [expected]:
+    if len(values) != 1:
+        raise RehearsalError("restored clone did not return one exact outbox row")
+    try:
+        observed = json.loads(values[0])
+    except json.JSONDecodeError as exc:
+        raise RehearsalError("restored clone outbox state is malformed") from exc
+    expected = {
+        **identity,
+        "published": False,
+        "dead_lettered": False,
+        "lease_owner_cleared": True,
+        "lease_until_cleared": True,
+        "reconciliation_state": "PUBLISH_OUTCOME_UNKNOWN",
+        "reconciliation_id": reconciliation_id,
+    }
+    if observed != expected:
         raise RehearsalError("restored clone does not preserve the exact quarantine state")
     return _fingerprint(container, user, database)
 
 
-def _cleanup(container: str | None, data_volume: str | None, stage_volume: str | None, suffix: str) -> None:
+def _cleanup(containers: Iterable[str | None], data_volume: str | None, stage_volume: str | None, suffix: str) -> None:
     errors: list[str] = []
-    if container:
+    for container in containers:
+        if not container:
+            continue
         probe = _docker(["inspect", "--format", "{{.Id}}", container], "clone container existence", allow_failure=True)
         if probe.returncode == 0:
             try:
@@ -764,9 +1055,20 @@ def _cleanup(container: str | None, data_volume: str | None, stage_volume: str |
         raise RehearsalError("clone-only resource cleanup failed")
 
 
-def _sign_receipt(path: Path, signature: Path) -> None:
-    _gpg(["--batch", "--armor", "--local-user", EXPECTED_SIGNER, "--detach-sign", "--output", str(signature), str(path)], "clone rehearsal receipt signing")
-    _verify_signature(path, signature)
+def _detached_signature(path: Path) -> bytes:
+    """Sign a private staged receipt to stdout, avoiding an attacker-controlled output path."""
+
+    result = _gpg(
+        ["--batch", "--no-options", "--armor", "--local-user", EXPECTED_SIGNER, "--detach-sign", "--output", "-", str(path)],
+        "clone rehearsal receipt signing",
+    )
+    try:
+        signature = result.stdout.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise RehearsalError("clone rehearsal receipt signature is not armored ASCII") from exc
+    if not signature.startswith(b"-----BEGIN PGP SIGNATURE-----") or not signature.rstrip().endswith(b"-----END PGP SIGNATURE-----"):
+        raise RehearsalError("clone rehearsal receipt signature is malformed")
+    return signature
 
 
 def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
@@ -782,6 +1084,7 @@ def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
     source_dump = f"{stage_directory}/source.dump"
     upgraded_dump = f"{stage_directory}/upgraded.dump"
     runner_probe: str | None = f"kairos-legacy-outbox-runner-{suffix}"
+    worker: str | None = f"kairos-legacy-outbox-worker-{suffix}"
     temporary = Path(tempfile.mkdtemp(prefix=f"kairos-legacy-outbox-clone-{suffix}-"))
     operation_error: BaseException | None = None
     receipt: Mapping[str, Any] | None = None
@@ -808,7 +1111,8 @@ def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
             raise RehearsalError("clone container must have no network")
         _docker(["start", clone], "start no-network legacy clone")
         _wait_postgres(clone, clone_user)
-        migration_directory = _inspect_migration_runner(migration_runner_image, runner_probe, suffix)
+        timescaledb_job_owners = _ensure_timescaledb_job_owners(clone, clone_user, inputs.manifest["timescaledb_bgw_owners"])
+        migration_directory = _inspect_migration_runner(migration_runner_image, runner_probe, suffix, temporary)
         _docker(["cp", str(inputs.dump_path), f"{clone}:{source_dump}"], "stage verified source dump into clone")
         staged_hash = _docker_text(["exec", "--user=root", clone, "sha256sum", "--", source_dump], "verify staged source dump")
         if not staged_hash.startswith(str(inputs.manifest["sha256"]) + " "):
@@ -828,7 +1132,18 @@ def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
         second_fingerprint = _fingerprint(clone, clone_user, upgrade_database)
         if first_fingerprint != second_fingerprint:
             raise RehearsalError("repeat clone migration pass changed the schema fingerprint")
-        result = _run_quarantine_worker(migration_runner_image, clone, stage_volume, stage_directory, clone_user, clone_password, upgrade_database, inputs)
+        result = _run_quarantine_worker(
+            migration_runner_image,
+            worker,
+            suffix,
+            clone,
+            stage_volume,
+            stage_directory,
+            clone_user,
+            clone_password,
+            upgrade_database,
+            inputs,
+        )
         _assert_checkpoints(clone, clone_user, upgrade_database, inputs.manifest["checkpoints"])
         _docker(["exec", clone, "pg_dump", "--format=custom", "--no-owner", "--no-privileges", f"--username={clone_user}", f"--dbname={upgrade_database}", f"--file={upgraded_dump}"], "create post-quarantine clone restore dump")
         _restore_dump(clone, clone_user, restore_database, upgraded_dump, "restore post-quarantine clone dump")
@@ -847,30 +1162,29 @@ def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
             "source_backup": {
                 "sha256": inputs.manifest["sha256"], "bytes": inputs.manifest["bytes"], "manifest_sha256": inputs.manifest_sha256,
                 "recovery_receipt_sha256": inputs.recovery_sha256, "legacy_inspection_receipt_sha256": inputs.inspection_sha256,
-                "legacy_inspection_signature_sha256": _file_sha256(inputs.inspection_signature_path), "expectation_sha256": inputs.expectation_sha256,
+                "legacy_inspection_signature_sha256": inputs.inspection_signature_sha256, "expectation_sha256": inputs.expectation_sha256,
                 "legacy_schema_fingerprint_sha256": legacy_fingerprint,
             },
-            "migration_runner": {"persistence_repository": EXPECTED_PERSISTENCE_REPOSITORY, "persistence_revision": EXPECTED_PERSISTENCE_REVISION, "image_digest": migration_runner_image, "exact_runtime_profile": list(TARGET_MIGRATIONS), "excluded_simulator_migration": "017_simulator_journal.sql"},
-            "clone": {"isolated": True, "original_runtime_contacted": False, "redis_contacted": False, "publisher_contacted": False, "network_mode": "none", "legacy_schema_fingerprint_sha256": legacy_fingerprint, "first_runtime_schema_fingerprint_sha256": first_fingerprint, "second_runtime_schema_fingerprint_sha256": second_fingerprint, "simulator_relations_present": False},
+            "migration_runner": {"persistence_repository": EXPECTED_PERSISTENCE_REPOSITORY, "persistence_revision": EXPECTED_PERSISTENCE_REVISION, "image_digest": migration_runner_image, "repository_module_sha256": EXPECTED_PERSISTENCE_REPOSITORY_SHA256, "exact_runtime_profile": list(TARGET_MIGRATIONS), "excluded_simulator_migration": "017_simulator_journal.sql"},
+            "clone": {"isolated": True, "original_runtime_contacted": False, "redis_contacted": False, "publisher_contacted": False, "network_mode": "none", "timescaledb_bgw_owner_placeholders": list(timescaledb_job_owners), "timescaledb_bgw_owner_placeholder_roles_verified": True, "forbidden_network_calls": result["forbidden_network_calls"], "loopback_database_connections": result["loopback_database_connections"], "legacy_schema_fingerprint_sha256": legacy_fingerprint, "first_runtime_schema_fingerprint_sha256": first_fingerprint, "second_runtime_schema_fingerprint_sha256": second_fingerprint, "simulator_relations_present": False},
             "quarantine": result,
             "restore_drill": {"passed": True, "schema_fingerprint_sha256": restore_fingerprint},
             "original_migration": {"authorized": False, "original_quarantine_authorized": False, "required_next_gate": "SEPARATE_TARGET_ROLE_AND_PRIMARY_MIGRATION_REVIEW"},
-            "assertions": ["clone-only no-network rehearsal", "no source database or runtime volume was contacted", "DB-only primitive made zero publisher calls", "success does not authorize PAPER, alpha, or LIVE"],
+            "assertions": ["clone-only no-network rehearsal", "no source database or runtime volume was contacted", "reviewed DB-only primitive made no forbidden network connection", "success does not authorize PAPER, alpha, or LIVE"],
         }
     except BaseException as exc:  # ensure exact generated cleanup before surface failure
         operation_error = exc
     finally:
         try:
-            if runner_probe:
-                probe = _docker(["inspect", "--format", "{{.Id}}", runner_probe], "runner probe existence", allow_failure=True)
-                if probe.returncode == 0:
-                    _assert_labels(_container_labels(runner_probe), suffix)
-                    _docker(["rm", "-f", runner_probe], "remove generated migration runner probe")
-            _cleanup(clone, data_volume, stage_volume, suffix)
+            _cleanup((worker, runner_probe, clone), data_volume, stage_volume, suffix)
         except BaseException as cleanup_error:
             if operation_error is None:
                 operation_error = cleanup_error
-        shutil.rmtree(temporary, ignore_errors=True)
+        try:
+            shutil.rmtree(temporary)
+        except OSError as cleanup_error:
+            if operation_error is None:
+                operation_error = RehearsalError("clone-only temporary artifact cleanup failed")
     if operation_error is not None:
         if isinstance(operation_error, RehearsalError):
             raise operation_error
@@ -880,28 +1194,86 @@ def _run(inputs: Inputs, migration_runner_image: str) -> Mapping[str, Any]:
     return receipt
 
 
-def _write_signed_receipt(receipt: Mapping[str, Any], manifest_path: Path, requested: str | None) -> Path:
-    directory = manifest_path.parent.resolve()
+def _receipt_output_directory(directory: Path) -> Path:
+    """Limit signed receipts to the original verified backup directory."""
+
+    return _ensure_below(directory, BACKUP_ROOT, "clone rehearsal receipt directory")
+
+
+def _write_new_file(path: Path, content: bytes, label: str) -> None:
+    """Create one generated file without following or overwriting an existing path."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise RehearsalError(f"{label} path is already occupied") from exc
+    except OSError as exc:
+        raise RehearsalError(f"{label} path could not be created") from exc
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+    except OSError as exc:
+        raise RehearsalError(f"{label} write failed") from exc
+
+
+def _remove_signed_receipt(output: Path, directory: Path) -> None:
+    """Remove only the exact generated receipt pair after a failed final cleanup."""
+
+    resolved_directory = _receipt_output_directory(directory)
+    candidate = output.resolve(strict=False)
+    signature = candidate.with_suffix(candidate.suffix + ".asc")
+    if (
+        candidate.parent != resolved_directory
+        or not re.fullmatch(r"legacy-outbox-quarantine-clone-rehearsal-[0-9]{8}T[0-9]{6}Z\.json", candidate.name)
+        or signature.parent != resolved_directory
+    ):
+        raise RehearsalError("refusing to remove an unexpected clone rehearsal receipt")
+    for path in (signature, candidate):
+        if path.exists():
+            if not path.is_file() and not path.is_symlink():
+                raise RehearsalError("clone rehearsal receipt cleanup found an unexpected filesystem object")
+            path.unlink()
+
+
+def _write_signed_receipt(receipt: Mapping[str, Any], receipt_directory: Path, requested: str | None) -> Path:
+    directory = _receipt_output_directory(receipt_directory)
     if requested:
-        output = Path(requested).resolve()
+        output = Path(requested).resolve(strict=False)
     else:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         output = directory / f"legacy-outbox-quarantine-clone-rehearsal-{stamp}.json"
-    if output.parent != directory or output.exists() or output.with_suffix(output.suffix + ".asc").exists():
+    if (
+        output.parent != directory
+        or not re.fullmatch(r"legacy-outbox-quarantine-clone-rehearsal-[0-9]{8}T[0-9]{6}Z\.json", output.name)
+        or output.exists()
+        or output.with_suffix(output.suffix + ".asc").exists()
+    ):
         raise RehearsalError("clone rehearsal receipt must be a new file beside the verified backup manifest")
     unsigned = dict(receipt)
     unsigned["receipt_sha256"] = _sha256_json(unsigned)
-    staged = output.with_name("." + output.name + ".staged")
     signature = output.with_suffix(output.suffix + ".asc")
-    staged_signature = staged.with_suffix(staged.suffix + ".asc")
     try:
-        staged.write_text(_canonical_json(unsigned) + "\n", encoding="utf-8", newline="\n")
-        _sign_receipt(staged, staged_signature)
-        staged_signature.replace(signature)
-        staged.replace(output)
+        descriptor, staged_name = tempfile.mkstemp(prefix=f".{output.stem}.", suffix=".staged", dir=directory)
+    except OSError as exc:
+        raise RehearsalError("clone rehearsal receipt staging file could not be created") from exc
+    staged = Path(staged_name)
+    completed = False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write((_canonical_json(unsigned) + "\n").encode("utf-8"))
+            handle.flush()
+        contents = staged.read_bytes()
+        armored_signature = _detached_signature(staged)
+        _write_new_file(output, contents, "clone rehearsal receipt")
+        _write_new_file(signature, armored_signature, "clone rehearsal receipt signature")
+        _verify_signature(output, signature)
+        completed = True
     finally:
         staged.unlink(missing_ok=True)
-        staged_signature.unlink(missing_ok=True)
+        if not completed:
+            _remove_signed_receipt(output, directory)
     return output
 
 
@@ -920,12 +1292,40 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    inputs: Inputs | None = None
+    output: Path | None = None
+    failure: RehearsalError | None = None
     try:
         inputs = _verify_inputs(args)
         receipt = _run(inputs, args.migration_runner_image)
-        output = _write_signed_receipt(receipt, inputs.manifest_path, args.receipt_path)
+        output = _write_signed_receipt(receipt, inputs.receipt_directory, args.receipt_path)
     except RehearsalError as exc:
-        print(f"legacy clone quarantine rehearsal rejected: {exc}", file=sys.stderr)
+        failure = exc
+    except Exception as exc:
+        failure = RehearsalError("clone-only rehearsal failed unexpectedly")
+        failure.__cause__ = exc
+    finally:
+        if inputs is not None:
+            try:
+                _cleanup_evidence_stage(inputs.staging_directory)
+            except RehearsalError as cleanup_error:
+                receipt_cleanup_error: RehearsalError | None = None
+                if output is not None:
+                    try:
+                        _remove_signed_receipt(output, inputs.receipt_directory)
+                    except RehearsalError as receipt_error:
+                        receipt_cleanup_error = receipt_error
+                if receipt_cleanup_error is not None:
+                    failure = RehearsalError("clone rehearsal evidence and generated receipt cleanup failed")
+                elif failure is None:
+                    failure = RehearsalError("clone rehearsal evidence staging cleanup failed")
+                else:
+                    failure = RehearsalError("clone rehearsal failed and evidence staging cleanup failed")
+    if failure is not None:
+        print(f"legacy clone quarantine rehearsal rejected: {failure}", file=sys.stderr)
+        return 2
+    if output is None:
+        print("legacy clone quarantine rehearsal rejected: clone rehearsal produced no receipt", file=sys.stderr)
         return 2
     print(f"Legacy clone-only quarantine rehearsal passed: {output}")
     return 0

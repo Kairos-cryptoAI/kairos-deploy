@@ -59,15 +59,48 @@ class CloneRunnerInputError(ValueError):
     """The host-to-clone contract is malformed or unsuitable."""
 
 
-class FailingNoNetworkPublisher:
-    """A witness proving this DB-only path never invokes a publisher."""
+class LoopbackDatabaseOnlyGuard:
+    """Allow only the clone's loopback PostgreSQL connection while the primitive runs."""
 
     def __init__(self) -> None:
-        self.calls = 0
+        self.forbidden_network_calls = 0
+        self.loopback_database_connections = 0
+        self._original: object | None = None
 
-    async def publish(self, *_: object, **__: object) -> None:
-        self.calls += 1
-        raise RuntimeError("synthetic no-network publisher must never be called")
+    def __enter__(self) -> "LoopbackDatabaseOnlyGuard":
+        original = asyncio.BaseEventLoop.create_connection
+        self._original = original
+
+        async def guarded(
+            loop: asyncio.AbstractEventLoop,
+            protocol_factory: object,
+            host: str | None = None,
+            port: int | str | None = None,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            if host in {"127.0.0.1", "::1"} and str(port) == "5432":
+                self.loopback_database_connections += 1
+                return await original(loop, protocol_factory, host, port, *args, **kwargs)
+            self.forbidden_network_calls += 1
+            raise CloneRunnerInputError("clone worker attempted a non-loopback network connection")
+
+        asyncio.BaseEventLoop.create_connection = guarded
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._original is None:
+            raise RuntimeError("clone network guard was not initialized")
+        asyncio.BaseEventLoop.create_connection = self._original
+
+
+def _repository_module_sha256() -> str:
+    try:
+        from importlib.resources import files
+
+        return hashlib.sha256(files("kairos_persistence").joinpath("repository.py").read_bytes()).hexdigest()
+    except (ModuleNotFoundError, OSError) as exc:
+        raise CloneRunnerInputError("reviewed persistence repository module is unavailable") from exc
 
 
 def _required_environment(name: str) -> str:
@@ -158,6 +191,18 @@ def _redacted_row(row: asyncpg.Record) -> dict[str, object]:
     }
 
 
+def _assert_identity(row: asyncpg.Record, identity: OfflineOutboxIdentity) -> None:
+    if (
+        int(row["id"]) != identity.id
+        or str(row["producer"]) != identity.producer
+        or str(row["message_id"]) != identity.message_id
+        or str(row["topic"]) != identity.topic
+        or str(row["payload_sha256"]) != identity.payload_sha256
+        or int(row["publish_attempts"]) != identity.publish_attempts
+    ):
+        raise CloneRunnerInputError("clone exact outbox immutable identity differs")
+
+
 async def _run() -> dict[str, object]:
     expectation_path = Path(_required_environment("KAIROS_CLONE_EXPECTATION_PATH"))
     identity, reconciliation_id = _expectation(expectation_path)
@@ -166,101 +211,105 @@ async def _run() -> dict[str, object]:
         raise CloneRunnerInputError("clone lease owner hash is invalid")
     expected_until = _parse_utc(_required_environment("KAIROS_CLONE_LEASE_UNTIL_UTC"))
     dsn = _required_environment("KAIROS_CLONE_DATABASE_URL")
-    publisher = FailingNoNetworkPublisher()
-
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1, command_timeout=20)
-    try:
-        async with pool.acquire() as connection:
-            row = await connection.fetchrow(
-                """SELECT id, producer, message_id, topic, payload_sha256,
-                          publish_attempts, published_at, dead_lettered_at,
-                          lease_owner, lease_until, reconciliation_state,
-                          reconciliation_id
-                     FROM message_outbox
-                    WHERE id=$1""",
-                identity.id,
-            )
-            if row is None:
-                raise CloneRunnerInputError("clone exact outbox row is missing")
-            owner = row["lease_owner"]
-            if not isinstance(owner, str) or not owner:
-                raise CloneRunnerInputError("clone exact outbox lease owner is missing")
-            if hashlib.sha256(owner.encode("utf-8")).hexdigest() != expected_owner_sha256:
-                raise CloneRunnerInputError("clone exact outbox lease owner hash differs")
-            if _utc(row["lease_until"]) != _utc(expected_until):
-                raise CloneRunnerInputError("clone exact outbox lease timestamp differs")
-            before = _redacted_row(row)
-
-        repository = AuditRepository(pool)
-        lease = OfflineOutboxExpiredLease(owner=owner, until=expected_until)
-        first = await repository.quarantine_expired_outbox_exact(
-            identity,
-            expired_lease=lease,
-            reconciliation_id=reconciliation_id,
-            reason=QUARANTINE_REASON,
-        )
-        second = await repository.quarantine_expired_outbox_exact(
-            identity,
-            expired_lease=lease,
-            reconciliation_id=reconciliation_id,
-            reason=QUARANTINE_REASON,
-        )
-        if first.state is not OfflineOutboxQuarantineState.QUARANTINED:
-            raise CloneRunnerInputError("first clone quarantine did not succeed")
-        if second.state is not OfflineOutboxQuarantineState.ALREADY_QUARANTINED:
-            raise CloneRunnerInputError("repeat clone quarantine was not idempotent")
-
-        async with pool.acquire() as connection:
-            row = await connection.fetchrow(
-                """SELECT id, producer, message_id, topic, payload_sha256,
-                          publish_attempts, published_at, dead_lettered_at,
-                          lease_owner, lease_until, reconciliation_state,
-                          reconciliation_id
-                     FROM message_outbox
-                    WHERE id=$1""",
-                identity.id,
-            )
-            migrations = tuple(
-                str(item["version"])
-                for item in await connection.fetch("SELECT version FROM schema_migrations ORDER BY version")
-            )
-            simulator_relations = int(
-                await connection.fetchval(
-                    """SELECT COUNT(*) FROM pg_class c
-                         JOIN pg_namespace n ON n.oid=c.relnamespace
-                        WHERE n.nspname='public' AND c.relname LIKE 'sim\\_%' ESCAPE '\\'"""
+    network_guard = LoopbackDatabaseOnlyGuard()
+    with network_guard:
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=1, command_timeout=20)
+        try:
+            async with pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """SELECT id, producer, message_id, topic, payload_sha256,
+                              publish_attempts, published_at, dead_lettered_at,
+                              lease_owner, lease_until, reconciliation_state,
+                              reconciliation_id
+                         FROM message_outbox
+                        WHERE id=$1""",
+                    identity.id,
                 )
+                if row is None:
+                    raise CloneRunnerInputError("clone exact outbox row is missing")
+                _assert_identity(row, identity)
+                owner = row["lease_owner"]
+                if not isinstance(owner, str) or not owner:
+                    raise CloneRunnerInputError("clone exact outbox lease owner is missing")
+                if hashlib.sha256(owner.encode("utf-8")).hexdigest() != expected_owner_sha256:
+                    raise CloneRunnerInputError("clone exact outbox lease owner hash differs")
+                if _utc(row["lease_until"]) != _utc(expected_until):
+                    raise CloneRunnerInputError("clone exact outbox lease timestamp differs")
+                before = _redacted_row(row)
+
+            repository = AuditRepository(pool)
+            lease = OfflineOutboxExpiredLease(owner=owner, until=expected_until)
+            first = await repository.quarantine_expired_outbox_exact(
+                identity,
+                expired_lease=lease,
+                reconciliation_id=reconciliation_id,
+                reason=QUARANTINE_REASON,
             )
-        if row is None:
-            raise CloneRunnerInputError("clone exact outbox row disappeared")
-        after = _redacted_row(row)
-        if (
-            after["published"]
-            or after["dead_lettered"]
-            or after["publish_attempts"] != identity.publish_attempts
-            or after["lease_owner_sha256"] is not None
-            or after["lease_until_utc"] is not None
-            or after["reconciliation_state"] != "PUBLISH_OUTCOME_UNKNOWN"
-            or after["reconciliation_id"] != reconciliation_id
-            or migrations != RUNTIME_PROFILE
-            or simulator_relations != 0
-            or publisher.calls != 0
-        ):
-            raise CloneRunnerInputError("clone quarantine postconditions are not exact")
-        return {
-            "schema_version": 1,
-            "kind": "kairos.legacy-outbox-clone-quarantine-result.v1",
-            "first_state": first.state.value,
-            "repeat_state": second.state.value,
-            "before_sha256": _sha256_json(before),
-            "after_sha256": _sha256_json(after),
-            "after": after,
-            "runtime_profile": list(migrations),
-            "simulator_relations": simulator_relations,
-            "publisher_calls": publisher.calls,
-        }
-    finally:
-        await pool.close()
+            second = await repository.quarantine_expired_outbox_exact(
+                identity,
+                expired_lease=lease,
+                reconciliation_id=reconciliation_id,
+                reason=QUARANTINE_REASON,
+            )
+            if first.state is not OfflineOutboxQuarantineState.QUARANTINED:
+                raise CloneRunnerInputError("first clone quarantine did not succeed")
+            if second.state is not OfflineOutboxQuarantineState.ALREADY_QUARANTINED:
+                raise CloneRunnerInputError("repeat clone quarantine was not idempotent")
+
+            async with pool.acquire() as connection:
+                row = await connection.fetchrow(
+                    """SELECT id, producer, message_id, topic, payload_sha256,
+                              publish_attempts, published_at, dead_lettered_at,
+                              lease_owner, lease_until, reconciliation_state,
+                              reconciliation_id
+                         FROM message_outbox
+                        WHERE id=$1""",
+                    identity.id,
+                )
+                migrations = tuple(
+                    str(item["version"])
+                    for item in await connection.fetch("SELECT version FROM schema_migrations ORDER BY version")
+                )
+                simulator_relations = int(
+                    await connection.fetchval(
+                        """SELECT COUNT(*) FROM pg_class c
+                             JOIN pg_namespace n ON n.oid=c.relnamespace
+                            WHERE n.nspname='public' AND c.relname LIKE 'sim\\_%' ESCAPE '\\'"""
+                    )
+                )
+            if row is None:
+                raise CloneRunnerInputError("clone exact outbox row disappeared")
+            _assert_identity(row, identity)
+            after = _redacted_row(row)
+            if (
+                after["published"]
+                or after["dead_lettered"]
+                or after["lease_owner_sha256"] is not None
+                or after["lease_until_utc"] is not None
+                or after["reconciliation_state"] != "PUBLISH_OUTCOME_UNKNOWN"
+                or after["reconciliation_id"] != reconciliation_id
+                or migrations != RUNTIME_PROFILE
+                or simulator_relations != 0
+            ):
+                raise CloneRunnerInputError("clone quarantine postconditions are not exact")
+        finally:
+            await pool.close()
+    if network_guard.forbidden_network_calls != 0 or network_guard.loopback_database_connections < 1:
+        raise CloneRunnerInputError("clone quarantine network boundary was not exercised exactly")
+    return {
+        "schema_version": 1,
+        "kind": "kairos.legacy-outbox-clone-quarantine-result.v1",
+        "first_state": first.state.value,
+        "repeat_state": second.state.value,
+        "before_sha256": _sha256_json(before),
+        "after_sha256": _sha256_json(after),
+        "after": after,
+        "runtime_profile": list(migrations),
+        "simulator_relations": simulator_relations,
+        "repository_module_sha256": _repository_module_sha256(),
+        "forbidden_network_calls": network_guard.forbidden_network_calls,
+        "loopback_database_connections": network_guard.loopback_database_connections,
+    }
 
 
 def main() -> int:
