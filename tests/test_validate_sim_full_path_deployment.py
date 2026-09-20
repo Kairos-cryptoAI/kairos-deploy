@@ -18,6 +18,8 @@ PACKAGED_LOCK_PATH = ROOT / "tests" / "sim_full_path_gate" / "source-lock.json"
 FIXTURE_PATH = ROOT / "tests" / "sim_full_path_gate" / "compose.fixture.json"
 DOCKERFILE_PATH = ROOT / "tests" / "sim_full_path_gate" / "Dockerfile"
 DOCKERIGNORE_PATH = ROOT / "tests" / "sim_full_path_gate" / ".dockerignore"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+GATE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "simulator-full-path-gate.yml"
 
 
 class FullPathSimulatorManifestValidationTests(unittest.TestCase):
@@ -58,6 +60,15 @@ class FullPathSimulatorManifestValidationTests(unittest.TestCase):
         wrong["dependencies"]["kairos-core"]["revision"] = "0" * 40
         self.assertTrue(verify_current_release_projection(wrong))
         self.assertTrue(callable(verify_remote_sources))
+
+    def test_ci_workflows_follow_the_exact_simulator_identity(self) -> None:
+        for workflow_path in (CI_WORKFLOW_PATH, GATE_WORKFLOW_PATH):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            self.assertIn(policy.PROJECT, workflow)
+            self.assertNotIn("kairos-sim-full-path-gate-20260920-r2", workflow)
+        gate_workflow = GATE_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn(policy.DATABASE, gate_workflow)
+        self.assertNotIn("kairos_sim_full_path_gate_202609200002", gate_workflow)
 
 
 if __name__ == "__main__":

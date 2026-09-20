@@ -17,6 +17,8 @@ PACKAGED_LOCK_PATH = ROOT / "tests" / "current_release_gate" / "source-lock.json
 FIXTURE_PATH = ROOT / "tests" / "current_release_gate" / "compose.fixture.json"
 DOCKERFILE_PATH = ROOT / "tests" / "current_release_gate" / "Dockerfile"
 DOCKERIGNORE_PATH = ROOT / "tests" / "current_release_gate" / ".dockerignore"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+GATE_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "current-release-gate.yml"
 
 
 class CurrentReleaseGateValidationTests(unittest.TestCase):
@@ -59,6 +61,12 @@ class CurrentReleaseGateValidationTests(unittest.TestCase):
 
     def test_remote_verifier_is_opt_in_only(self) -> None:
         self.assertTrue(callable(verify_remote_sources))
+
+    def test_ci_workflows_follow_the_exact_source_gate_identity(self) -> None:
+        for workflow_path in (CI_WORKFLOW_PATH, GATE_WORKFLOW_PATH):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            self.assertIn(policy.PROJECT, workflow)
+            self.assertNotIn("kairos-current-release-gate-20260920-r2", workflow)
 
 
 if __name__ == "__main__":
