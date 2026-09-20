@@ -9,6 +9,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 if ($ComposeProject -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$') {
     throw "ComposeProject contains unsupported filename characters"
 }
@@ -108,7 +123,7 @@ $manifest = [ordered]@{
     database = $Database
     file = $item.Name
     bytes = $item.Length
-    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+    sha256 = Get-FileSha256 -Path $item.FullName
     checkpoints = $checkpointsAfter
 }
 $manifestPath = "$localDump.json"

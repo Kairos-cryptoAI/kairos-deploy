@@ -273,7 +273,7 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertNotIn("{{ index .Config.Labels", backup)
         self.assertNotIn("{{ index .Config.Labels", recovery)
         self.assertIn("pg_dump", backup)
-        self.assertIn("Get-FileHash", backup)
+        self.assertIn("Get-FileSha256", backup)
         self.assertIn("kairos_restore_drill_", recovery)
         self.assertIn("timescaledb_pre_restore()", recovery)
         self.assertIn("timescaledb_post_restore()", recovery)
@@ -300,6 +300,7 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertIn("Runtime recovery requires an authoritative contiguous anchor for all five symbols", recovery)
         self.assertIn("read_only_consumer_restart_permitted", recovery)
         self.assertIn("offline_bar_recovery_permitted", recovery)
+        self.assertIn("backup_manifest_sha256", recovery)
         self.assertIn("Runtime recovery receipt must remain beside the immutable backup manifest", recovery)
         for table in (
             "event_audit",

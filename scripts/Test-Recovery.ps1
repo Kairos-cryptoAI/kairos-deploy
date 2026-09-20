@@ -12,9 +12,25 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 $root = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $manifestFile = (Resolve-Path -LiteralPath $ManifestPath).Path
 $manifest = Get-Content -Raw -LiteralPath $manifestFile | ConvertFrom-Json
+$manifestSha256 = Get-FileSha256 -Path $manifestFile
 if ($manifest.schema_version -ne 1 -or $manifest.sha256 -notmatch '^[0-9a-f]{64}$') {
     throw "Unsupported or malformed backup manifest"
 }
@@ -28,7 +44,7 @@ if ($null -eq $manifest.checkpoints) {
     throw "Backup manifest lacks durable data checkpoints"
 }
 $dump = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $manifestFile) $manifest.file)).Path
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dump).Hash.ToLowerInvariant()
+$hash = Get-FileSha256 -Path $dump
 if ($hash -ne $manifest.sha256 -or (Get-Item -LiteralPath $dump).Length -ne $manifest.bytes) {
     throw "Backup file does not match its manifest"
 }
@@ -374,6 +390,9 @@ try {
         $receipt.compose_project = $ComposeProject
         $receipt.database = $Database
         $receipt.backup_sha256 = $manifest.sha256
+        # Bind the recovery proof to the exact manifest bytes, not only to a
+        # dump SHA that may appear in a separately regenerated manifest.
+        $receipt.backup_manifest_sha256 = $manifestSha256
         $receipt.running_services = $runningServices
         $receipt.created_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         if ([string]::IsNullOrWhiteSpace($ReceiptPath)) {

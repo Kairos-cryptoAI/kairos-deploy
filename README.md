@@ -327,6 +327,49 @@ outbox effects have separately been reconciled.
 Copy backup plus manifest to encrypted off-host storage under a separate retention policy.
 The local script does not itself provide encryption, scheduling, or remote replication.
 
+### Clone-only schema-upgrade preflight
+
+`Invoke-SchemaUpgradePreflight.ps1` is a deliberately narrower, **clone-only**
+check for a future `001--012` to `001--018` persistence upgrade. It accepts only
+a fresh (at most two hours old), clean `kairos-paper-gate` / `kairos` backup and
+the matching `Test-Recovery.ps1 -RuntimePreflight` receipt. The receipt must bind
+the exact SHA-256 of both dump and manifest, be created after the backup (subject
+to a five-minute clock tolerance), and itself be no older than two hours. Any
+active or expired lease, inbox processing state, duplicate durable identity, or
+stale/wrong source receipt is a deliberate stop.
+
+The migration runner is supplied only as an immutable OCI
+`repository@sha256:<digest>` image. The tool rejects tags, unlabelled images,
+wrong source revisions, a different unprivileged image user, unexpected migration
+files, and migration bytes different from the reviewed
+`kairos-persistence@9219e5ef46c748703d949b324d84f6814ba0f196` source. A local
+tag is not an acceptable substitute. Build/publish that runner in a reviewed CI
+path from `docker/Dockerfile`, using `PACKAGE_DIR=kairos_persistence` and the
+same source repository/revision labels, then pass its published digest explicitly.
+
+```powershell
+scripts\Invoke-SchemaUpgradePreflight.ps1 `
+  -ManifestPath D:\Kairos\kairos-deploy\backups\paper-gate-<stamp>\kairos.dump.json `
+  -BaselineReceiptPath D:\Kairos\kairos-deploy\backups\paper-gate-<stamp>\runtime-recovery-preflight-<stamp>.json `
+  -MigrationRunnerImage ghcr.io/kairos-cryptoai/kairos-schema-upgrade-runner@sha256:<published-digest> `
+  -Confirmation CLONE_ONLY_SCHEMA_UPGRADE_PREFLIGHT
+```
+
+It restores only the custom dump into a newly labelled no-network TimescaleDB
+container, checks the pre-`013` profile, its pinned structural fingerprint, and
+data checkpoints, validates clone DDL capability, applies exactly the pinned
+migrations twice, and performs a second restore drill. The only removals are the
+generated drill databases/container/volumes after their labels and generated
+identities are rechecked.
+
+`PASS_CLONE_ONLY` is evidence about the disposable clone only. It is explicitly
+not authorization to migrate the original runtime: source role ownership and DDL
+permissions still require a separate read-only target-role preflight, and the
+presence of simulator migration `017` in a clone does not decide whether those
+tables belong in the PAPER runtime. This command never mounts a runtime volume,
+reads an environment file, opens a source database connection, or changes
+`PAPER_QUALIFIED`, `ALPHA_READY`, `LIVE_READY`, or `REJECT_ALL`.
+
 ## Known qualification boundary
 
 Static checks and synthetic tests cannot validate real provider credentials or guarantee
