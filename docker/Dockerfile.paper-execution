@@ -74,6 +74,7 @@ RUN groupadd --gid 10001 kairos \
 
 WORKDIR /app
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+RUN test -x /usr/local/bin/node && /usr/local/bin/node --version
 COPY --from=builder --chown=kairos:kairos /app/.venv /app/.venv
 COPY --from=builder --chown=kairos:kairos /tmp/kairos-source-identity /app/.source-identity
 COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/kairos-entrypoint

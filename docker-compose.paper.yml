@@ -120,12 +120,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#fc34bfcfed5d99d0cd75926037ac9b4369243c20
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#4ab622b01d2c30da8f168571d8315b39913f9ecb
       args:
         PACKAGE_DIR: kairos_quant
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: fc34bfcfed5d99d0cd75926037ac9b4369243c20
+        SOURCE_REVISION: 4ab622b01d2c30da8f168571d8315b39913f9ecb
     command: ["kairos-quant-scouts"]
     environment:
       <<: *paper-environment
@@ -153,12 +153,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#6a16440747dee357b40a18434634449f05b7b824
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#765e5ed2599daa64dcb718de228441044e24d821
       args:
         PACKAGE_DIR: kairos_strategy
         SERVICE_EXTRA: runtime
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
-        SOURCE_REVISION: 6a16440747dee357b40a18434634449f05b7b824
+        SOURCE_REVISION: 765e5ed2599daa64dcb718de228441044e24d821
     command: ["kairos-strategy-engine"]
     environment:
       <<: *paper-environment
@@ -174,12 +174,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#a10649ce2e6b802214ff48436c93fd2322f140bf
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#319a5f993047b5492e15040a8a6bd4c000ea113d
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: a10649ce2e6b802214ff48436c93fd2322f140bf
+        SOURCE_REVISION: 319a5f993047b5492e15040a8a6bd4c000ea113d
     command: ["kairos-risk-manager"]
     environment:
       <<: *paper-environment
@@ -202,12 +202,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#a10649ce2e6b802214ff48436c93fd2322f140bf
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#319a5f993047b5492e15040a8a6bd4c000ea113d
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: a10649ce2e6b802214ff48436c93fd2322f140bf
+        SOURCE_REVISION: 319a5f993047b5492e15040a8a6bd4c000ea113d
     # `docker compose run` replaces this argument-free, non-arming default with
     # an explicit symbol/side and the exact arm phrase. `up` never starts this profile.
     command: ["kairos-paper-canary"]
@@ -231,12 +231,12 @@ services:
       dockerfile: docker/Dockerfile.paper-execution
       pull: true
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#73122e825b333281d4fd4acce1c57f90c4cc511c
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#0df4ef150d3194321a72c255b3b9365af1fa2995
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 73122e825b333281d4fd4acce1c57f90c4cc511c
+        SOURCE_REVISION: 0df4ef150d3194321a72c255b3b9365af1fa2995
     command: ["kairos-execution-engine"]
     environment:
       <<: *paper-environment
@@ -253,6 +253,9 @@ services:
       KAIROS_EVEDEX_DEV_EXPECTED_ACCOUNT_ID: ${KAIROS_EVEDEX_DEV_EXPECTED_ACCOUNT_ID:?set remote DEV account id in .env.paper}
       KAIROS_EVEDEX_DEV_API_KEY_FILE: /run/secrets/evedex_dev_api_key
       KAIROS_EVEDEX_DEV_PRIVATE_KEY_FILE: /run/secrets/evedex_dev_private_key
+      # The paper execution image copies this pinned Node 22 binary from its
+      # digest-pinned build stage.  Never fall back to ambient PATH.
+      KAIROS_EVEDEX_SIDECAR_NODE: /usr/local/bin/node
     secrets:
       - *paper-redis-url-secret
       - *paper-persistence-url-secret
@@ -271,12 +274,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#526c30feddcaf4b7147449e6e513fec61c43d75f
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#c89bb31f9425e81e5d77edc6a7e5a871a017af6c
       args:
         PACKAGE_DIR: kairos_persistence
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
-        SOURCE_REVISION: 526c30feddcaf4b7147449e6e513fec61c43d75f
+        SOURCE_REVISION: c89bb31f9425e81e5d77edc6a7e5a871a017af6c
     command: ["kairos-persistence-exporter"]
     environment:
       <<: *paper-environment

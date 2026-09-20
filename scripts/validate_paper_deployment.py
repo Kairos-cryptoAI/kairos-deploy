@@ -78,6 +78,7 @@ PAPER_ENDPOINTS = {
     "KAIROS_EVEDEX_WEBSOCKET_PREFIX": "futures-perp-dev",
     "KAIROS_EVEDEX_CHAIN_ID": "16182",
 }
+PAPER_SIDECAR_NODE_RUNTIME = "/usr/local/bin/node"
 COMMON_BINDINGS = {
     "KAIROS_REDIS_URL": "/run/secrets/paper_redis_url",
     "KAIROS_PERSISTENCE_DATABASE_URL": "/run/secrets/paper_persistence_database_url",
@@ -195,6 +196,7 @@ PAPER_SOURCE_ENVIRONMENT_KEYS = {
         "KAIROS_EVEDEX_DEV_EXPECTED_ACCOUNT_ID",
         "KAIROS_EVEDEX_DEV_API_KEY_FILE",
         "KAIROS_EVEDEX_DEV_PRIVATE_KEY_FILE",
+        "KAIROS_EVEDEX_SIDECAR_NODE",
     },
     "ops-exporter": {
         *PAPER_COMMON_ENVIRONMENT,
@@ -612,6 +614,10 @@ def validate_paper_compose(config: dict[str, Any], lock: dict[str, Any]) -> list
         "/run/secrets/evedex_dev_private_key"
     ):
         errors.append("execution-engine: DEV private key must be passed only as a file")
+    if execution_env.get("KAIROS_EVEDEX_SIDECAR_NODE") != PAPER_SIDECAR_NODE_RUNTIME:
+        errors.append(
+            "execution-engine: sidecar runtime must be the absolute image-pinned /usr/local/bin/node"
+        )
 
     secret_definitions = config.get("secrets", {}) or {}
     if set(secret_definitions) != set(PAPER_SECRET_FILES):

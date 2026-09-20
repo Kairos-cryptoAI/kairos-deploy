@@ -176,6 +176,7 @@ def paper_compose(lock: dict) -> dict:
             "KAIROS_EVEDEX_DEV_SYMBOL_MAP": PAPER_DEV_SYMBOL_MAP,
             "KAIROS_EVEDEX_DEV_API_KEY_FILE": "/run/secrets/evedex_dev_api_key",
             "KAIROS_EVEDEX_DEV_PRIVATE_KEY_FILE": "/run/secrets/evedex_dev_private_key",
+            "KAIROS_EVEDEX_SIDECAR_NODE": "/usr/local/bin/node",
         }
     )
     services["execution-engine"]["secrets"].extend(
@@ -415,6 +416,17 @@ class PaperComposeTests(unittest.TestCase):
         self.assertIn("strategy-engine: PAPER alpha must remain REJECT_ALL", errors)
         self.assertTrue(any("separate DEV API" in error for error in errors))
 
+    def test_rejects_unpinned_sidecar_runtime(self) -> None:
+        lock = paper_lock()
+        model = paper_compose(lock)
+        model["services"]["execution-engine"]["environment"][
+            "KAIROS_EVEDEX_SIDECAR_NODE"
+        ] = "/usr/bin/node"
+
+        errors = validate_paper_compose(model, lock)
+
+        self.assertTrue(any("sidecar runtime" in error for error in errors))
+
 
 class PaperEnvironmentTests(unittest.TestCase):
     def test_interpolation_file_contains_no_secret_or_legacy_authority(self) -> None:
@@ -464,6 +476,26 @@ class PaperEnvironmentTests(unittest.TestCase):
 
 
 class PaperExecutionDockerfileTests(unittest.TestCase):
+    def test_runtime_node_is_probed_before_credential_bearing_entrypoint(self) -> None:
+        dockerfile = (
+            Path(__file__).resolve().parents[1]
+            / "docker"
+            / "Dockerfile.paper-execution"
+        ).read_text(encoding="utf-8")
+
+        node_copy = dockerfile.index(
+            "COPY --from=node /usr/local/bin/node /usr/local/bin/node"
+        )
+        node_probe = dockerfile.index(
+            "RUN test -x /usr/local/bin/node && /usr/local/bin/node --version"
+        )
+        entrypoint_copy = dockerfile.index(
+            "COPY --chmod=0555 docker/entrypoint.sh /usr/local/bin/kairos-entrypoint"
+        )
+
+        self.assertLess(node_copy, node_probe)
+        self.assertLess(node_probe, entrypoint_copy)
+
     def test_source_revision_invalidates_execution_and_sidecar_cache(self) -> None:
         dockerfile = (
             Path(__file__).resolve().parents[1]
@@ -474,7 +506,10 @@ class PaperExecutionDockerfileTests(unittest.TestCase):
         source_copy = dockerfile.index("COPY --from=service pyproject.toml")
 
         self.assertLess(identity_write, source_copy)
-        self.assertIn('printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"', dockerfile)
+        self.assertIn(
+            'printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"',
+            dockerfile,
+        )
         self.assertIn(
             "COPY --from=builder --chown=kairos:kairos "
             "/tmp/kairos-source-identity /app/.source-identity",
