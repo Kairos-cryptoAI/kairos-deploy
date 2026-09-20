@@ -110,6 +110,29 @@ function Get-TerminalLogEvent([string]$Path, [int]$Count) {
     return $terminal
 }
 
+function Get-StdoutObservation([string]$Path, [int]$Count) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [ordered]@{
+            sha256 = $null
+            stable_during_observation = $false
+            terminal_event = $null
+        }
+    }
+
+    # A terminal event is useful only when it is bound to stable bytes.  A
+    # concurrently appended or replaced log is evidence of an unresolved
+    # process state, not proof that a stopped recovery completed safely.
+    $before = Get-Sha256 $Path
+    $terminal = Get-TerminalLogEvent -Path $Path -Count $Count
+    $after = Get-Sha256 $Path
+    $stable = $before -eq $after
+    return [ordered]@{
+        sha256 = if ($stable) { $after } else { $null }
+        stable_during_observation = $stable
+        terminal_event = $terminal
+    }
+}
+
 $resolvedStatusPath = (Resolve-Path -LiteralPath $StatusPath -ErrorAction Stop).Path
 $rawStatus = Get-Content -LiteralPath $resolvedStatusPath -Raw -ErrorAction Stop
 try {
@@ -146,17 +169,20 @@ if ($null -ne $process) {
     }
 }
 
-$terminal = Get-TerminalLogEvent -Path $stdoutPath -Count $TailLines
+$stdout = Get-StdoutObservation -Path $stdoutPath -Count $TailLines
+$terminal = $stdout.terminal_event
 if ($processState -eq 'PRESENT') {
     $derivedState = 'RUNNING'
     $nextAction = 'OBSERVE_ONLY'
 } elseif ($processState -eq 'PID_REUSED_OR_STALE') {
     $derivedState = 'ORPHANED_UNKNOWN'
     $nextAction = 'PRESERVE_LOGS_AND_DIAGNOSE_BEFORE_ANY_RECOVERY_ACTION'
-} elseif ($null -ne $terminal -and $terminal.timestamp_valid -and $terminal.state -eq 'COMPLETED') {
+} elseif ($stdout.stable_during_observation -and $null -ne $terminal -and
+    $terminal.timestamp_valid -and $terminal.state -eq 'COMPLETED') {
     $derivedState = 'COMPLETED_UNVERIFIED'
     $nextAction = 'FRESH_BACKUP_AND_CLONE_ONLY_CONTINUITY_OUTBOX_RECONCILIATION_REQUIRED'
-} elseif ($null -ne $terminal -and $terminal.timestamp_valid -and $terminal.state -eq 'FAILED') {
+} elseif ($stdout.stable_during_observation -and $null -ne $terminal -and
+    $terminal.timestamp_valid -and $terminal.state -eq 'FAILED') {
     $derivedState = 'FAILED_UNVERIFIED'
     $nextAction = 'PRESERVE_LOGS_AND_DIAGNOSE_BEFORE_ANY_RECOVERY_ACTION'
 } else {
@@ -173,6 +199,10 @@ if ($processState -eq 'PRESENT') {
         reported_state = $reportedState
         supervisor_pid = $processId
         started_at_utc = $startedAt.ToString('o')
+    }
+    source_stdout = [ordered]@{
+        sha256 = $stdout.sha256
+        stable_during_observation = $stdout.stable_during_observation
     }
     supervisor = [ordered]@{
         state = $processState

@@ -27,6 +27,7 @@ try {
         '{"state":"COMPLETED","observed_at_utc":"2026-09-19T16:55:32Z"}'
     )
     $before = (Get-FileHash -Algorithm SHA256 -LiteralPath $complete).Hash
+    $stdoutBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $temporaryRoot 'complete.out.log')).Hash
     $completeResult = (& $observer -StatusPath $complete | ConvertFrom-Json)
     $after = (Get-FileHash -Algorithm SHA256 -LiteralPath $complete).Hash
     $completeObservedAt = ([DateTimeOffset]$completeResult.terminal_stdout_event.observed_at_utc).
@@ -37,6 +38,8 @@ try {
         $completeResult.permissions.restart_consumers -ne $false -or
         $completeResult.terminal_stdout_event.timestamp_valid -ne $true -or
         $completeObservedAt -ne '2026-09-19T16:55:32.0000000+00:00' -or
+        $completeResult.source_stdout.stable_during_observation -ne $true -or
+        $completeResult.source_stdout.sha256 -ne $stdoutBefore -or
         $before -ne $after) {
         throw 'Completed stale-status observation did not remain fail-closed and read-only.'
     }
