@@ -1,0 +1,21 @@
+name: kairos-legacy-outbox-inspection-gate
+
+# Disposable CI/local fixture. It is not the operational inspection profile and
+# has no host port, Redis, trading service, or source-runtime mount.
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    environment:
+      POSTGRES_USER: kairos
+      POSTGRES_PASSWORD: kairos_test
+      POSTGRES_DB: kairos
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos"]
+      interval: 5s
+      timeout: 3s
+      retries: 18
+    networks: [data]
+
+networks:
+  data:
+    internal: true

@@ -1,0 +1,104 @@
+name: legacy-outbox-inspection-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.legacy-outbox-inspection.yml"
+      - "legacy-outbox-inspection.sources.lock.json"
+      - ".env.legacy-outbox-inspection.example"
+      - "scripts/Invoke-LegacyOutboxInspection.ps1"
+      - "scripts/validate_legacy_outbox_inspection.py"
+      - "scripts/verify_legacy_outbox_receipt.py"
+      - "tests/legacy_outbox_inspection/**"
+      - "tests/test_legacy_outbox_inspection.py"
+      - ".github/workflows/legacy-outbox-inspection-gate.yml"
+  pull_request:
+    paths:
+      - "docker-compose.legacy-outbox-inspection.yml"
+      - "legacy-outbox-inspection.sources.lock.json"
+      - ".env.legacy-outbox-inspection.example"
+      - "scripts/Invoke-LegacyOutboxInspection.ps1"
+      - "scripts/validate_legacy_outbox_inspection.py"
+      - "scripts/verify_legacy_outbox_receipt.py"
+      - "tests/legacy_outbox_inspection/**"
+      - "tests/test_legacy_outbox_inspection.py"
+      - ".github/workflows/legacy-outbox-inspection-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  policy:
+    name: Legacy 001--012 policy / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - name: Validate sealed legacy source and Dockerfile
+        run: python scripts/validate_legacy_outbox_inspection.py --verify-remote
+      - name: Run hermetic legacy inspection tests
+        run: python -m unittest tests/test_legacy_outbox_inspection.py -v
+
+  docker-integration:
+    name: Actual legacy inspector / PostgreSQL read-only
+    needs: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate the profile-only operational topology
+        run: |
+          docker compose --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml config --format json > compose-legacy-normal.json
+          python scripts/validate_legacy_outbox_inspection.py --normal-up-compose-json compose-legacy-normal.json
+          docker compose --profile legacy-outbox-inspect --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml config --format json > compose-legacy-profile.json
+          python scripts/validate_legacy_outbox_inspection.py --compose-json compose-legacy-profile.json --dockerfile tests/legacy_outbox_inspection/Dockerfile
+      - name: Build only the sealed read-only inspector image
+        timeout-minutes: 12
+        run: docker compose --profile legacy-outbox-inspect --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml build legacy-outbox-inspector
+      - name: Start a fresh isolated TimescaleDB fixture
+        timeout-minutes: 3
+        run: |
+          project=kairos-legacy-outbox-inspection-gate
+          test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
+          test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
+          docker compose -p "$project" -f tests/legacy_outbox_inspection/integration-compose.yml up -d --wait --wait-timeout 90 timescaledb
+      - name: Prove the real inspector preserves one expired synthetic lease
+        timeout-minutes: 5
+        run: |
+          project=kairos-legacy-outbox-inspection-gate
+          image=kairos-legacy-outbox-inspector:inspection-0000000000000000
+          container_id=$(docker create \
+            --network "${project}_data" \
+            --read-only --memory 384m --cpus 0.5 --pids-limit 64 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m \
+            --mount "type=bind,src=$PWD/tests/legacy_outbox_inspection/integration.py,dst=/app/integration.py,readonly" \
+            --env KAIROS_LEGACY_TEST_DATABASE_URL=postgresql://kairos:kairos_test@timescaledb:5432/kairos \
+            --entrypoint python \
+            "$image" /app/integration.py)
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          timeout --signal=TERM --kill-after=15s 180s docker start -a "$container_id"
+      - name: Remove only the disposable synthetic fixture
+        if: always()
+        run: docker compose -p kairos-legacy-outbox-inspection-gate -f tests/legacy_outbox_inspection/integration-compose.yml down --volumes --remove-orphans

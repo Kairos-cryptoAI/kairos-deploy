@@ -68,6 +68,28 @@ ID. The profile has no egress network, no ports, no volume, no background
 dispatcher, and no EVEDEX, provider or general PAPER secrets. It is unexecuted
 engineering support until a future independently authorized recovery procedure.
 
+## Legacy `001`--`012` outbox inspection
+
+The actual historical runtime remains at exactly migrations `001`--`012`, so it
+cannot be passed to the newer reconciliation or drain profiles.  The separate
+[`docker-compose.legacy-outbox-inspection.yml`](docker-compose.legacy-outbox-inspection.yml)
+profile and [`Invoke-LegacyOutboxInspection.ps1`](scripts/Invoke-LegacyOutboxInspection.ps1)
+are the only evidence-collection route for one pre-committed expired legacy
+lease.  They are pinned to the isolated `kairos-paper-gate` / `kairos` source,
+its internal `kairos-paper-gate_data` network, a fresh verified local backup,
+and the exact legacy catalog fingerprint.
+
+The inspector uses one serializable read-only transaction and can return only a
+redacted `ELIGIBLE_FOR_CLONE_REHEARSAL` receipt or a rejected receipt.  The host
+wrapper rebuilds a content-derived image with no cache, switches the one-shot
+run to its immutable local image ID, and verifies the receipt hash, provenance
+and redaction before retaining it.  An eligible receipt is always detached-GPG
+signed and the exact reviewed primary fingerprint is verified before the final
+receipt becomes visible; a rejected receipt is never signed or treated as
+success.  Neither result authorizes a source migration, outbox mutation, Redis
+publish, PAPER, alpha, or LIVE.  A later separately reviewed no-network clone
+rehearsal is still required before any recovery decision.
+
 ## Signed bounded outbox drain
 
 [`docker-compose.outbox-drain.yml`](docker-compose.outbox-drain.yml) is a

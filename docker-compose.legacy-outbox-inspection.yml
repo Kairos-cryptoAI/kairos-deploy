@@ -1,0 +1,54 @@
+name: kairos-legacy-outbox-inspection-20260920-r1
+
+# A standalone evidence-only profile for a runtime that is still precisely at
+# schema 001--012.  It intentionally has no Redis, bus, apply, or mutation
+# service; a receipt is only input to a future isolated clone rehearsal.
+services:
+  legacy-outbox-inspector:
+    profiles: [legacy-outbox-inspect]
+    build:
+      context: tests/legacy_outbox_inspection
+      dockerfile: Dockerfile
+      pull: true
+      args:
+        PERSISTENCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
+        PERSISTENCE_REVISION: 1ca8bf38d265ece7a95f749a268075549f80c043
+        RUNNER_SHA256: 859142fbc34f2931ea23a955e5f72e066d6c4f6ce259426a5190c7132691665e
+    image: ${KAIROS_LEGACY_OUTBOX_IMAGE:?set a verified transient legacy inspector image reference}
+    entrypoint: ["python", "/app/legacy_outbox_inspection.py"]
+    command:
+      - --expectation
+      - /run/secrets/legacy_outbox_expectation
+      - --database-url-file
+      - /run/secrets/legacy_outbox_database_url
+      - --backup-manifest-sha256
+      - ${KAIROS_LEGACY_OUTBOX_BACKUP_MANIFEST_SHA256:?set the verified local backup manifest hash}
+      - --backup-sha256
+      - ${KAIROS_LEGACY_OUTBOX_BACKUP_SHA256:?set the verified local backup hash}
+      - --backup-created-at-utc
+      - ${KAIROS_LEGACY_OUTBOX_BACKUP_CREATED_AT_UTC:?set the verified local backup UTC timestamp}
+    read_only: true
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    secrets:
+      - source: legacy_outbox_expectation
+        target: legacy_outbox_expectation
+      - source: legacy_outbox_database_url
+        target: legacy_outbox_database_url
+    networks: [legacy-data]
+
+networks:
+  legacy-data:
+    external: true
+    name: ${KAIROS_LEGACY_OUTBOX_DATA_NETWORK:?set a verified isolated PostgreSQL network}
+
+secrets:
+  legacy_outbox_expectation:
+    file: ${KAIROS_LEGACY_OUTBOX_INPUT_DIR:?set an explicit operator input directory}/expectation.json
+  legacy_outbox_database_url:
+    file: ${KAIROS_LEGACY_OUTBOX_SECRETS_DIR:?set a scoped legacy inspection secrets directory}/persistence_database_url

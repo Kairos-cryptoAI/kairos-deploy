@@ -37,6 +37,7 @@ jobs:
           python scripts/validate_current_release_gate.py
           python scripts/validate_offline_outbox_reconciliation.py
           python scripts/validate_offline_outbox_drain.py
+          python scripts/validate_legacy_outbox_inspection.py
           python scripts/validate_schema_upgrade_preflight.py
       - name: Run validator tests
         run: python -m unittest discover -s tests -v
@@ -66,6 +67,7 @@ jobs:
           python scripts/validate_current_release_gate.py --verify-remote
           python scripts/validate_offline_outbox_reconciliation.py --verify-remote
           python scripts/validate_offline_outbox_drain.py --verify-remote
+          python scripts/validate_legacy_outbox_inspection.py --verify-remote
       - name: Render Compose configuration
         run: docker compose --env-file .env.example -f docker-compose.yml config --format json > compose.json
       - name: Validate rendered Compose security
@@ -110,6 +112,13 @@ jobs:
           docker compose --profile offline-outbox-drain-inspect --profile offline-outbox-drain-apply --env-file .env.outbox-drain.example -f docker-compose.outbox-drain.yml config --format json > compose-outbox-drain.json
           python scripts/validate_offline_outbox_drain.py --compose-json compose-outbox-drain.json --dockerfile tests/offline_outbox_drain/Dockerfile
           docker compose --profile offline-outbox-drain-inspect --profile offline-outbox-drain-apply --env-file .env.outbox-drain.example -f docker-compose.outbox-drain.yml config --quiet
+      - name: Validate profile-only legacy outbox inspection topology
+        run: |
+          docker compose --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml config --format json > compose-legacy-outbox-normal-up.json
+          python scripts/validate_legacy_outbox_inspection.py --normal-up-compose-json compose-legacy-outbox-normal-up.json
+          docker compose --profile legacy-outbox-inspect --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml config --format json > compose-legacy-outbox.json
+          python scripts/validate_legacy_outbox_inspection.py --compose-json compose-legacy-outbox.json --dockerfile tests/legacy_outbox_inspection/Dockerfile
+          docker compose --profile legacy-outbox-inspect --env-file .env.legacy-outbox-inspection.example -f docker-compose.legacy-outbox-inspection.yml config --quiet
       - name: Validate Prometheus rules
         run: >-
           docker run --rm
@@ -130,7 +139,7 @@ jobs:
           -v "$PWD:/work:ro"
           -w /work
           hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
-          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile tests/sim_full_path_gate/Dockerfile tests/current_release_gate/Dockerfile tests/offline_outbox_reconciliation/Dockerfile tests/offline_outbox_drain/Dockerfile
+          hadolint docker/Dockerfile docker/Dockerfile.paper-execution tests/sim_gate/Dockerfile tests/sim_full_path_gate/Dockerfile tests/current_release_gate/Dockerfile tests/offline_outbox_reconciliation/Dockerfile tests/offline_outbox_drain/Dockerfile tests/legacy_outbox_inspection/Dockerfile
 
   build:
     needs: validate
