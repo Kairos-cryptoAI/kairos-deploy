@@ -183,6 +183,7 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
         self.assertIn(("volume", "rm", "data"), removals)
 
     def test_evidence_stage_cleanup_rejects_foreign_directory_and_removes_only_its_stage(self) -> None:
+        self.runtime_controller.BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=self.runtime_controller.BACKUP_ROOT, prefix=".legacy-outbox-quarantine-evidence-") as directory:
             stage = Path(directory)
             (stage / "frozen-evidence.json").write_text("{}", encoding="utf-8")
@@ -212,6 +213,7 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
             self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["clone_user"])
 
     def test_receipt_collision_does_not_overwrite_existing_file(self) -> None:
+        self.runtime_controller.BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=self.runtime_controller.BACKUP_ROOT) as directory:
             receipt_directory = Path(directory)
             output = receipt_directory / "legacy-outbox-quarantine-clone-rehearsal-20260920T000000Z.json"
