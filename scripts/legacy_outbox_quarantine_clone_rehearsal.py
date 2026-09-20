@@ -779,7 +779,19 @@ def _inspect_migration_runner(image: str, probe_name: str, suffix: str, temporar
 
     if image != EXPECTED_MIGRATION_RUNNER_IMAGE:
         raise RehearsalError("migration runner is not the reviewed immutable digest")
-    digests = _docker_text(["image", "inspect", "--format", "{{json .RepoDigests}}", image], "migration runner digest inspection")
+    digest_inspection = _docker(
+        ["image", "inspect", "--format", "{{json .RepoDigests}}", image],
+        "migration runner digest inspection",
+        allow_failure=True,
+    )
+    if digest_inspection.returncode:
+        raise RehearsalError(
+            "migration runner digest inspection failed; the exact reviewed image must "
+            f"be present locally: {EXPECTED_MIGRATION_RUNNER_IMAGE}. If it is absent, "
+            "authenticate to GHCR with read:packages and pull that exact digest; do not "
+            "substitute a tag or another image."
+        )
+    digests = digest_inspection.stdout.strip()
     try:
         digest_values = json.loads(digests)
     except json.JSONDecodeError as exc:

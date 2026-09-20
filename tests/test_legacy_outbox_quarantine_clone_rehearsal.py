@@ -212,6 +212,25 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
         with self.assertRaises(self.runtime_controller.RehearsalError):
             self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["clone_user"])
 
+    def test_missing_immutable_runner_has_actionable_non_substitutable_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(
+                self.runtime_controller,
+                "_docker",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="redacted"),
+            ):
+                with self.assertRaisesRegex(
+                    self.runtime_controller.RehearsalError,
+                    "read:packages and pull that exact digest; do not substitute",
+                ) as raised:
+                    self.runtime_controller._inspect_migration_runner(
+                        self.runtime_controller.EXPECTED_MIGRATION_RUNNER_IMAGE,
+                        "probe",
+                        "suffix",
+                        Path(directory),
+                    )
+        self.assertIn(self.runtime_controller.EXPECTED_MIGRATION_RUNNER_IMAGE, str(raised.exception))
+
     def test_receipt_collision_does_not_overwrite_existing_file(self) -> None:
         self.runtime_controller.BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=self.runtime_controller.BACKUP_ROOT) as directory:
