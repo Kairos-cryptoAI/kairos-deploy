@@ -318,6 +318,7 @@ class LegacyOutboxWrapperTests(unittest.TestCase):
         self.assertIn("Verified source backup is not a fresh two-hour runtime verification", wrapper)
         self.assertIn("$ComposeProject -cne $expectedSourceProject", wrapper)
         self.assertIn("$DataNetwork -cne $expectedDataNetwork", wrapper)
+        self.assertIn('$expectedDataNetwork = $expectedSourceProject + "_paper-data"', wrapper)
         self.assertIn("--pull never", wrapper)
         self.assertIn("verify_legacy_outbox_receipt.py", wrapper)
         self.assertIn("Kairos source backup root", wrapper)
