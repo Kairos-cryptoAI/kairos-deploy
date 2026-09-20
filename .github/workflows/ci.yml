@@ -35,6 +35,7 @@ jobs:
           python scripts/validate_sim_deployment.py
           python scripts/validate_sim_full_path_deployment.py
           python scripts/validate_current_release_gate.py
+          python scripts/validate_current_release_projection.py
           python scripts/validate_offline_outbox_reconciliation.py
           python scripts/validate_offline_outbox_drain.py
           python scripts/validate_legacy_outbox_inspection.py
@@ -68,6 +69,7 @@ jobs:
           python scripts/validate_sim_deployment.py --verify-remote
           python scripts/validate_sim_full_path_deployment.py --verify-remote
           python scripts/validate_current_release_gate.py --verify-remote
+          python scripts/validate_current_release_projection.py
           python scripts/validate_offline_outbox_reconciliation.py --verify-remote
           python scripts/validate_offline_outbox_drain.py --verify-remote
           python scripts/validate_legacy_outbox_inspection.py --verify-remote
