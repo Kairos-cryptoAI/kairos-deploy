@@ -76,7 +76,7 @@ cannot be passed to the newer reconciliation or drain profiles.  The separate
 profile and [`Invoke-LegacyOutboxInspection.ps1`](scripts/Invoke-LegacyOutboxInspection.ps1)
 are the only evidence-collection route for one pre-committed expired legacy
 lease.  They are pinned to the isolated `kairos-paper-gate` / `kairos` source,
-its internal `kairos-paper-gate_data` network, a fresh verified local backup,
+its internal `kairos-paper-gate_paper-data` network, a fresh verified local backup,
 and the exact legacy catalog fingerprint.
 
 The inspector uses one serializable read-only transaction and can return only a

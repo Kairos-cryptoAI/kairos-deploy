@@ -42,7 +42,11 @@ $inspectProfile = "legacy-outbox-inspect"
 $trustedFingerprint = "40AF365C6682B73D056A6A274DBFF6B65BE9F827"
 $expectedSourceProject = "kairos-paper-gate"
 $expectedSourceDatabase = "kairos"
-$expectedDataNetwork = $expectedSourceProject + "_data"
+# docker-compose.paper.yml names its internal PostgreSQL network `paper-data`.
+# Keep this exact project-qualified name as part of the source-identity boundary:
+# accepting a generic `*_data` network could attach the inspector to an unrelated
+# Compose project that happened to expose PostgreSQL.
+$expectedDataNetwork = $expectedSourceProject + "_paper-data"
 $maximumBackupAge = [TimeSpan]::FromHours(2)
 
 function Resolve-ExistingFile {
@@ -226,7 +230,7 @@ if ($ComposeProject -cne $expectedSourceProject) {
     throw "Legacy inspection is pinned to the isolated kairos-paper-gate runtime project"
 }
 if ($DataNetwork -cne $expectedDataNetwork) {
-    throw "Legacy inspection is pinned to the isolated kairos-paper-gate_data network"
+    throw "Legacy inspection is pinned to the isolated kairos-paper-gate_paper-data network"
 }
 if (-not (Test-Path -LiteralPath $receiptVerifier -PathType Leaf)) { throw "Legacy inspection receipt verifier is unavailable" }
 if ($expectationFile -ne (Join-Path $inputRoot "expectation.json")) {
