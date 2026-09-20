@@ -15,8 +15,8 @@ ENV UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1
 WORKDIR /src/execution
 RUN git init . \
     && git remote add origin https://github.com/Kairos-cryptoAI/kairos-execution-engine.git \
-    && git fetch --depth=1 origin 53b65bb372dc7f7eb5527c844f70d577665ab96d \
-    && test "$(git rev-parse FETCH_HEAD)" = 53b65bb372dc7f7eb5527c844f70d577665ab96d \
+    && git fetch --depth=1 origin cfcba17519952bcbdd6ef6e3b2386b6474c89b72 \
+    && test "$(git rev-parse FETCH_HEAD)" = cfcba17519952bcbdd6ef6e3b2386b6474c89b72 \
     && git checkout --detach FETCH_HEAD
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --group dev --no-editable
 

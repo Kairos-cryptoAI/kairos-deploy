@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -18,7 +18,7 @@ import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
 from kairos_core.contracts import (
     RecordedBookLevelV1,
-    RecordedTopNBookFrameV1,
+    RecordedTopNBookFrameV2,
     SimulationAdmissionV2,
     SimulationAssumptionsV1,
     SimulationSessionV1,
@@ -32,7 +32,11 @@ from kairos_risk import SimulationRiskPolicy
 from kairos_router.aggregation import TextAggregate
 from kairos_router.candidate import CandidateRouterPolicy
 from kairos_strategy.candles import Candle
-from kairos_strategy.runtime import candle_to_closed_bar, canonical_intent_batch_bytes, generate_runtime_strategy_intents
+from kairos_strategy.runtime import (
+    candle_to_closed_bar,
+    canonical_intent_batch_bytes,
+    generate_runtime_strategy_intents,
+)
 from kairos_strategy.sleeves.regime_aligned_right_tail import RegimeAlignedRightTailConfig
 
 import policy
@@ -53,7 +57,9 @@ class _LocalReviewGateway:
         parsed = {
             "decision": self.decision.value,
             "priority": 7 if self.decision is ReviewDecision.ALLOW else 0,
-            "reason_codes": ("SIMULATOR_GATE_ALLOW" if self.decision is ReviewDecision.ALLOW else "SIMULATOR_GATE_VETO",),
+            "reason_codes": (
+                "SIMULATOR_GATE_ALLOW" if self.decision is ReviewDecision.ALLOW else "SIMULATOR_GATE_VETO",
+            ),
         }
         content = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
         return SimpleNamespace(
@@ -161,8 +167,17 @@ def _frame(
     previous_frame_sha256: str | None,
     bid: float,
     ask: float,
-) -> RecordedTopNBookFrameV1:
-    return RecordedTopNBookFrameV1(
+) -> RecordedTopNBookFrameV2:
+    raw_payload = json.dumps(
+        {
+            "asks": [[str(ask), "10"]],
+            "bids": [[str(bid), "10"]],
+            "lastUpdateId": sequence,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return RecordedTopNBookFrameV2(
         source="sim-full-path-gate",
         tape_id=tape_id,
         stream_epoch="sealed-fixture-epoch-1",
@@ -172,9 +187,11 @@ def _frame(
         exchange_at_ms=persisted_at_ms - 10,
         received_at_ms=persisted_at_ms - 5,
         persisted_at_ms=persisted_at_ms,
-        raw_payload_sha256=_hash(f"raw-{tape_id}-{sequence}"),
+        raw_payload=raw_payload,
+        raw_payload_sha256=_hash(raw_payload),
         previous_frame_sha256=previous_frame_sha256,
         continuity="ADMITTED",
+        source_reason="SNAPSHOT_RECEIVED",
         bids=(RecordedBookLevelV1(price=bid, quantity=10.0),),
         asks=(RecordedBookLevelV1(price=ask, quantity=10.0),),
     )
@@ -205,7 +222,7 @@ async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str
         assert await repository.record_closed_bar(tape_id, _auxiliary_bar(symbol))
 
     previous: str | None = None
-    frames: dict[str, RecordedTopNBookFrameV1] = {}
+    frames: dict[str, RecordedTopNBookFrameV2] = {}
     for sequence, symbol in enumerate(_SYMBOLS, start=1):
         multiplier = 1.0001 if symbol == intent.symbol else 1.001
         frame = _frame(
@@ -296,6 +313,18 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         intent, session, entry_frame, exit_bar = await _seed_sealed_session(
             repository, tape_id="full-path-allow-tape"
         )
+        stored_evidence = await database.pool.fetchrow(
+            """SELECT frame_contract_version, source_reason, raw_payload_text, raw_payload_sha256
+               FROM sim_book_frames WHERE tape_id=$1 AND tape_sequence=1""",
+            session.tape_id,
+        )
+        assert stored_evidence is not None
+        assert dict(stored_evidence) == {
+            "frame_contract_version": "sim-book-frame.v2",
+            "source_reason": "SNAPSHOT_RECEIVED",
+            "raw_payload_text": entry_frame.raw_payload,
+            "raw_payload_sha256": entry_frame.raw_payload_sha256,
+        }
         review = await _review(intent, ReviewDecision.ALLOW)
         decided_at_ms = intent.entry_eligible_ts_ms + 10
         decision = SimulationRiskPolicy(source="sim-full-path-gate-risk").evaluate(
@@ -332,9 +361,7 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         await connect_verified_database(database, database_name, local_only=True)
         repository = SimulationRepository(database.pool)
         restarted = SimulationExecutionController(repository, source="sim-full-path-gate-controller")
-        replayed_entry = await restarted.submit_entry(
-            trade, as_of_ms=intent.entry_eligible_ts_ms + 35
-        )
+        replayed_entry = await restarted.submit_entry(trade, as_of_ms=intent.entry_eligible_ts_ms + 35)
         assert replayed_entry.replayed
         assert replayed_entry.command.command_id == entry.command.command_id
         assert replayed_entry.receipt == entry.receipt
@@ -353,8 +380,16 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         assert journal is not None and journal.state == "FLAT" and len(journal.events) == 3
         assert await repository.list_prepared_commands(session.session_id) == ()
         assert await repository.list_terminal_trades_without_result(session.session_id) == ()
-        assert await database.pool.fetchval("SELECT count(*) FROM sim_commands WHERE trade_id=$1", trade.trade_id) == 2
-        assert await database.pool.fetchval("SELECT count(*) FROM sim_results WHERE trade_id=$1", trade.trade_id) == 1
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_commands WHERE trade_id=$1", trade.trade_id
+            )
+            == 2
+        )
+        assert (
+            await database.pool.fetchval("SELECT count(*) FROM sim_results WHERE trade_id=$1", trade.trade_id)
+            == 1
+        )
     finally:
         await database.close()
 
@@ -384,14 +419,23 @@ async def test_veto_persists_rejected_sim_evidence_without_admission_or_command(
         assert decision.quantity == 0.0 and decision.price_cap is None
         assert "REVIEW_VETO" in decision.rejection_reasons
         assert await repository.record_risk_decision(decision)
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_admissions WHERE session_id=$1", session.session_id
-        ) == 0
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_trades WHERE session_id=$1", session.session_id
-        ) == 0
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
-        ) == 0
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_admissions WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_trades WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
     finally:
         await database.close()

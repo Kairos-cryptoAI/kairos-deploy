@@ -20,14 +20,14 @@ TIMESCALE_IMAGE = (
     "sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
 )
 PINS = {
-    "kairos-core": "52aba6b158a52754784162987e7af4ad24c06669",
-    "kairos-persistence": "1ca8bf38d265ece7a95f749a268075549f80c043",
-    "kairos-strategy-engine": "6ccbd053b07833f301e7c3beaf08ffe36f1467c4",
-    "kairos-router": "23a476f20d529a5bbac231eedd5505508625432a",
-    "kairos-llm": "99f153bc9dddb13099c940e9a49d394140147d25",
-    "kairos-aggregator": "56e7bfbf3e5e134a18946248d37ae4554694b37b",
-    "kairos-risk-manager": "4687ba923c1a514e4b8715db48d0d3e849f2c9fc",
-    "kairos-execution-engine": "53b65bb372dc7f7eb5527c844f70d577665ab96d",
+    "kairos-core": "4832a407bb94eb82abee84fe5c8a1de828c37833",
+    "kairos-persistence": "c89bb31f9425e81e5d77edc6a7e5a871a017af6c",
+    "kairos-strategy-engine": "765e5ed2599daa64dcb718de228441044e24d821",
+    "kairos-router": "c634355c1725ea41d4cbd9130795697ec71c94a5",
+    "kairos-llm": "5dff1e7597cb9c124312dcd42247afe649005eb5",
+    "kairos-aggregator": "cb7b0261d164439ab1182d99e9c91c5a4b93b1ea",
+    "kairos-risk-manager": "319a5f993047b5492e15040a8a6bd4c000ea113d",
+    "kairos-execution-engine": "cfcba17519952bcbdd6ef6e3b2386b6474c89b72",
 }
 MODULES = {
     "kairos-core": "kairos_core",
@@ -267,13 +267,9 @@ def validate_dockerfile(text: str) -> list[str]:
         if value not in text:
             errors.append(f"full-path simulator Dockerfile is missing required detail: {value}")
     directives = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
+        line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")
     ]
-    command_directives = [
-        line for line in directives if re.match(r"(?i)^CMD(?:\s|$)", line)
-    ]
+    command_directives = [line for line in directives if re.match(r"(?i)^CMD(?:\s|$)", line)]
     if command_directives != [_GATE_DOCKERFILE_CMD]:
         errors.append("full-path simulator Dockerfile must use its exact sealed test CMD")
     if any(re.match(r"(?i)^ENTRYPOINT(?:\s|$)", line) for line in directives):
@@ -305,9 +301,9 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         or (isolated != _RAW_NETWORK and isolated != _RENDERED_NETWORK)
     ):
         errors.append("full-path simulator requires one new internal-only network")
-    if set((services.get("gate") or {})) - _GATE_SERVICE_KEYS:
+    if set(services.get("gate") or {}) - _GATE_SERVICE_KEYS:
         errors.append("gate: unapproved full-path simulator service option")
-    if set((services.get("timescaledb") or {})) - _TIMESCALE_SERVICE_KEYS:
+    if set(services.get("timescaledb") or {}) - _TIMESCALE_SERVICE_KEYS:
         errors.append("timescaledb: unapproved full-path simulator service option")
     for name, service in services.items():
         for option in FORBIDDEN_SERVICE_OPTIONS:
@@ -338,9 +334,10 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
     build = gate.get("build") or {}
     if set(build) != {"context", "dockerfile"}:
         errors.append("full-path simulator gate build must not accept extra build authority")
-    if not _normalized_path(build.get("context", "")).endswith("/tests/sim_full_path_gate") and _normalized_path(
-        build.get("context", "")
-    ) != "tests/sim_full_path_gate":
+    if (
+        not _normalized_path(build.get("context", "")).endswith("/tests/sim_full_path_gate")
+        and _normalized_path(build.get("context", "")) != "tests/sim_full_path_gate"
+    ):
         errors.append("full-path simulator gate must use its narrow test build context")
     if build.get("dockerfile") != "Dockerfile":
         errors.append("full-path simulator gate must use its dedicated Dockerfile")
