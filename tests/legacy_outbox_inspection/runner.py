@@ -39,6 +39,7 @@ CONNECTION_URI = re.compile(r"(?i)(?:postgres(?:ql)?|redis(?:s)?):\/\/")
 DRIVER_ERRORS = (
     (asyncpg.PostgresError, asyncpg.InterfaceError) if asyncpg is not None else ()
 )
+INSPECTION_CLASSIFICATION = "LEGACY_BOOTSTRAPPED_RUNTIME_001_012_READ_ONLY"
 
 
 class LegacyInspectionInputError(ValueError):
@@ -356,7 +357,7 @@ def verify_inspection_receipt(
     if (
         receipt.get("schema_version") != 1
         or receipt.get("kind") != "kairos.legacy-outbox-inspection.v1"
-        or receipt.get("classification") != "LEGACY_RUNTIME_001_012_READ_ONLY"
+        or receipt.get("classification") != INSPECTION_CLASSIFICATION
         or receipt.get("source_lock_sha256") != sha256_json(source_lock())
         or receipt.get("expectation_sha256") != sha256_json(expectation.payload())
         or receipt.get("source_backup") != source_backup.payload()
@@ -382,11 +383,18 @@ def verify_inspection_receipt(
     result = inspection.get("result")
     if result not in {"ELIGIBLE_FOR_CLONE_REHEARSAL", "REJECTED"}:
         raise LegacyInspectionInputError("inspection receipt result is not clone-only")
-    if inspection.get("schema_profile") != "RUNTIME_001_012" or inspection.get("row_state") not in {
+    profile = source_lock().get("profile")
+    expected_schema_profile = profile.get("schema_profile") if isinstance(profile, Mapping) else None
+    if (
+        not isinstance(expected_schema_profile, str)
+        or not expected_schema_profile
+        or inspection.get("schema_profile") != expected_schema_profile
+        or inspection.get("row_state") not in {
         "NOT_FOUND",
         "LEASE_NOT_EXPIRED",
         "EXPIRED_LEASE",
-    }:
+        }
+    ):
         raise LegacyInspectionInputError("inspection receipt state is invalid")
     checks = inspection.get("checks")
     expected_checks = {
@@ -465,6 +473,9 @@ def build_inspection_receipt(
     expected_migrations = tuple(profile.get("required_migrations") or ())
     expected_database = profile.get("required_database")
     expected_schema_fingerprint = profile.get("expected_schema_fingerprint_sha256")
+    expected_schema_profile = profile.get("schema_profile")
+    if not isinstance(expected_schema_profile, str) or not expected_schema_profile:
+        raise LegacyInspectionInputError("source lock schema profile is invalid")
     identity = expectation.identity
     checks: dict[str, bool] = {
         "backup_bound": True,
@@ -527,7 +538,7 @@ def build_inspection_receipt(
     receipt: dict[str, object] = {
         "schema_version": 1,
         "kind": "kairos.legacy-outbox-inspection.v1",
-        "classification": "LEGACY_RUNTIME_001_012_READ_ONLY",
+        "classification": INSPECTION_CLASSIFICATION,
         "source_lock_sha256": sha256_json(lock),
         "expectation_sha256": sha256_json(expectation.payload()),
         "source_backup": source_backup.payload(),
@@ -535,7 +546,7 @@ def build_inspection_receipt(
         "reconciliation_id": expectation.reconciliation_id,
         "inspection": {
             "result": result,
-            "schema_profile": "RUNTIME_001_012",
+            "schema_profile": expected_schema_profile,
             "row_state": row_state,
             "checks": checks,
             "observations": observations,
@@ -687,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         output = {
             "schema_version": 1,
             "kind": "kairos.legacy-outbox-inspection-result.v1",
-            "classification": "LEGACY_RUNTIME_001_012_READ_ONLY",
+            "classification": INSPECTION_CLASSIFICATION,
             "state": "STARTUP_REJECTED",
             "error_type": type(exc).__name__,
         }
@@ -696,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         output = {
             "schema_version": 1,
             "kind": "kairos.legacy-outbox-inspection-result.v1",
-            "classification": "LEGACY_RUNTIME_001_012_READ_ONLY",
+            "classification": INSPECTION_CLASSIFICATION,
             "state": "STARTUP_REJECTED",
             "error_type": type(exc).__name__,
         }

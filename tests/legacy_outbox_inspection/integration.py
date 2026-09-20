@@ -28,10 +28,26 @@ def _payload() -> dict[str, object]:
     }
 
 
-async def _apply_legacy_profile(connection: asyncpg.Connection) -> None:
+async def _apply_bootstrapped_legacy_profile(connection: asyncpg.Connection) -> None:
+    profile = __import__("legacy_outbox_inspection").source_lock()["profile"]
+    bootstrap = profile["bootstrap"]
+    bootstrap_path = Path(os.environ["KAIROS_LEGACY_TEST_BOOTSTRAP_SCHEMA_PATH"])
+    # Git stores the locked blob with LF line endings.  A Windows checkout may
+    # materialise the same blob as CRLF; normalize only that checkout transport
+    # representation before checking the immutable Git identities.
+    bootstrap_bytes = bootstrap_path.read_bytes().replace(b"\r\n", b"\n")
+    expected_sha256 = str(bootstrap["sha256"])
+    expected_blob = str(bootstrap["git_blob_sha1"])
+    actual_sha256 = hashlib.sha256(bootstrap_bytes).hexdigest()
+    actual_blob = hashlib.sha1(
+        f"blob {len(bootstrap_bytes)}\0".encode("utf-8") + bootstrap_bytes
+    ).hexdigest()
+    if actual_sha256 != expected_sha256 or actual_blob != expected_blob:
+        raise RuntimeError("synthetic fixture bootstrap does not match the locked historical source")
     migrations_root = Path(kairos_persistence.__file__).resolve().parent / "migrations"
-    names = tuple(str(value) for value in (__import__("legacy_outbox_inspection").source_lock()["profile"]["required_migrations"]))
+    names = tuple(str(value) for value in profile["required_migrations"])
     async with connection.transaction():
+        await connection.execute(bootstrap_bytes.decode("utf-8"))
         await connection.execute(
             "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
         )
@@ -44,7 +60,7 @@ async def main() -> None:
     database_url = os.environ["KAIROS_LEGACY_TEST_DATABASE_URL"]
     connection = await asyncpg.connect(database_url)
     try:
-        await _apply_legacy_profile(connection)
+        await _apply_bootstrapped_legacy_profile(connection)
         payload = _payload()
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()

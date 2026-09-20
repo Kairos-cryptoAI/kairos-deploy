@@ -39,6 +39,7 @@ $inspectorDockerfile = Join-Path $root "tests/legacy_outbox_inspection/Dockerfil
 $inspectorDockerignore = Join-Path $root "tests/legacy_outbox_inspection/.dockerignore"
 $toolProject = "kairos-legacy-outbox-inspection-20260920-r1"
 $inspectProfile = "legacy-outbox-inspect"
+$inspectionClassification = "LEGACY_BOOTSTRAPPED_RUNTIME_001_012_READ_ONLY"
 $trustedFingerprint = "40AF365C6682B73D056A6A274DBFF6B65BE9F827"
 $expectedSourceProject = "kairos-paper-gate"
 $expectedSourceDatabase = "kairos"
@@ -169,7 +170,7 @@ function Get-SafeInspectionFailure {
     if (($fields -join ",") -ne "classification,error_type,kind,schema_version,state" -or
         $failure.schema_version -ne 1 -or
         $failure.kind -ne "kairos.legacy-outbox-inspection-result.v1" -or
-        $failure.classification -ne "LEGACY_RUNTIME_001_012_READ_ONLY" -or
+        $failure.classification -ne $inspectionClassification -or
         $failure.state -ne "STARTUP_REJECTED" -or
         [string]$failure.error_type -notmatch '^[A-Za-z0-9_]{1,80}$') { return $null }
     return $failure

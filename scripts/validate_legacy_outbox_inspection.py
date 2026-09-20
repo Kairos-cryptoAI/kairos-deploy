@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import importlib.util
 import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import ModuleType
@@ -37,15 +40,9 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def verify_remote_sources(lock: dict[str, Any], *, token: str | None = None) -> list[str]:
-    """Verify one immutable Git revision, never an application/runtime endpoint."""
-
-    source = (lock.get("dependencies") or {}).get("kairos-persistence") or {}
-    repository = str(source.get("repository", ""))
-    revision = str(source.get("revision", ""))
-    slug = repository.removeprefix("https://github.com/")
+def _github_json(url: str, *, token: str | None) -> object:
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{slug}/commits/{revision}",
+        url,
         headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "kairos-legacy-outbox-validator/1.0",
@@ -53,12 +50,78 @@ def verify_remote_sources(lock: dict[str, Any], *, token: str | None = None) -> 
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
     )
+    with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310 -- fixed GitHub API route
+        return json.loads(response.read())
+
+
+def _verify_remote_commit(
+    *,
+    repository: str,
+    revision: str,
+    label: str,
+    token: str | None,
+) -> list[str]:
+    slug = repository.removeprefix("https://github.com/")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310 -- fixed GitHub API route
-            resolved = json.loads(response.read())
+        resolved = _github_json(f"https://api.github.com/repos/{slug}/commits/{revision}", token=token)
     except (OSError, ValueError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
-        return [f"legacy outbox remote revision verification failed ({type(exc).__name__})"]
-    return [] if resolved.get("sha") == revision else ["legacy outbox GitHub resolved an unexpected revision"]
+        return [f"legacy outbox {label} revision verification failed ({type(exc).__name__})"]
+    if not isinstance(resolved, dict) or resolved.get("sha") != revision:
+        return [f"legacy outbox GitHub resolved an unexpected {label} revision"]
+    return []
+
+
+def _verify_remote_bootstrap(lock: dict[str, Any], *, token: str | None) -> list[str]:
+    profile = lock.get("profile") or {}
+    bootstrap = profile.get("bootstrap") if isinstance(profile, dict) else None
+    if not isinstance(bootstrap, dict):
+        return ["legacy outbox bootstrap provenance is unavailable"]
+    repository = str(bootstrap.get("repository", ""))
+    revision = str(bootstrap.get("revision", ""))
+    path = str(bootstrap.get("path", ""))
+    expected_blob = str(bootstrap.get("git_blob_sha1", ""))
+    expected_sha256 = str(bootstrap.get("sha256", ""))
+    errors = _verify_remote_commit(
+        repository=repository,
+        revision=revision,
+        label="bootstrap",
+        token=token,
+    )
+    if errors:
+        return errors
+    slug = repository.removeprefix("https://github.com/")
+    encoded_path = urllib.parse.quote(path, safe="/")
+    try:
+        content = _github_json(
+            f"https://api.github.com/repos/{slug}/contents/{encoded_path}?ref={revision}",
+            token=token,
+        )
+        if not isinstance(content, dict) or content.get("encoding") != "base64":
+            return ["legacy outbox bootstrap content response is invalid"]
+        encoded = content.get("content")
+        if not isinstance(encoded, str):
+            return ["legacy outbox bootstrap content is unavailable"]
+        raw = base64.b64decode(b"".join(encoded.encode("ascii").split()), validate=True)
+    except (OSError, UnicodeEncodeError, ValueError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
+        return [f"legacy outbox bootstrap content verification failed ({type(exc).__name__})"]
+    if content.get("sha") != expected_blob:
+        return ["legacy outbox bootstrap Git blob identity differs"]
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        return ["legacy outbox bootstrap content SHA-256 differs"]
+    return []
+
+
+def verify_remote_sources(lock: dict[str, Any], *, token: str | None = None) -> list[str]:
+    """Verify immutable Git dependencies and the exact historical bootstrap."""
+
+    source = (lock.get("dependencies") or {}).get("kairos-persistence") or {}
+    errors = _verify_remote_commit(
+        repository=str(source.get("repository", "")),
+        revision=str(source.get("revision", "")),
+        label="persistence",
+        token=token,
+    )
+    return errors + _verify_remote_bootstrap(lock, token=token)
 
 
 def main(argv: list[str] | None = None) -> int:

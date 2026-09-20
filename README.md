@@ -77,7 +77,12 @@ profile and [`Invoke-LegacyOutboxInspection.ps1`](scripts/Invoke-LegacyOutboxIns
 are the only evidence-collection route for one pre-committed expired legacy
 lease.  They are pinned to the isolated `kairos-paper-gate` / `kairos` source,
 its internal `kairos-paper-gate_paper-data` network, a fresh verified local backup,
-and the exact legacy catalog fingerprint.
+and the exact historical catalog fingerprint.  That fingerprint belongs to the
+named `LEGACY_BOOTSTRAPPED_RUNTIME_001_012` topology: the lock binds the original
+`timescaledb/schema.sql` Git revision, Git blob and SHA-256, the exact TimescaleDB
+image, and then migrations `001`--`012`.  It is deliberately distinct from a
+clean-migrations-only `001`--`012` database; neither profile is accepted for the
+other.
 
 The inspector uses one serializable read-only transaction and can return only a
 redacted `ELIGIBLE_FOR_CLONE_REHEARSAL` receipt or a rejected receipt.  The host

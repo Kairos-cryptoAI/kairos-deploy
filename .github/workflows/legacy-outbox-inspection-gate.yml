@@ -12,6 +12,7 @@ on:
       - "scripts/verify_legacy_outbox_receipt.py"
       - "tests/legacy_outbox_inspection/**"
       - "tests/test_legacy_outbox_inspection.py"
+      - "timescaledb/schema.sql"
       - ".github/workflows/legacy-outbox-inspection-gate.yml"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "scripts/verify_legacy_outbox_receipt.py"
       - "tests/legacy_outbox_inspection/**"
       - "tests/test_legacy_outbox_inspection.py"
+      - "timescaledb/schema.sql"
       - ".github/workflows/legacy-outbox-inspection-gate.yml"
   workflow_dispatch:
 
@@ -94,7 +96,9 @@ jobs:
             --cap-drop ALL --security-opt no-new-privileges:true \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m \
             --mount "type=bind,src=$PWD/tests/legacy_outbox_inspection/integration.py,dst=/app/integration.py,readonly" \
+            --mount "type=bind,src=$PWD/timescaledb/schema.sql,dst=/app/legacy_bootstrap_schema.sql,readonly" \
             --env KAIROS_LEGACY_TEST_DATABASE_URL=postgresql://kairos:kairos_test@timescaledb:5432/kairos \
+            --env KAIROS_LEGACY_TEST_BOOTSTRAP_SCHEMA_PATH=/app/legacy_bootstrap_schema.sql \
             --entrypoint python \
             "$image" /app/integration.py)
           trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT

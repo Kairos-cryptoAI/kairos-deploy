@@ -1,4 +1,4 @@
-"""Static fail-closed policy for legacy 001--012 outbox evidence collection."""
+"""Static fail-closed policy for historical 001--012 outbox evidence collection."""
 
 from __future__ import annotations
 
@@ -11,14 +11,25 @@ from typing import Any
 
 PROJECT = "kairos-legacy-outbox-inspection-20260920-r1"
 INSPECT_PROFILE = "legacy-outbox-inspect"
+INSPECTION_CLASSIFICATION = "LEGACY_BOOTSTRAPPED_RUNTIME_001_012_READ_ONLY"
+SCHEMA_PROFILE = "LEGACY_BOOTSTRAPPED_RUNTIME_001_012"
 PERSISTENCE_REPOSITORY = "https://github.com/Kairos-cryptoAI/kairos-persistence"
 PERSISTENCE_REVISION = "1ca8bf38d265ece7a95f749a268075549f80c043"
+BOOTSTRAP_REPOSITORY = "https://github.com/Kairos-cryptoAI/kairos-deploy"
+BOOTSTRAP_REVISION = "2b9aa6f569c0afe379714df767a89c5b5141bd8a"
+BOOTSTRAP_PATH = "timescaledb/schema.sql"
+BOOTSTRAP_GIT_BLOB_SHA1 = "6bcee345a368d4f59e55592fe6a175885fd9aa2e"
+BOOTSTRAP_SHA256 = "e8160ecc8d931751e0afa37c2d17917205f3b7770b1176fb95d50a049c248928"
+BOOTSTRAP_TIMESCALEDB_IMAGE = (
+    "timescale/timescaledb:2.29.1-pg16@sha256:"
+    "252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a"
+)
 TRUSTED_SIGNER_FINGERPRINT = "40AF365C6682B73D056A6A274DBFF6B65BE9F827"
 EXPECTED_DATABASE = "kairos"
-EXPECTED_SCHEMA_FINGERPRINT = "7c4c103c09badbe1a60a4fcc8d11e2119a3ece0c52e1145d69a0fc2a11be59de"
+EXPECTED_SCHEMA_FINGERPRINT = "a2fec9fe81d6af73a1e44038a0e71c21d9aaf2e3933ea8c76793d9e6f25b9adf"
 DOCKERFILE_SHA256 = "bba0dacdfded424cf08aa0d6925ea50a15c72cf8744caaa4df7d983dc74f2472"
 DOCKERIGNORE_SHA256 = "1a37cd8475a303ae97bf1030150ad641124e4f95eb5d5346b24e6f770be4c5a5"
-RUNNER_SHA256 = "859142fbc34f2931ea23a955e5f72e066d6c4f6ce259426a5190c7132691665e"
+RUNNER_SHA256 = "a9e6cdaff96e336916062adbb2d6ed33915257ae12e6717a894d14f006bbbcd7"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 INSPECTOR_IMAGE_REFERENCE = re.compile(
@@ -125,9 +136,9 @@ def validate_source_lock(lock: dict[str, Any]) -> list[str]:
         "profile",
     }:
         errors.append("legacy outbox source lock fields differ from the reviewed allow-list")
-    if lock.get("schema_version") != 1:
-        errors.append("legacy outbox source lock schema_version must be 1")
-    if lock.get("purpose") != "read-only-legacy-001-012-outbox-inspection":
+    if lock.get("schema_version") != 2:
+        errors.append("legacy outbox source lock schema_version must be 2")
+    if lock.get("purpose") != "read-only-legacy-bootstrapped-001-012-outbox-inspection":
         errors.append("legacy outbox source lock purpose is invalid")
     if lock.get("classification") != "ENGINEERING_RECOVERY_ONLY":
         errors.append("legacy outbox inspector must remain recovery-only")
@@ -157,6 +168,15 @@ def validate_source_lock(lock: dict[str, Any]) -> list[str]:
     expected_profile = {
         "project": PROJECT,
         "inspect_profile": INSPECT_PROFILE,
+        "schema_profile": SCHEMA_PROFILE,
+        "bootstrap": {
+            "repository": BOOTSTRAP_REPOSITORY,
+            "revision": BOOTSTRAP_REVISION,
+            "path": BOOTSTRAP_PATH,
+            "git_blob_sha1": BOOTSTRAP_GIT_BLOB_SHA1,
+            "sha256": BOOTSTRAP_SHA256,
+            "timescaledb_image": BOOTSTRAP_TIMESCALEDB_IMAGE,
+        },
         "required_database": EXPECTED_DATABASE,
         "required_migrations": list(LEGACY_MIGRATIONS),
         "migration_sha256": LEGACY_MIGRATION_SHA256,
@@ -164,7 +184,15 @@ def validate_source_lock(lock: dict[str, Any]) -> list[str]:
         "maximum_receipt_age_seconds": 7200,
     }
     if lock.get("profile") != expected_profile:
-        errors.append("legacy outbox profile must remain the exact 001--012 read-only profile")
+        errors.append("legacy outbox profile must remain the exact bootstrapped 001--012 read-only profile")
+    bootstrap = (lock.get("profile") or {}).get("bootstrap")
+    if not isinstance(bootstrap, dict) or not (
+        SHA1.fullmatch(str(bootstrap.get("revision", "")))
+        and SHA1.fullmatch(str(bootstrap.get("git_blob_sha1", "")))
+        and SHA256.fullmatch(str(bootstrap.get("sha256", "")))
+        and "@sha256:" in str(bootstrap.get("timescaledb_image", ""))
+    ):
+        errors.append("legacy bootstrap provenance must use immutable commit, blob, content, and image identities")
     return errors
 
 

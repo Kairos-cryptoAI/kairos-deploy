@@ -101,7 +101,13 @@ class LegacyOutboxPolicyTests(unittest.TestCase):
         lock = json.loads((TOOL_ROOT / "source-lock.json").read_text(encoding="utf-8"))
         lock["profile"]["required_migrations"] = list(policy.LEGACY_MIGRATIONS[:-1])
         self.assertIn(
-            "legacy outbox profile must remain the exact 001--012 read-only profile",
+            "legacy outbox profile must remain the exact bootstrapped 001--012 read-only profile",
+            policy.validate_source_lock(lock),
+        )
+        lock = json.loads((TOOL_ROOT / "source-lock.json").read_text(encoding="utf-8"))
+        lock["profile"]["bootstrap"]["sha256"] = "0" * 64
+        self.assertIn(
+            "legacy outbox profile must remain the exact bootstrapped 001--012 read-only profile",
             policy.validate_source_lock(lock),
         )
         self.assertTrue(
@@ -123,9 +129,9 @@ class LegacyOutboxReceiptTests(unittest.TestCase):
             inspected_at=_T0,
         )
         self.assertEqual(receipt["kind"], "kairos.legacy-outbox-inspection.v1")
-        self.assertEqual(receipt["classification"], "LEGACY_RUNTIME_001_012_READ_ONLY")
+        self.assertEqual(receipt["classification"], policy.INSPECTION_CLASSIFICATION)
         self.assertEqual(receipt["inspection"]["result"], "ELIGIBLE_FOR_CLONE_REHEARSAL")
-        self.assertEqual(receipt["inspection"]["schema_profile"], "RUNTIME_001_012")
+        self.assertEqual(receipt["inspection"]["schema_profile"], policy.SCHEMA_PROFILE)
         self.assertEqual(
             receipt["receipt_sha256"],
             runner.sha256_json({key: value for key, value in receipt.items() if key != "receipt_sha256"}),
@@ -311,7 +317,7 @@ class LegacyOutboxWrapperTests(unittest.TestCase):
     def test_wrapper_is_inspect_only_and_does_not_expose_a_bus_or_apply_route(self) -> None:
         wrapper = (ROOT / "scripts" / "Invoke-LegacyOutboxInspection.ps1").read_text(encoding="utf-8")
         self.assertIn("function Get-SafeInspectionFailure", wrapper)
-        self.assertIn("LEGACY_RUNTIME_001_012_READ_ONLY", wrapper)
+        self.assertIn("LEGACY_BOOTSTRAPPED_RUNTIME_001_012_READ_ONLY", wrapper)
         self.assertIn("run --rm --no-deps", wrapper)
         self.assertIn("Assert-IsolatedDataNetwork", wrapper)
         self.assertIn("Get-VerifiedBackupIdentity", wrapper)

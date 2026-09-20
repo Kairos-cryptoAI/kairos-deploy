@@ -13,7 +13,7 @@ services:
       args:
         PERSISTENCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
         PERSISTENCE_REVISION: 1ca8bf38d265ece7a95f749a268075549f80c043
-        RUNNER_SHA256: 859142fbc34f2931ea23a955e5f72e066d6c4f6ce259426a5190c7132691665e
+        RUNNER_SHA256: a9e6cdaff96e336916062adbb2d6ed33915257ae12e6717a894d14f006bbbcd7
     image: ${KAIROS_LEGACY_OUTBOX_IMAGE:?set a verified transient legacy inspector image reference}
     entrypoint: ["python", "/app/legacy_outbox_inspection.py"]
     command:
