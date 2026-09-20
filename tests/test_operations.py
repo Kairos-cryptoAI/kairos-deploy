@@ -299,6 +299,7 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertIn("closed-bar-producer:kairos-quant-scouts", recovery)
         self.assertIn("Runtime recovery requires an authoritative contiguous anchor for all five symbols", recovery)
         self.assertIn("read_only_consumer_restart_permitted", recovery)
+        self.assertIn("[long]$outboxValues[0] -eq 0", recovery)
         self.assertIn("offline_bar_recovery_permitted", recovery)
         self.assertIn("backup_manifest_sha256", recovery)
         self.assertIn("Runtime recovery receipt must remain beside the immutable backup manifest", recovery)

@@ -285,7 +285,15 @@ SELECT (SELECT count(*) FROM execution_effects) || '|' ||
             duplicate_audit_ids = [long]$outboxValues[4]
             duplicate_outbox_ids = [long]$outboxValues[5]
             outbox_without_audit = [long]$outboxValues[6]
-            read_only_consumer_restart_permitted = ([long]$outboxValues[3] -eq 0)
+            # A clear lease alone is not a restart authorization.  Any
+            # unpublished durable effect still requires an explicit,
+            # independently verified recovery decision; otherwise a restarted
+            # dispatcher could replay historical data outside the bounded
+            # recovery procedure.
+            read_only_consumer_restart_permitted = (
+                [long]$outboxValues[0] -eq 0 -and
+                [long]$outboxValues[3] -eq 0
+            )
         }
         execution_journal = [ordered]@{
             effects = [long]$executionValues[0]
