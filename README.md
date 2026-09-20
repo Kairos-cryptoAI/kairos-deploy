@@ -41,6 +41,13 @@ integration harness requires an explicitly disposable `kairos_gap_drill_*`
 database, seeds its exact `001`--`012` profile outside the writer, and validates
 commit-before-ACK recovery, deduplication and the exclusive offline-writer lease.
 
+If a hidden supervisor is absent while its original status file still says
+`RUNNING`, do not edit the file or infer that the database is safe.  Inspect it
+read-only with `scripts\Get-OfflineRecoveryObservation.ps1 -StatusPath <path>`.
+`COMPLETED_UNVERIFIED` means only that the preserved stdout contains a terminal
+completion event; it still requires a fresh backup, clone-only continuity/outbox
+reconciliation and an explicit recovery decision before any consumer restart.
+
 ## Exact offline outbox reconciliation
 
 An expired outbox lease is not a licence to restart a dispatcher or replay a

@@ -45,7 +45,9 @@ jobs:
       - name: Test offline bar recovery preflight
         if: runner.os == 'Windows'
         shell: powershell
-        run: ./scripts/Test-LongGapRecovery.ps1
+        run: |
+          ./scripts/Test-LongGapRecovery.ps1
+          ./scripts/Test-OfflineRecoveryObservation.ps1
 
   validate:
     needs: static-python
