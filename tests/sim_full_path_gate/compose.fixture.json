@@ -1,12 +1,12 @@
 {
-  "name": "kairos-sim-full-path-gate-20260919-r1",
+  "name": "kairos-sim-full-path-gate-20260920-r2",
   "services": {
     "timescaledb": {
       "image": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9",
       "environment": {
         "POSTGRES_USER": "kairos",
         "POSTGRES_PASSWORD": "synthetic_sim_full_path_gate_only",
-        "POSTGRES_DB": "kairos_sim_full_path_gate_202609190001"
+        "POSTGRES_DB": "kairos_sim_full_path_gate_202609200002"
       },
       "command": ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40", "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4"],
       "tmpfs": ["/var/lib/postgresql/data:rw,nosuid,size=512m"],
@@ -14,7 +14,7 @@
       "mem_limit": "768m",
       "networks": ["isolated"],
       "healthcheck": {
-        "test": ["CMD-SHELL", "pg_isready -U kairos -d kairos_sim_full_path_gate_202609190001"],
+        "test": ["CMD-SHELL", "pg_isready -U kairos -d kairos_sim_full_path_gate_202609200002"],
         "interval": "2s",
         "timeout": "2s",
         "retries": 30
@@ -23,11 +23,11 @@
     },
     "gate": {
       "build": {"context": "tests/sim_full_path_gate", "dockerfile": "Dockerfile"},
-      "image": "kairos-sim-full-path-gate-tests:20260919-r1",
+      "image": "kairos-sim-full-path-gate-tests:20260920-r2",
       "environment": {
         "KAIROS_SIM_FULL_PATH_GATE_CONFIRM": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY",
-        "KAIROS_SIM_FULL_PATH_GATE_PROJECT": "kairos-sim-full-path-gate-20260919-r1",
-        "KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL": "postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/kairos_sim_full_path_gate_202609190001"
+        "KAIROS_SIM_FULL_PATH_GATE_PROJECT": "kairos-sim-full-path-gate-20260920-r2",
+        "KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL": "postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/kairos_sim_full_path_gate_202609200002"
       },
       "depends_on": {"timescaledb": {"condition": "service_healthy", "required": true}},
       "read_only": true,

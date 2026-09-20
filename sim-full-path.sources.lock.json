@@ -43,15 +43,15 @@
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "cfcba17519952bcbdd6ef6e3b2386b6474c89b72"
+      "revision": "0df4ef150d3194321a72c255b3b9365af1fa2995"
     }
   },
   "infrastructure": {
     "timescaledb": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
   },
   "gate": {
-    "project": "kairos-sim-full-path-gate-20260919-r1",
-    "database": "kairos_sim_full_path_gate_202609190001",
+    "project": "kairos-sim-full-path-gate-20260920-r2",
+    "database": "kairos_sim_full_path_gate_202609200002",
     "confirmation": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
   }
 }

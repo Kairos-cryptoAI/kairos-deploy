@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir simulator-full-path-gate-evidence
           git rev-parse HEAD > simulator-full-path-gate-evidence/deploy-revision.txt
-          project=kairos-sim-full-path-gate-20260919-r1
+          project=kairos-sim-full-path-gate-20260920-r2
           test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
           test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
           test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
@@ -78,19 +78,19 @@ jobs:
       - name: Build only the pinned full-path simulator test image
         timeout-minutes: 10
         run: |
-          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml build gate 2>&1 | tee simulator-full-path-gate-evidence/build.log
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r2 -f docker-compose.sim-full-path.yml build gate 2>&1 | tee simulator-full-path-gate-evidence/build.log
       - name: Start only the disposable internal database
         timeout-minutes: 3
         run: |
-          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml up -d --wait --wait-timeout 90 timescaledb
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r2 -f docker-compose.sim-full-path.yml up -d --wait --wait-timeout 90 timescaledb
       - name: Run one bounded sealed full-path simulator proof
         timeout-minutes: 5
         run: |
-          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml)
+          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r2 -f docker-compose.sim-full-path.yml)
           "${compose[@]}" up -d --no-deps gate
           gate_id=$("${compose[@]}" ps -a -q gate)
           test -n "$gate_id"
-          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-sim-full-path-gate-20260919-r1
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-sim-full-path-gate-20260920-r2
           set +e
           gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
           wait_exit=$?
@@ -112,13 +112,13 @@ jobs:
             printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\n' >> simulator-full-path-gate-evidence/capture-status.tsv
             exit 0
           fi
-          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260919-r1 -f docker-compose.sim-full-path.yml)
+          compose=(docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r2 -f docker-compose.sim-full-path.yml)
           set +e
           "${compose[@]}" logs --no-color --timestamps > simulator-full-path-gate-evidence/services.log 2>&1
           printf 'services\t%s\n' "$?" >> simulator-full-path-gate-evidence/capture-status.tsv
           "${compose[@]}" ps -a --format json > simulator-full-path-gate-evidence/containers.json 2>&1
           printf 'containers\t%s\n' "$?" >> simulator-full-path-gate-evidence/capture-status.tsv
-          "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_sim_full_path_gate_202609190001 --format=custom > simulator-full-path-gate-evidence/simulator.dump 2> simulator-full-path-gate-evidence/pg_dump.stderr
+          "${compose[@]}" exec -T timescaledb pg_dump -U kairos -d kairos_sim_full_path_gate_202609200002 --format=custom > simulator-full-path-gate-evidence/simulator.dump 2> simulator-full-path-gate-evidence/pg_dump.stderr
           dump_status=$?
           printf 'pg_dump\t%s\n' "$dump_status" >> simulator-full-path-gate-evidence/capture-status.tsv
           if [ "$dump_status" -eq 0 ]; then
