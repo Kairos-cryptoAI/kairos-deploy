@@ -97,12 +97,12 @@ function Assert-ScopedContainer {
 
 function Assert-IsolatedNetwork {
     param(
-        [Parameter(Mandatory = $true)][string]$Network,
+        [Parameter(Mandatory = $true)][string]$NetworkName,
         [Parameter(Mandatory = $true)][string]$OnlyContainer,
         [Parameter(Mandatory = $true)][string]$Label
     )
 
-    $raw = (& docker network inspect --format '{{json .}}' $Network).Trim()
+    $raw = (& docker network inspect --format '{{json .}}' $NetworkName).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $raw) {
         throw "Could not inspect the supplied $Label network"
     }
@@ -119,7 +119,25 @@ function Assert-IsolatedNetwork {
 function Assert-OnlyInfrastructureRunning {
     param([Parameter(Mandatory = $true)][string]$Project)
 
-    $services = @(& docker ps --format '{{.Label "com.docker.compose.service"}}' --filter "status=running" --filter "label=com.docker.compose.project=$Project" | Where-Object { $_ })
+    # Do not use Docker's quote-sensitive ``.Label "..."`` Go template here:
+    # Windows PowerShell can strip the inner quotes while invoking a native
+    # executable.  Enumerate only scoped container IDs, then parse the same
+    # JSON label representation used by Assert-ScopedContainer.
+    $ids = @(& docker ps --quiet --filter "status=running" --filter "label=com.docker.compose.project=$Project" | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0 -or @($ids | Where-Object { $_ -notmatch '^[0-9a-f]{12,64}$' }).Count -ne 0) {
+        throw "Could not inspect running scoped Compose services"
+    }
+    $services = foreach ($id in $ids) {
+        $labelsRaw = (& docker inspect --format '{{json .Config.Labels}}' $id).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $labelsRaw) {
+            throw "Could not inspect running scoped Compose services"
+        }
+        $labels = $labelsRaw | ConvertFrom-Json
+        if ($labels.'com.docker.compose.project' -ne $Project -or [string]::IsNullOrWhiteSpace([string]$labels.'com.docker.compose.service')) {
+            throw "Could not inspect running scoped Compose services"
+        }
+        [string]$labels.'com.docker.compose.service'
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Could not inspect running scoped Compose services"
     }
@@ -150,6 +168,33 @@ function Test-DetachedReceiptSignature {
     }
 }
 
+function Get-SafeInspectionFailure {
+    param([Parameter(Mandatory = $true)][object[]]$Output)
+
+    # A failed inspector is allowed to report only the runner's fixed redacted
+    # startup envelope.  Do not echo arbitrary container output: it could
+    # contain a driver error, a DSN, or a payload fragment.
+    $jsonLines = @($Output | Where-Object { $_ -match '^\{.*\}$' })
+    if ($jsonLines.Count -ne 1) {
+        return $null
+    }
+    try {
+        $failure = $jsonLines[0] | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    $fields = @($failure.PSObject.Properties.Name | Sort-Object)
+    if (($fields -join ",") -ne "classification,error_type,kind,schema_version,state" -or
+        $failure.schema_version -ne 1 -or
+        $failure.kind -ne "kairos.offline-outbox-reconciliation-result.v1" -or
+        $failure.classification -ne "OFFLINE_EXACT_ROW_ONLY" -or
+        $failure.state -ne "STARTUP_REJECTED" -or
+        [string]$failure.error_type -notmatch '^[A-Za-z0-9_]{1,80}$') {
+        return $null
+    }
+    return $failure
+}
+
 $inputRoot = Resolve-ExistingDirectory -PathValue $InputDirectory -Label "Explicit operator input directory"
 $expectationFile = Resolve-ExistingFile -PathValue $ExpectationPath -Label "Exact row expectation"
 if ($expectationFile -ne (Join-Path $inputRoot "expectation.json")) {
@@ -178,8 +223,8 @@ if ([IO.Path]::GetFullPath($ReceiptSignaturePath) -ne [IO.Path]::GetFullPath((Jo
 Assert-OnlyInfrastructureRunning -Project $ComposeProject
 $timescaledb = Assert-ScopedContainer -Service "timescaledb" -Project $ComposeProject
 $redis = Assert-ScopedContainer -Service "redis" -Project $ComposeProject
-Assert-IsolatedNetwork -Network $DataNetwork -OnlyContainer $timescaledb -Label "PostgreSQL"
-Assert-IsolatedNetwork -Network $BusNetwork -OnlyContainer $redis -Label "Redis"
+Assert-IsolatedNetwork -NetworkName $DataNetwork -OnlyContainer $timescaledb -Label "PostgreSQL"
+Assert-IsolatedNetwork -NetworkName $BusNetwork -OnlyContainer $redis -Label "Redis"
 
 $temporaryEnvironment = Join-Path ([IO.Path]::GetTempPath()) ("kairos-offline-outbox-" + [Guid]::NewGuid().ToString("N") + ".env")
 $temporaryCompose = Join-Path ([IO.Path]::GetTempPath()) ("kairos-offline-outbox-" + [Guid]::NewGuid().ToString("N") + ".json")
@@ -199,7 +244,11 @@ try {
         throw "Offline outbox profile source validation failed"
     }
     $profile = if ($Mode -eq "Inspect") { $inspectProfile } else { $applyProfile }
-    & docker compose -p $toolProject --profile $profile --env-file $temporaryEnvironment -f $composeFile config --format json | Set-Content -LiteralPath $temporaryCompose -Encoding utf8
+    # Validate both explicitly profiled services before running either one. A
+    # profile-specific ``config`` projection contains only the inspector and
+    # would otherwise make the full fail-closed topology validator reject a
+    # healthy inspect-only invocation.
+    & docker compose -p $toolProject --profile $inspectProfile --profile $applyProfile --env-file $temporaryEnvironment -f $composeFile config --format json | Set-Content -LiteralPath $temporaryCompose -Encoding utf8
     if ($LASTEXITCODE -ne 0) {
         throw "Offline outbox profile topology could not be rendered"
     }
@@ -213,8 +262,13 @@ try {
             throw "Inspection receipt already exists; choose a new explicit input directory"
         }
         $output = @(& docker compose -p $toolProject --profile $inspectProfile --env-file $temporaryEnvironment -f $composeFile run --rm --no-deps --quiet-pull outbox-inspector)
-        if ($LASTEXITCODE -ne 0) {
-            throw "Read-only exact-row inspection failed"
+        $inspectionExitCode = $LASTEXITCODE
+        if ($inspectionExitCode -ne 0) {
+            $failure = Get-SafeInspectionFailure -Output $output
+            if ($null -eq $failure) {
+                throw "Read-only exact-row inspection failed"
+            }
+            throw ("Read-only exact-row inspection rejected: " + $failure.state + " (" + $failure.error_type + ")")
         }
         $jsonLines = @($output | Where-Object { $_ -match '^\{.*\}$' })
         if ($jsonLines.Count -ne 1) {
