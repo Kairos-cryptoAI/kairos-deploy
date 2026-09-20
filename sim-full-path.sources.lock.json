@@ -19,7 +19,7 @@
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "c89bb31f9425e81e5d77edc6a7e5a871a017af6c"
+      "revision": "73339c88e67a2e0ee146a3d403cf4b7b4e075f27"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
@@ -50,8 +50,8 @@
     "timescaledb": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
   },
   "gate": {
-    "project": "kairos-sim-full-path-gate-20260920-r2",
-    "database": "kairos_sim_full_path_gate_202609200002",
+    "project": "kairos-sim-full-path-gate-20260920-r3",
+    "database": "kairos_sim_full_path_gate_202609200003",
     "confirmation": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
   }
 }

@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-PROJECT = "kairos-sim-full-path-gate-20260920-r2"
-DATABASE = "kairos_sim_full_path_gate_202609200002"
+PROJECT = "kairos-sim-full-path-gate-20260920-r3"
+DATABASE = "kairos_sim_full_path_gate_202609200003"
 CONFIRMATION = "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
 DATABASE_URL = f"postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/{DATABASE}"
 TIMESCALE_IMAGE = (
@@ -21,7 +21,7 @@ TIMESCALE_IMAGE = (
 )
 PINS = {
     "kairos-core": "4832a407bb94eb82abee84fe5c8a1de828c37833",
-    "kairos-persistence": "c89bb31f9425e81e5d77edc6a7e5a871a017af6c",
+    "kairos-persistence": "73339c88e67a2e0ee146a3d403cf4b7b4e075f27",
     "kairos-strategy-engine": "765e5ed2599daa64dcb718de228441044e24d821",
     "kairos-router": "c634355c1725ea41d4cbd9130795697ec71c94a5",
     "kairos-llm": "5dff1e7597cb9c124312dcd42247afe649005eb5",
@@ -343,7 +343,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("full-path simulator gate must use its dedicated Dockerfile")
     if gate.get("command") is not None or gate.get("entrypoint") is not None:
         errors.append("full-path simulator gate must not override the sealed Dockerfile test command")
-    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260920-r2":
+    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260920-r3":
         errors.append("full-path simulator gate image identity changed")
     if _environment(gate.get("environment")) != {
         "KAIROS_SIM_FULL_PATH_GATE_CONFIRM": CONFIRMATION,

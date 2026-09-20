@@ -18,10 +18,17 @@ dependencies = [
 [tool.uv]
 package = false
 required-version = "==0.12.3"
+# All downstream source snapshots still declare the earlier persistence SHA.
+# The only delta to 73339c8 is the OCI-runner publication workflow, so the
+# gate resolves the current reviewed source explicitly rather than mixing it
+# with a transitive historical source URL.
+override-dependencies = [
+  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@73339c88e67a2e0ee146a3d403cf4b7b4e075f27",
+]
 
 [tool.uv.sources]
 kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "4832a407bb94eb82abee84fe5c8a1de828c37833" }
-kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "c89bb31f9425e81e5d77edc6a7e5a871a017af6c" }
+kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "73339c88e67a2e0ee146a3d403cf4b7b4e075f27" }
 kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "765e5ed2599daa64dcb718de228441044e24d821" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "c634355c1725ea41d4cbd9130795697ec71c94a5" }
 kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "5dff1e7597cb9c124312dcd42247afe649005eb5" }

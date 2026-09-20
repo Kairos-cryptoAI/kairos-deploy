@@ -19,7 +19,7 @@
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "c89bb31f9425e81e5d77edc6a7e5a871a017af6c"
+      "revision": "73339c88e67a2e0ee146a3d403cf4b7b4e075f27"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
@@ -47,7 +47,7 @@
     }
   },
   "gate": {
-    "project": "kairos-current-release-gate-20260920-r2",
+    "project": "kairos-current-release-gate-20260920-r3",
     "confirmation": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
   }
 }
