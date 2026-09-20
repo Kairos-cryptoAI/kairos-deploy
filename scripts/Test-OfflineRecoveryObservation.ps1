@@ -29,10 +29,14 @@ try {
     $before = (Get-FileHash -Algorithm SHA256 -LiteralPath $complete).Hash
     $completeResult = (& $observer -StatusPath $complete | ConvertFrom-Json)
     $after = (Get-FileHash -Algorithm SHA256 -LiteralPath $complete).Hash
+    $completeObservedAt = ([DateTimeOffset]$completeResult.terminal_stdout_event.observed_at_utc).
+        ToUniversalTime().ToString('o')
     if ($completeResult.derived_state -ne 'COMPLETED_UNVERIFIED' -or
         $completeResult.next_action -ne 'FRESH_BACKUP_AND_CLONE_ONLY_CONTINUITY_OUTBOX_RECONCILIATION_REQUIRED' -or
         $completeResult.source_status_mutated -ne $false -or
         $completeResult.permissions.restart_consumers -ne $false -or
+        $completeResult.terminal_stdout_event.timestamp_valid -ne $true -or
+        $completeObservedAt -ne '2026-09-19T16:55:32.0000000+00:00' -or
         $before -ne $after) {
         throw 'Completed stale-status observation did not remain fail-closed and read-only.'
     }
@@ -51,6 +55,16 @@ try {
     if ($unknownResult.derived_state -ne 'ORPHANED_UNKNOWN' -or
         $unknownResult.terminal_stdout_event -ne $null) {
         throw 'Missing terminal event was not classified as unknown.'
+    }
+
+    $malformedTerminal = Write-Fixture -Name 'malformed-terminal' -LogLines @(
+        '{"state":"COMPLETED","observed_at_utc":"not-a-timestamp"}'
+    )
+    $malformedTerminalResult = (& $observer -StatusPath $malformedTerminal | ConvertFrom-Json)
+    if ($malformedTerminalResult.derived_state -ne 'ORPHANED_UNKNOWN' -or
+        $malformedTerminalResult.terminal_stdout_event.timestamp_valid -ne $false -or
+        $malformedTerminalResult.permissions.restart_consumers -ne $false) {
+        throw 'Malformed terminal timestamp escaped the fail-closed observer.'
     }
 
     $invalid = Join-Path $temporaryRoot 'invalid.status.json'

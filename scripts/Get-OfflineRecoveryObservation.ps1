@@ -43,6 +43,33 @@ function Get-RequiredString([object]$Object, [string]$Name) {
     return ([string]$property.Value).Trim()
 }
 
+function ConvertTo-CanonicalUtcTimestamp([object]$Value) {
+    # ConvertFrom-Json may materialize an ISO-8601 value as DateTime.  Casting
+    # that object back to string uses the operator locale, which makes an
+    # otherwise durable receipt ambiguous.  Normalize every accepted terminal
+    # timestamp to an explicit UTC round-trip value instead.
+    if ($Value -is [DateTimeOffset]) {
+        return $Value.ToUniversalTime().ToString('o')
+    }
+    if ($Value -is [DateTime]) {
+        return $Value.ToUniversalTime().ToString('o')
+    }
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $parsed = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+        $Value,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    )) {
+        return $null
+    }
+    return $parsed.ToUniversalTime().ToString('o')
+}
+
 function Get-TerminalLogEvent([string]$Path, [int]$Count) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
@@ -68,9 +95,16 @@ function Get-TerminalLogEvent([string]$Path, [int]$Count) {
             continue
         }
         $observedProperty = $event.PSObject.Properties['observed_at_utc']
+        $observedAtUtc = if ($null -eq $observedProperty) {
+            $null
+        }
+        else {
+            ConvertTo-CanonicalUtcTimestamp $observedProperty.Value
+        }
         $terminal = [ordered]@{
             state = $state
-            observed_at_utc = if ($null -eq $observedProperty) { $null } else { [string]$observedProperty.Value }
+            observed_at_utc = $observedAtUtc
+            timestamp_valid = $null -ne $observedAtUtc
         }
     }
     return $terminal
@@ -119,10 +153,10 @@ if ($processState -eq 'PRESENT') {
 } elseif ($processState -eq 'PID_REUSED_OR_STALE') {
     $derivedState = 'ORPHANED_UNKNOWN'
     $nextAction = 'PRESERVE_LOGS_AND_DIAGNOSE_BEFORE_ANY_RECOVERY_ACTION'
-} elseif ($null -ne $terminal -and $terminal.state -eq 'COMPLETED') {
+} elseif ($null -ne $terminal -and $terminal.timestamp_valid -and $terminal.state -eq 'COMPLETED') {
     $derivedState = 'COMPLETED_UNVERIFIED'
     $nextAction = 'FRESH_BACKUP_AND_CLONE_ONLY_CONTINUITY_OUTBOX_RECONCILIATION_REQUIRED'
-} elseif ($null -ne $terminal -and $terminal.state -eq 'FAILED') {
+} elseif ($null -ne $terminal -and $terminal.timestamp_valid -and $terminal.state -eq 'FAILED') {
     $derivedState = 'FAILED_UNVERIFIED'
     $nextAction = 'PRESERVE_LOGS_AND_DIAGNOSE_BEFORE_ANY_RECOVERY_ACTION'
 } else {
