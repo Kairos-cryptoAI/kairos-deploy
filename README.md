@@ -397,6 +397,44 @@ tables belong in the PAPER runtime. This command never mounts a runtime volume,
 reads an environment file, opens a source database connection, or changes
 `PAPER_QUALIFIED`, `ALPHA_READY`, `LIVE_READY`, or `REJECT_ALL`.
 
+### Legacy bootstrapped outbox quarantine clone rehearsal
+
+The historical PAPER database has a different, sealed starting shape:
+`LEGACY_BOOTSTRAPPED_RUNTIME_001_012`. Its public-catalog fingerprint is not
+interchangeable with the clean-migrations preflight above. After a fresh backup,
+matching recovery receipt, and a fresh signed eligible legacy-inspection receipt
+exist, the dedicated controller can prove the next narrow step on a disposable
+copy only:
+
+```powershell
+python scripts\legacy_outbox_quarantine_clone_rehearsal.py `
+  --manifest-path D:\Kairos\kairos-deploy\backups\<new>\kairos-paper-gate-<stamp>.dump.json `
+  --recovery-receipt-path D:\Kairos\kairos-deploy\backups\<new>\runtime-recovery-preflight-<stamp>.json `
+  --legacy-inspection-receipt-path D:\Kairos\runtime\<new-inspection>\receipt.json `
+  --legacy-inspection-signature-path D:\Kairos\runtime\<new-inspection>\receipt.json.asc `
+  --expectation-path D:\Kairos\runtime\<new-inspection>\expectation.json `
+  --migration-runner-image ghcr.io/kairos-cryptoai/kairos-runtime-schema-profile-runner@sha256:<published-digest> `
+  --confirmation CLONE_ONLY_LEGACY_OUTBOX_QUARANTINE_REHEARSAL
+```
+
+The controller requires evidence no older than two hours, verifies the detached
+GPG signature and the exact legacy fingerprint, restores the source dump only
+into newly labelled no-network Docker volumes, and applies only
+`013,014,015,016,018`. It rejects `017` and every `sim_*` relation. A reviewed,
+unprivileged persistence image then shares only the clone's loopback namespace
+and calls the existing DB-only `quarantine_expired_outbox_exact` primitive. The
+raw legacy lease owner is read only inside the clone, matched by its signed hash,
+and never written to the host receipt.
+
+The proof requires a first `QUARANTINED` result, an idempotent
+`ALREADY_QUARANTINED` repeat, zero publisher calls, cleared lease fields,
+unchanged publish attempts, a `PUBLISH_OUTCOME_UNKNOWN` durable state, and a
+second clone restore drill. Its signed `PASS_CLONE_ONLY` receipt always records
+`original_runtime_contacted=false`, `redis_contacted=false`,
+`publisher_contacted=false`, and leaves all readiness flags false. It never
+authorizes source migration, source quarantine, consumer restart, PAPER, alpha,
+or LIVE; the next gate remains a separately reviewed target-role/primary change.
+
 ## Known qualification boundary
 
 Static checks and synthetic tests cannot validate real provider credentials or guarantee

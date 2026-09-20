@@ -38,6 +38,7 @@ jobs:
           python scripts/validate_offline_outbox_reconciliation.py
           python scripts/validate_offline_outbox_drain.py
           python scripts/validate_legacy_outbox_inspection.py
+          python scripts/validate_legacy_outbox_quarantine_clone_rehearsal.py
           python scripts/validate_schema_upgrade_preflight.py
       - name: Run validator tests
         run: python -m unittest discover -s tests -v
