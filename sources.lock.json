@@ -18,50 +18,50 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "c00b0169dd5840436eec41a0d22ce7b7497c7e8e",
+      "revision": "2b1884975ce1d3d92b2672c3dbd5e69d956b7cff",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
     "strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "b7d6d2ab1259480a8c1b18748180eee8c23e029b",
+      "revision": "a1990bf2ce0a7888a2afeffeada26075d24733ac",
       "package_dir": "kairos_strategy",
       "command": "kairos-strategy-engine",
       "extra": "runtime"
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "0bc244bf2325af265d99e8dd3821e2edd3564eca",
+      "revision": "ed18195e4f40396fa91f9400c56882271a7b113e",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
     "router": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-router",
-      "revision": "012e057266d90933acbbf79e9a55cdcd6ec2396f",
+      "revision": "4a99b347ab924e29d159bf4b4f25c55550a0f9f9",
       "package_dir": "kairos_router",
       "command": "kairos-router"
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "6d79fe7c5f972acd23fc35a949940a69ae22aa7f",
+      "revision": "3a4fe30709654cc5a56b98610a6e0a20cff86c24",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
     "macro-strategist": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "d6a952f41bf0848d8bf55ed789718ea912c4cf5f",
+      "revision": "22583ebbe941a5e6ec58fa16156ad0f34e4b8033",
       "package_dir": "kairos_macro",
       "command": "kairos-macro-strategist"
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "55579ed5f2ef726fda3374c2b83118cef0ae5371",
+      "revision": "b38e56f87c004e3dd7a65710573c5ace2a25342e",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "87c2569abae052ba8a0773cbf23ae0ed6a0cccf0",
+      "revision": "eaa17aa3ba0df425c0b67296bbf8f10075bfe421",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
