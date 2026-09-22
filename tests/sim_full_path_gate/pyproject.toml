@@ -18,20 +18,20 @@ dependencies = [
 [tool.uv]
 package = false
 required-version = "==0.12.3"
-# All downstream source snapshots still declare the earlier persistence SHA.
-# The only delta to 73339c8 is the OCI-runner publication workflow, so the
-# simulator gate resolves the current reviewed source explicitly rather than
-# mixing it with a transitive historical source URL.
+# Downstream snapshots still declare the prior persistence revision. Pin the
+# source-lock-verified current revision so uv cannot resolve stale core metadata.
 override-dependencies = [
-  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@73339c88e67a2e0ee146a3d403cf4b7b4e075f27",
+  "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@0c8717c18d535465ae89c51bcd958b0884ec02ab",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@21efd81bc3cd4bb50734a4c32da3d0f5f5738d43",
+  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@ad566c2b61ceb5d90de3334d6e15511753562bd0",
 ]
 
 [tool.uv.sources]
-kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "4832a407bb94eb82abee84fe5c8a1de828c37833" }
-kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "73339c88e67a2e0ee146a3d403cf4b7b4e075f27" }
+kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "0c8717c18d535465ae89c51bcd958b0884ec02ab" }
+kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "ad566c2b61ceb5d90de3334d6e15511753562bd0" }
 kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "b7d6d2ab1259480a8c1b18748180eee8c23e029b" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "012e057266d90933acbbf79e9a55cdcd6ec2396f" }
-kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "5dff1e7597cb9c124312dcd42247afe649005eb5" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "21efd81bc3cd4bb50734a4c32da3d0f5f5738d43" }
 kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "6d79fe7c5f972acd23fc35a949940a69ae22aa7f" }
 kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "55579ed5f2ef726fda3374c2b83118cef0ae5371" }
 kairos-execution-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git", rev = "87c2569abae052ba8a0773cbf23ae0ed6a0cccf0" }

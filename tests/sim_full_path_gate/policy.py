@@ -20,11 +20,11 @@ TIMESCALE_IMAGE = (
     "sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
 )
 PINS = {
-    "kairos-core": "4832a407bb94eb82abee84fe5c8a1de828c37833",
-    "kairos-persistence": "73339c88e67a2e0ee146a3d403cf4b7b4e075f27",
+    "kairos-core": "0c8717c18d535465ae89c51bcd958b0884ec02ab",
+    "kairos-persistence": "ad566c2b61ceb5d90de3334d6e15511753562bd0",
     "kairos-strategy-engine": "b7d6d2ab1259480a8c1b18748180eee8c23e029b",
     "kairos-router": "012e057266d90933acbbf79e9a55cdcd6ec2396f",
-    "kairos-llm": "5dff1e7597cb9c124312dcd42247afe649005eb5",
+    "kairos-llm": "21efd81bc3cd4bb50734a4c32da3d0f5f5738d43",
     "kairos-aggregator": "6d79fe7c5f972acd23fc35a949940a69ae22aa7f",
     "kairos-risk-manager": "55579ed5f2ef726fda3374c2b83118cef0ae5371",
     "kairos-execution-engine": "87c2569abae052ba8a0773cbf23ae0ed6a0cccf0",
