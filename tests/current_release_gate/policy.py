@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-PROJECT = "kairos-current-release-gate-20260920-r3"
+PROJECT = "kairos-current-release-gate-20260923-r1"
 CONFIRMATION = "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
 SHA256 = re.compile(r"^[0-9a-f]{40}$")
 DEPENDENCIES = {
@@ -241,7 +241,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("gate must use its dedicated Dockerfile")
     if build.get("additional_contexts"):
         errors.append("gate must not accept an additional build context")
-    if gate.get("image") != "kairos-current-release-gate-tests:20260920-r3":
+    if gate.get("image") != "kairos-current-release-gate-tests:20260923-r1":
         errors.append("current-release gate image identity changed")
     environment = _environment(gate.get("environment"))
     if environment != expected_environment():

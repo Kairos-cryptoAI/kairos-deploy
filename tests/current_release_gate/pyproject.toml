@@ -22,7 +22,7 @@ required-version = "==0.12.3"
 # source-lock-verified current revision so uv cannot resolve stale core metadata.
 override-dependencies = [
   "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@0c8717c18d535465ae89c51bcd958b0884ec02ab",
-  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@21efd81bc3cd4bb50734a4c32da3d0f5f5738d43",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@2a7f0f6087186fb7495124e434b8dbfd8fa73e45",
   "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@104880fdb150b70a70e1b52eedd14d489c2b9fb7",
 ]
 
@@ -31,8 +31,8 @@ kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev 
 kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "104880fdb150b70a70e1b52eedd14d489c2b9fb7" }
 kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "a4430b23927342cc45f50473530e86a079560f46" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "9aa702677d66071ff56fc534cac3d48690b19e51" }
-kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "21efd81bc3cd4bb50734a4c32da3d0f5f5738d43" }
-kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "b7a557581b2f002b238c0aad577aed5e5226c452" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "2a7f0f6087186fb7495124e434b8dbfd8fa73e45" }
+kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "0f8d3c2cf14f9886b4de4ac3199c219588747a7f" }
 kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "ae276eb6569ba1f8219bfb426526d0a8ae7274d1" }
 kairos-execution-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git", rev = "bb334e632f4ef2023fe2f77534208acea46735b0" }
 

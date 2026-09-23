@@ -1,15 +1,15 @@
 {
-  "name": "kairos-current-release-gate-20260920-r3",
+  "name": "kairos-current-release-gate-20260923-r1",
   "services": {
     "gate": {
       "build": {
         "context": "tests/current_release_gate",
         "dockerfile": "Dockerfile"
       },
-      "image": "kairos-current-release-gate-tests:20260920-r3",
+      "image": "kairos-current-release-gate-tests:20260923-r1",
       "environment": {
         "KAIROS_CURRENT_RELEASE_GATE_CONFIRM": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY",
-        "KAIROS_CURRENT_RELEASE_GATE_PROJECT": "kairos-current-release-gate-20260920-r3"
+        "KAIROS_CURRENT_RELEASE_GATE_PROJECT": "kairos-current-release-gate-20260923-r1"
       },
       "read_only": true,
       "mem_limit": "768m",

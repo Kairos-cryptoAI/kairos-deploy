@@ -22,14 +22,14 @@ Every outcome is `SIMULATED`. This gate has no credentials, external endpoints,
 or durable host storage. It cannot change readiness flags, qualify a strategy,
 or authorize a venue action.
 
-The `20260920-r3` project identity is a new current-source snapshot; artifacts
+The `20260923-r1` project identity is a new current-source snapshot; artifacts
 from the earlier `r1` identity remain historical evidence and are not rewritten.
 
 Before a local run, validate the manifest and rendered Compose model:
 
 ```powershell
 python scripts/validate_sim_full_path_deployment.py
-docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r3 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
+docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260923-r1 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
 python scripts/validate_sim_full_path_deployment.py --compose-json compose-sim-full-path.json --dockerfile tests/sim_full_path_gate/Dockerfile
 ```
 

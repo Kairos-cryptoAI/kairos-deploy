@@ -31,11 +31,11 @@
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "21efd81bc3cd4bb50734a4c32da3d0f5f5738d43"
+      "revision": "2a7f0f6087186fb7495124e434b8dbfd8fa73e45"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "b7a557581b2f002b238c0aad577aed5e5226c452"
+      "revision": "0f8d3c2cf14f9886b4de4ac3199c219588747a7f"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
@@ -50,8 +50,8 @@
     "timescaledb": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
   },
   "gate": {
-    "project": "kairos-sim-full-path-gate-20260920-r3",
-    "database": "kairos_sim_full_path_gate_202609200003",
+    "project": "kairos-sim-full-path-gate-20260923-r1",
+    "database": "kairos_sim_full_path_gate_202609230001",
     "confirmation": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
   }
 }

@@ -119,14 +119,14 @@ jobs:
           docker compose --env-file tests/sim_gate/empty.env -p kairos-sim -f docker-compose.sim.yml config --quiet
       - name: Validate isolated full-path simulator topology
         run: |
-          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r3 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260923-r1 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
           python scripts/validate_sim_full_path_deployment.py --compose-json compose-sim-full-path.json --dockerfile tests/sim_full_path_gate/Dockerfile
-          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260920-r3 -f docker-compose.sim-full-path.yml config --quiet
+          docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260923-r1 -f docker-compose.sim-full-path.yml config --quiet
       - name: Validate current-source REJECT_ALL topology
         run: |
-          docker compose -p kairos-current-release-gate-20260920-r3 -f docker-compose.current-release-gate.yml config --format json > compose-current-release-gate.json
+          docker compose -p kairos-current-release-gate-20260923-r1 -f docker-compose.current-release-gate.yml config --format json > compose-current-release-gate.json
           python scripts/validate_current_release_gate.py --compose-json compose-current-release-gate.json --dockerfile tests/current_release_gate/Dockerfile
-          docker compose -p kairos-current-release-gate-20260920-r3 -f docker-compose.current-release-gate.yml config --quiet
+          docker compose -p kairos-current-release-gate-20260923-r1 -f docker-compose.current-release-gate.yml config --quiet
       - name: Validate profile-only offline outbox reconciliation topology
         run: |
           docker compose --env-file .env.outbox-reconciliation.example -f docker-compose.outbox-reconciliation.yml config --format json > compose-outbox-reconciliation-normal-up.json
