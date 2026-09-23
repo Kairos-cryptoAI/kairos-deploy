@@ -18,32 +18,32 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "2b1884975ce1d3d92b2672c3dbd5e69d956b7cff",
+      "revision": "9bf8dbc7437a7080c500db2e247748bf3c07699e",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
     "strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "a1990bf2ce0a7888a2afeffeada26075d24733ac",
+      "revision": "aca7e0d9efcbda2b9af45988d5f7235ac526f705",
       "package_dir": "kairos_strategy",
       "command": "kairos-strategy-engine",
       "extra": "runtime"
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "b38e56f87c004e3dd7a65710573c5ace2a25342e",
+      "revision": "14189b370b3d01d35a0daaf1ccbe965eb1960905",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "canary-controller": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "b38e56f87c004e3dd7a65710573c5ace2a25342e",
+      "revision": "14189b370b3d01d35a0daaf1ccbe965eb1960905",
       "package_dir": "kairos_risk",
       "command": "kairos-paper-canary"
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "eaa17aa3ba0df425c0b67296bbf8f10075bfe421",
+      "revision": "87c2bb1c54609e280ac89869fb818523ff70fa91",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
