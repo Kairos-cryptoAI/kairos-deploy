@@ -312,11 +312,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#ad566c2b61ceb5d90de3334d6e15511753562bd0
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#56f5d630082441abe22f6e98b019d80b687cb2f7
       args:
         PACKAGE_DIR: kairos_persistence
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
-        SOURCE_REVISION: ad566c2b61ceb5d90de3334d6e15511753562bd0
+        SOURCE_REVISION: 56f5d630082441abe22f6e98b019d80b687cb2f7
     command: ["kairos-persistence-exporter"]
     environment:
       <<: *common-environment
