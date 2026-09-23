@@ -34,7 +34,7 @@ kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", 
 kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "2a7f0f6087186fb7495124e434b8dbfd8fa73e45" }
 kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "d2092158ed71e185f49f0d2af11c88a0fdd0765e" }
 kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "4efbdc1b2c4948737d77aef5b0f3d11484d1f8ba" }
-kairos-execution-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git", rev = "4733a0a06a3893f7e9e261757e82728d41a6fe05" }
+kairos-execution-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git", rev = "bcdd01bbe2e8281ce6251c91f150f68318ef823b" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
