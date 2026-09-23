@@ -22,12 +22,12 @@ TIMESCALE_IMAGE = (
 PINS = {
     "kairos-core": "0c8717c18d535465ae89c51bcd958b0884ec02ab",
     "kairos-persistence": "a0e06a07cdf78809b8e9474457a79bbc957b7220",
-    "kairos-strategy-engine": "10e9da277dbbd9caa0075407b2ec4e4009c8853f",
-    "kairos-router": "e0023968d0cf8de3c15544e6e6c942e193482e43",
+    "kairos-strategy-engine": "022e5c959a282eed93290f69e8e57cbf7ebf91c8",
+    "kairos-router": "d625e371250f8f0cdc27365130e33aa2d2de52b9",
     "kairos-llm": "2a7f0f6087186fb7495124e434b8dbfd8fa73e45",
-    "kairos-aggregator": "a4ff0d5028d396c053514167aa296afe871c1ca9",
-    "kairos-risk-manager": "cc105b031140ab8269b418834a1df7b7a45c3f56",
-    "kairos-execution-engine": "969e7e7e27d8469bf63486a15db66d440a5e86bd",
+    "kairos-aggregator": "d2092158ed71e185f49f0d2af11c88a0fdd0765e",
+    "kairos-risk-manager": "4efbdc1b2c4948737d77aef5b0f3d11484d1f8ba",
+    "kairos-execution-engine": "4733a0a06a3893f7e9e261757e82728d41a6fe05",
 }
 MODULES = {
     "kairos-core": "kairos_core",
