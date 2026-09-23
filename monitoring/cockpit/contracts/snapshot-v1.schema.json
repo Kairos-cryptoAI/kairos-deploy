@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kairos.local/contracts/cockpit/snapshot-v1.schema.json",
+  "title": "Kairos Cockpit Snapshot V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generated_at", "system", "markets", "decisions", "lifecycle", "tca"],
+  "properties": {
+    "schema_version": { "const": "kairos.cockpit.snapshot.v1" },
+    "generated_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_state", "trading_mode", "strategy_policy", "readiness"],
+      "properties": {
+        "runtime_state": { "enum": ["RUNNING", "DEGRADED", "STOPPED"] },
+        "trading_mode": { "enum": ["DRY_RUN", "PAPER", "LIVE"] },
+        "strategy_policy": { "enum": ["REJECT_ALL", "ALLOWLIST"] },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["technical_paper_ready", "paper_qualified", "alpha_ready", "live_ready"],
+          "properties": {
+            "technical_paper_ready": { "type": "boolean" },
+            "paper_qualified": { "type": "boolean" },
+            "alpha_ready": { "type": "boolean" },
+            "live_ready": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "markets": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "bar_interval", "bars", "indicators", "venue_quality"],
+        "properties": {
+          "symbol": { "enum": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"] },
+          "bar_interval": { "enum": ["1m", "5m", "15m", "1h", "4h", "1d"] },
+          "bars": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["closed_at", "open", "high", "low", "close"],
+              "properties": {
+                "closed_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+                "open": { "type": "number", "exclusiveMinimum": 0 },
+                "high": { "type": "number", "exclusiveMinimum": 0 },
+                "low": { "type": "number", "exclusiveMinimum": 0 },
+                "close": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            }
+          },
+          "indicators": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "label", "values"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z0-9:_-]{1,64}$" },
+                "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "values": {
+                  "type": "array",
+                  "maxItems": 500,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["closed_at", "value"],
+                    "properties": {
+                      "closed_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+                      "value": { "type": "number" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "venue_quality": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "as_of"],
+            "properties": {
+              "state": { "enum": ["HEALTHY", "DEGRADED", "STALE", "UNAVAILABLE"] },
+              "as_of": { "type": "string", "format": "date-time", "maxLength": 40 },
+              "spread_bps": { "type": ["number", "null"], "minimum": 0 },
+              "book_age_ms": { "type": ["integer", "null"], "minimum": 0 },
+              "slippage_bps": { "type": ["number", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "created_at", "symbol", "strategy_id", "intent_side", "candidate_state", "llm_review", "risk_decision", "execution_state", "reason_code"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 96 },
+          "created_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+          "symbol": { "enum": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"] },
+          "strategy_id": { "type": "string", "minLength": 1, "maxLength": 96 },
+          "intent_side": { "enum": ["LONG", "SHORT", "FLAT"] },
+          "candidate_state": { "enum": ["CREATED", "REJECTED", "EXPIRED"] },
+          "llm_review": { "enum": ["ALLOW", "VETO", "DEFER", "NOT_REQUESTED"] },
+          "risk_decision": { "enum": ["APPROVED", "VETO", "DEFER"] },
+          "execution_state": { "enum": ["NOT_REQUESTED", "PENDING", "PARTIAL", "FILLED", "CANCELLED", "REJECTED", "UNKNOWN"] },
+          "reason_code": { "type": ["string", "null"], "maxLength": 96 }
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "occurred_at", "symbol", "event_type", "state"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 96 },
+          "occurred_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+          "symbol": { "enum": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"] },
+          "event_type": { "enum": ["INTENT", "REVIEW", "RISK", "ORDER", "FILL", "PROTECTION", "TIMEOUT", "RECOVERY"] },
+          "state": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      }
+    },
+    "tca": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reference_id", "measured_at", "fee_bps", "slippage_bps"],
+        "properties": {
+          "reference_id": { "type": "string", "minLength": 1, "maxLength": 96 },
+          "measured_at": { "type": "string", "format": "date-time", "maxLength": 40 },
+          "fee_bps": { "type": "number", "minimum": 0 },
+          "slippage_bps": { "type": "number" },
+          "funding_bps": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}

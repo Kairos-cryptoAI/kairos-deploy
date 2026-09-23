@@ -9,6 +9,8 @@ secrets/
 secrets-paper/
 backups/
 reports/
+**/node_modules/
+**/dist/
 __pycache__/
 *.pyc
 .DS_Store
