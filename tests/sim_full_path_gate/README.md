@@ -12,6 +12,12 @@ installed immutable source revisions. The review gateway is a zero-cost local
 test double; it does not create a client, reserve a budget, or contact a
 provider.
 
+After the fixture tape is sealed, the gate reads the strategy's closed-bar
+history back from the bounded persistence page API and requires replay to
+produce the byte-identical intent. This verifies durable historical replay;
+the fixture is still synthetic and does not qualify a live market-data
+recorder or a strategy.
+
 Every outcome is `SIMULATED`. This gate has no credentials, external endpoints,
 or durable host storage. It cannot change readiness flags, qualify a strategy,
 or authorize a venue action.

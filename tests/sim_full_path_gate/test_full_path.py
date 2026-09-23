@@ -280,6 +280,39 @@ async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str
     return intent, session, frames[intent.symbol], exit_bar
 
 
+async def _assert_strategy_replays_from_sealed_tape(
+    repository: SimulationRepository, tape_id: str, intent
+) -> None:
+    """Prove strategy replay uses the bounded, immutable database bar reader."""
+
+    assert await repository.verify_tape(tape_id)
+    expected_bars = _strategy_bars()
+    cursor: int | None = None
+    replayed_bars = []
+    page_size = 257
+    while True:
+        page = await repository.load_closed_bar_page(
+            tape_id,
+            "BTCUSDT",
+            after_open_time_ms=cursor,
+            limit=page_size,
+        )
+        if not page:
+            break
+        replayed_bars.extend(page)
+        cursor = page[-1].open_time_ms
+        if len(page) < page_size:
+            break
+
+    assert tuple(replayed_bars[: len(expected_bars)]) == expected_bars
+    replayed_intents = generate_runtime_strategy_intents(
+        "regime_aligned_right_tail_v1",
+        tuple(replayed_bars[: len(expected_bars)]),
+        RegimeAlignedRightTailConfig(regime_sma_bars=3),
+    )
+    assert canonical_intent_batch_bytes(replayed_intents) == canonical_intent_batch_bytes((intent,))
+
+
 async def _review(intent, decision: ReviewDecision):
     route = CandidateRouterPolicy(source="sim-full-path-gate-router").build(intent, TextAggregate())
     gateway = _LocalReviewGateway(decision)
@@ -313,6 +346,7 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         intent, session, entry_frame, exit_bar = await _seed_sealed_session(
             repository, tape_id="full-path-allow-tape"
         )
+        await _assert_strategy_replays_from_sealed_tape(repository, session.tape_id, intent)
         stored_evidence = await database.pool.fetchrow(
             """SELECT frame_contract_version, source_reason, raw_payload_text, raw_payload_sha256
                FROM sim_book_frames WHERE tape_id=$1 AND tape_sequence=1""",
@@ -407,6 +441,7 @@ async def test_veto_persists_rejected_sim_evidence_without_admission_or_command(
         intent, session, entry_frame, _ = await _seed_sealed_session(
             repository, tape_id="full-path-veto-tape"
         )
+        await _assert_strategy_replays_from_sealed_tape(repository, session.tape_id, intent)
         review = await _review(intent, ReviewDecision.VETO)
         decision = SimulationRiskPolicy(source="sim-full-path-gate-risk").evaluate(
             session=session,
