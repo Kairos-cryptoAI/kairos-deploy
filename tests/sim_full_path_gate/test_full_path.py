@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
 from kairos_core.contracts import (
+    EvidenceReferenceV1,
+    LLMProposalModelProvenanceV1,
+    LLMTradeProposalV1,
     RecordedBookLevelV1,
     RecordedTopNBookFrameV2,
     SimulationAdmissionV2,
@@ -24,9 +27,15 @@ from kairos_core.contracts import (
     SimulationSessionV1,
     SimulationStrategyRefV1,
 )
-from kairos_core.enums import ReasoningEffort, ReviewDecision, Side
+from kairos_core.enums import LLMProposalAction, ReasoningEffort, ReviewDecision, Side
 from kairos_execution.simulation import SimulationExecutionController
-from kairos_persistence import Database, MigrationProfile, PersistenceSettings, SimulationRepository
+from kairos_persistence import (
+    Database,
+    MigrationProfile,
+    PersistenceSettings,
+    SimulationRepository,
+    SimulatorProposalRepository,
+)
 from kairos_persistence.database_target import connect_verified_database, require_database_target_url
 from kairos_risk import SimulationRiskPolicy
 from kairos_router.aggregation import TextAggregate
@@ -155,6 +164,41 @@ def _exit_bar(intent):
             taker_buy_volume=55.0,
             taker_buy_quote_volume=55.0 * intent.reference_price,
         )
+    )
+
+
+def _research_proposal(intent, *, sample_id: str) -> LLMTradeProposalV1:
+    input_bar_sha256 = intent.provenance.input_bar_sha256s[0]
+    return LLMTradeProposalV1(
+        campaign_id="sim-full-path-proposal-boundary-v1",
+        arm_id="llm-generated-candidate",
+        sample_id=sample_id,
+        symbol=intent.symbol,
+        timeframe="1m",
+        market_as_of_ts_ms=intent.decision_ts_ms,
+        expires_at_ts_ms=intent.decision_ts_ms + 60_000,
+        market_snapshot_sha256=_hash(f"{intent.symbol}:{intent.decision_ts_ms}:{sample_id}"),
+        action=LLMProposalAction.LONG_BIAS,
+        rationale="Synthetic test proposal; advisory only.",
+        evidence=(
+            EvidenceReferenceV1(
+                kind="closed_bar",
+                reference=f"{intent.symbol}:1m:{intent.decision_ts_ms}",
+                content_sha256=input_bar_sha256,
+                observed_at_ms=intent.decision_ts_ms,
+            ),
+        ),
+        model_provenance=LLMProposalModelProvenanceV1(
+            provider="simulator-gate-local",
+            requested_model="local-proposal-double",
+            resolved_model="local-proposal-double-v1",
+            request_id=f"sim-proposal-{sample_id}",
+            prompt_sha256=_hash("local proposal prompt"),
+            response_sha256=_hash("local proposal response"),
+            budget_reservation_id=f"simulator-gate-no-budget-{sample_id}",
+            latency_ms=0,
+            cost_usd=0.0,
+        ),
     )
 
 
@@ -343,10 +387,25 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
     try:
         await database.migrate()
         repository = SimulationRepository(database.pool)
+        proposal_repository = SimulatorProposalRepository(database)
         intent, session, entry_frame, exit_bar = await _seed_sealed_session(
             repository, tape_id="full-path-allow-tape"
         )
         await _assert_strategy_replays_from_sealed_tape(repository, session.tape_id, intent)
+        proposal = _research_proposal(intent, sample_id="allow-arm-sample-1")
+        assert await proposal_repository.record(proposal)
+        assert not await proposal_repository.record(proposal)
+        assert await proposal_repository.load_page(
+            campaign_id=proposal.campaign_id,
+            arm_id=proposal.arm_id,
+            limit=10,
+        ) == (proposal,)
+        assert await database.pool.fetchval(
+            "SELECT count(*) FROM sim_risk_decisions WHERE session_id=$1", session.session_id
+        ) == 0
+        assert await database.pool.fetchval(
+            "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
+        ) == 0
         stored_evidence = await database.pool.fetchrow(
             """SELECT frame_contract_version, source_reason, raw_payload_text, raw_payload_sha256
                FROM sim_book_frames WHERE tape_id=$1 AND tape_sequence=1""",

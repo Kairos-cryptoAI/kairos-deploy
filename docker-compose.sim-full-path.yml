@@ -1,4 +1,4 @@
-name: kairos-sim-full-path-gate-20260923-r1
+name: kairos-sim-full-path-gate-20260923-r2
 
 # A disposable, internal-only proof for one sealed simulator replay. It has no
 # durable host storage, credentials, or external endpoint configuration.
@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_USER: kairos
       POSTGRES_PASSWORD: synthetic_sim_full_path_gate_only
-      POSTGRES_DB: kairos_sim_full_path_gate_202609230001
+      POSTGRES_DB: kairos_sim_full_path_gate_202609230002
     command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40", "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4"]
     tmpfs:
       - /var/lib/postgresql/data:rw,nosuid,size=512m
@@ -16,7 +16,7 @@ services:
     mem_limit: 768m
     networks: [isolated]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_sim_full_path_gate_202609230001"]
+      test: ["CMD-SHELL", "pg_isready -U kairos -d kairos_sim_full_path_gate_202609230002"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -26,11 +26,11 @@ services:
     build:
       context: tests/sim_full_path_gate
       dockerfile: Dockerfile
-    image: kairos-sim-full-path-gate-tests:20260923-r1
+    image: kairos-sim-full-path-gate-tests:20260923-r2
     environment:
       KAIROS_SIM_FULL_PATH_GATE_CONFIRM: ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY
-      KAIROS_SIM_FULL_PATH_GATE_PROJECT: kairos-sim-full-path-gate-20260923-r1
-      KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL: postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/kairos_sim_full_path_gate_202609230001
+      KAIROS_SIM_FULL_PATH_GATE_PROJECT: kairos-sim-full-path-gate-20260923-r2
+      KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL: postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/kairos_sim_full_path_gate_202609230002
     depends_on:
       timescaledb: {condition: service_healthy}
     read_only: true

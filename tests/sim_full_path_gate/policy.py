@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-PROJECT = "kairos-sim-full-path-gate-20260923-r1"
-DATABASE = "kairos_sim_full_path_gate_202609230001"
+PROJECT = "kairos-sim-full-path-gate-20260923-r2"
+DATABASE = "kairos_sim_full_path_gate_202609230002"
 CONFIRMATION = "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
 DATABASE_URL = f"postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/{DATABASE}"
 TIMESCALE_IMAGE = (
@@ -21,13 +21,13 @@ TIMESCALE_IMAGE = (
 )
 PINS = {
     "kairos-core": "0c8717c18d535465ae89c51bcd958b0884ec02ab",
-    "kairos-persistence": "104880fdb150b70a70e1b52eedd14d489c2b9fb7",
-    "kairos-strategy-engine": "a4430b23927342cc45f50473530e86a079560f46",
-    "kairos-router": "9aa702677d66071ff56fc534cac3d48690b19e51",
+    "kairos-persistence": "8aa90fd8ac1248efa5d996544d36ae0b7acdcb3e",
+    "kairos-strategy-engine": "dc99311384c65d45ff173728e0d1b3dcdd11cdee",
+    "kairos-router": "af714562c50cd5e79c76e60f044793543a8b14d8",
     "kairos-llm": "2a7f0f6087186fb7495124e434b8dbfd8fa73e45",
-    "kairos-aggregator": "0f8d3c2cf14f9886b4de4ac3199c219588747a7f",
-    "kairos-risk-manager": "ae276eb6569ba1f8219bfb426526d0a8ae7274d1",
-    "kairos-execution-engine": "bb334e632f4ef2023fe2f77534208acea46735b0",
+    "kairos-aggregator": "ab85689ef1494e26cc86e3a2a1a66c6c7a315f1d",
+    "kairos-risk-manager": "f1fcdb6c9fa5321374964f532d4c2d04574075bf",
+    "kairos-execution-engine": "eeb2732c469ec7081db3ddc619d74ce40e38fe01",
 }
 MODULES = {
     "kairos-core": "kairos_core",
@@ -343,7 +343,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("full-path simulator gate must use its dedicated Dockerfile")
     if gate.get("command") is not None or gate.get("entrypoint") is not None:
         errors.append("full-path simulator gate must not override the sealed Dockerfile test command")
-    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260923-r1":
+    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260923-r2":
         errors.append("full-path simulator gate image identity changed")
     if _environment(gate.get("environment")) != {
         "KAIROS_SIM_FULL_PATH_GATE_CONFIRM": CONFIRMATION,

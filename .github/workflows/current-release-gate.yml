@@ -66,7 +66,7 @@ jobs:
         run: |
           mkdir current-release-gate-evidence
           git rev-parse HEAD > current-release-gate-evidence/deploy-revision.txt
-          project=kairos-current-release-gate-20260923-r1
+          project=kairos-current-release-gate-20260923-r2
           test -z "$(timeout --kill-after=5s 10s docker ps -aq --filter label=com.docker.compose.project=$project)"
           test -z "$(timeout --kill-after=5s 10s docker network ls -q --filter label=com.docker.compose.project=$project)"
           test -z "$(timeout --kill-after=5s 10s docker volume ls -q --filter label=com.docker.compose.project=$project)"
@@ -76,15 +76,15 @@ jobs:
       - name: Build only the immutable source-gate image
         timeout-minutes: 10
         run: |
-          docker compose -p kairos-current-release-gate-20260923-r1 -f docker-compose.current-release-gate.yml build gate 2>&1 | tee current-release-gate-evidence/build.log
+          docker compose -p kairos-current-release-gate-20260923-r2 -f docker-compose.current-release-gate.yml build gate 2>&1 | tee current-release-gate-evidence/build.log
       - name: Run one bounded bar-to-refusal proof
         timeout-minutes: 5
         run: |
-          compose=(docker compose -p kairos-current-release-gate-20260923-r1 -f docker-compose.current-release-gate.yml)
+          compose=(docker compose -p kairos-current-release-gate-20260923-r2 -f docker-compose.current-release-gate.yml)
           "${compose[@]}" up -d --no-deps gate
           gate_id=$("${compose[@]}" ps -a -q gate)
           test -n "$gate_id"
-          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-current-release-gate-20260923-r1
+          test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$gate_id")" = kairos-current-release-gate-20260923-r2
           set +e
           gate_exit=$(timeout --signal=TERM --kill-after=15s 180s docker wait "$gate_id")
           wait_exit=$?
@@ -105,7 +105,7 @@ jobs:
             printf 'capture\tSKIPPED_PROJECT_NOT_VERIFIED\n' > current-release-gate-evidence/capture-status.tsv
             exit 0
           fi
-          compose=(docker compose -p kairos-current-release-gate-20260923-r1 -f docker-compose.current-release-gate.yml)
+          compose=(docker compose -p kairos-current-release-gate-20260923-r2 -f docker-compose.current-release-gate.yml)
           printf 'operation\tstatus\n' > current-release-gate-evidence/capture-status.tsv
           "${compose[@]}" logs --no-color --timestamps > current-release-gate-evidence/services.log
           printf 'services\tCOMPLETE\n' >> current-release-gate-evidence/capture-status.tsv
