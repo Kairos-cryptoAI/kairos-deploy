@@ -208,6 +208,31 @@ metrics access (and loopback-only ports when an engine actually publishes them),
 authenticated Redis health checks, bounded logs, reconciliation and strategic-allocation
 gates, and EVEDEX credentials absent from base execution.
 
+## Local read-only Cockpit preview
+
+The first visual interface is a separate React package at
+[`monitoring/cockpit`](monitoring/cockpit). It is intentionally not part of Compose and
+does not start or query any Kairos, Redis, TimescaleDB, provider, or exchange service.
+The page stays truthful while the snapshot producer is absent: no sample prices or
+decisions are substituted, the API fetch is disabled by default, and all trading
+controls are unavailable. Its versioned JSON contract and browser-side fail-closed
+checks are documented in [`monitoring/cockpit/DESIGN.md`](monitoring/cockpit/DESIGN.md).
+
+For a local desktop preview only:
+
+```powershell
+Set-Location D:\Kairos\kairos-deploy\monitoring\cockpit
+npm ci --ignore-scripts --no-audit --no-fund
+npm run dev
+```
+
+Vite binds to `127.0.0.1`; it is not a phone-network service. The Cockpit must not be
+exposed on a LAN, internet, Docker port, or public Grafana route. Real mobile access
+requires a separately reviewed authenticated private-network proxy and same-origin
+read-only snapshot producer. Do not set `VITE_COCKPIT_API_ENABLED=true` until both exist
+and have been reviewed. This preview is not operational observation, PAPER, alpha, or
+LIVE evidence.
+
 ## Qualification tools
 
 These tools never place orders and always emit `live_orders_allowed=false`:

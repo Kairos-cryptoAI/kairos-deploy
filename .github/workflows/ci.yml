@@ -50,6 +50,30 @@ jobs:
           ./scripts/Test-LongGapRecovery.ps1
           ./scripts/Test-OfflineRecoveryObservation.ps1
 
+  cockpit:
+    name: Cockpit / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: monitoring/cockpit
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.20.0
+      - name: Install locked Cockpit dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test Cockpit API and chart contracts
+        run: npm test
+      - name: Build Cockpit production bundle
+        run: npm run build
+
   validate:
     needs: static-python
     runs-on: ubuntu-latest
