@@ -6,6 +6,7 @@ review boundary without constructing a provider client or contacting a service.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,6 +17,8 @@ from urllib.parse import urlsplit
 
 import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
+from kairos_core import Topics
+from kairos_core.bus.base import BusEnvelope, MessageBus, Publishable
 from kairos_core.contracts import (
     EvidenceReferenceV1,
     LLMProposalModelProvenanceV1,
@@ -35,6 +38,7 @@ from kairos_persistence import (
     PersistenceSettings,
     SimulationRepository,
     SimulatorProposalRepository,
+    consume_simulator_proposals,
 )
 from kairos_persistence.database_target import connect_verified_database, require_database_target_url
 from kairos_risk import SimulationRiskPolicy
@@ -83,6 +87,40 @@ class _LocalReviewGateway:
             request_id=f"local-review-{self.decision.value.lower()}",
             budget_reservation_id=f"simulator-gate-no-budget-{self.decision.value.lower()}",
         )
+
+
+class _ProposalGateBus(MessageBus):
+    """One-message transport double for the real SIM proposal consumer."""
+
+    def __init__(self) -> None:
+        self._messages: asyncio.Queue[BusEnvelope] = asyncio.Queue()
+        self.subscribed = asyncio.Event()
+        self.acknowledged = asyncio.Event()
+        self.subscription: tuple[str, str | None, str | None] | None = None
+        self.acks: list[tuple[str, str, str | None]] = []
+
+    async def publish(self, topic: str, message: Publishable) -> str:
+        message_id = f"sim-proposal-{self._messages.qsize() + 1}"
+        await self._messages.put(
+            BusEnvelope(id=message_id, topic=topic, payload=self._to_payload(message))
+        )
+        return message_id
+
+    async def subscribe(
+        self,
+        topic: str,
+        *,
+        group: str | None = None,
+        consumer: str | None = None,
+    ):
+        self.subscription = (topic, group, consumer)
+        self.subscribed.set()
+        while True:
+            yield await self._messages.get()
+
+    async def ack(self, topic: str, envelope: BusEnvelope, *, group: str | None = None) -> None:
+        self.acks.append((topic, envelope.id, group))
+        self.acknowledged.set()
 
 
 def _hash(value: str) -> str:
@@ -393,7 +431,30 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         )
         await _assert_strategy_replays_from_sealed_tape(repository, session.tape_id, intent)
         proposal = _research_proposal(intent, sample_id="allow-arm-sample-1")
-        assert await proposal_repository.record(proposal)
+        proposal_bus = _ProposalGateBus()
+        proposal_consumer = asyncio.create_task(
+            consume_simulator_proposals(
+                proposal_repository,
+                proposal_bus,
+                consumer="sim-full-path-gate",
+            )
+        )
+        try:
+            await asyncio.wait_for(proposal_bus.subscribed.wait(), timeout=1)
+            proposal_message_id = await proposal_bus.publish(Topics.LLM_TRADE_PROPOSAL, proposal)
+            await asyncio.wait_for(proposal_bus.acknowledged.wait(), timeout=1)
+        finally:
+            proposal_consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await proposal_consumer
+        assert proposal_bus.subscription == (
+            Topics.LLM_TRADE_PROPOSAL,
+            "simulator-llm-proposal-ledger-v1",
+            "sim-full-path-gate",
+        )
+        assert proposal_bus.acks == [
+            (Topics.LLM_TRADE_PROPOSAL, proposal_message_id, "simulator-llm-proposal-ledger-v1")
+        ]
         assert not await proposal_repository.record(proposal)
         assert await proposal_repository.load_page(
             campaign_id=proposal.campaign_id,

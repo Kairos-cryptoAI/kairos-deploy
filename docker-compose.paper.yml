@@ -120,12 +120,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#093eb951d96c6d06c61e7e2823c501d4d17a9a57
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#757ff301a82e1fa9974a347fec593491128d2fae
       args:
         PACKAGE_DIR: kairos_quant
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: 093eb951d96c6d06c61e7e2823c501d4d17a9a57
+        SOURCE_REVISION: 757ff301a82e1fa9974a347fec593491128d2fae
     command: ["kairos-quant-scouts"]
     environment:
       <<: *paper-environment
@@ -153,12 +153,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#dc99311384c65d45ff173728e0d1b3dcdd11cdee
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#10e9da277dbbd9caa0075407b2ec4e4009c8853f
       args:
         PACKAGE_DIR: kairos_strategy
         SERVICE_EXTRA: runtime
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
-        SOURCE_REVISION: dc99311384c65d45ff173728e0d1b3dcdd11cdee
+        SOURCE_REVISION: 10e9da277dbbd9caa0075407b2ec4e4009c8853f
     command: ["kairos-strategy-engine"]
     environment:
       <<: *paper-environment
@@ -174,12 +174,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#f1fcdb6c9fa5321374964f532d4c2d04574075bf
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#cc105b031140ab8269b418834a1df7b7a45c3f56
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: f1fcdb6c9fa5321374964f532d4c2d04574075bf
+        SOURCE_REVISION: cc105b031140ab8269b418834a1df7b7a45c3f56
     command: ["kairos-risk-manager"]
     environment:
       <<: *paper-environment
@@ -202,12 +202,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#f1fcdb6c9fa5321374964f532d4c2d04574075bf
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#cc105b031140ab8269b418834a1df7b7a45c3f56
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: f1fcdb6c9fa5321374964f532d4c2d04574075bf
+        SOURCE_REVISION: cc105b031140ab8269b418834a1df7b7a45c3f56
     # `docker compose run` replaces this argument-free, non-arming default with
     # an explicit symbol/side and the exact arm phrase. `up` never starts this profile.
     command: ["kairos-paper-canary"]
@@ -231,12 +231,12 @@ services:
       dockerfile: docker/Dockerfile.paper-execution
       pull: true
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#eeb2732c469ec7081db3ddc619d74ce40e38fe01
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#969e7e7e27d8469bf63486a15db66d440a5e86bd
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: eeb2732c469ec7081db3ddc619d74ce40e38fe01
+        SOURCE_REVISION: 969e7e7e27d8469bf63486a15db66d440a5e86bd
     command: ["kairos-execution-engine"]
     environment:
       <<: *paper-environment
@@ -274,12 +274,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#8aa90fd8ac1248efa5d996544d36ae0b7acdcb3e
+        service: https://github.com/Kairos-cryptoAI/kairos-persistence.git#cf95a5e73817ec01c77c8e7471a4fc8ae64ff2dd
       args:
         PACKAGE_DIR: kairos_persistence
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
-        SOURCE_REVISION: 8aa90fd8ac1248efa5d996544d36ae0b7acdcb3e
+        SOURCE_REVISION: cf95a5e73817ec01c77c8e7471a4fc8ae64ff2dd
     command: ["kairos-persistence-exporter"]
     environment:
       <<: *paper-environment
