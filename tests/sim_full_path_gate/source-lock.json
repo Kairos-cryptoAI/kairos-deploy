@@ -19,7 +19,7 @@
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "cf95a5e73817ec01c77c8e7471a4fc8ae64ff2dd"
+      "revision": "a0e06a07cdf78809b8e9474457a79bbc957b7220"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",

@@ -80,9 +80,13 @@ only the release-policy constant and no runtime values.
 ## API contract and security boundaries
 
 The client contract is `kairos.cockpit.snapshot.v1`; its JSON Schema is kept at
-`contracts/snapshot-v1.schema.json`. The API producer is **not implemented by
-this change**. The only request is `GET /api/v1/cockpit/snapshot`, same-origin,
-with `credentials: same-origin`, `cache: no-store`, redirect rejection, and a
+`contracts/snapshot-v1.schema.json`. The persistence package now implements a
+GET-only API producer for `/api/v1/cockpit/snapshot` behind a private
+authenticated ingress. This deployment repository does not yet wire that API,
+provision its dedicated read-only database role, or select/configure an SSO
+proxy, so the browser fetch remains disabled until those prerequisites pass
+their separate review. The only browser request is same-origin, with
+`credentials: same-origin`, `cache: no-store`, redirect rejection, and a
 2 MiB response limit. No token is accepted from URL/local storage, no browser
 database/Redis/exchange access exists, and there are no mutation methods.
 

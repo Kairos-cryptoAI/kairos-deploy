@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "kairos-core": "0c8717c18d535465ae89c51bcd958b0884ec02ab",
-    "kairos-persistence": "cf95a5e73817ec01c77c8e7471a4fc8ae64ff2dd"
+    "kairos-persistence": "a0e06a07cdf78809b8e9474457a79bbc957b7220"
   },
   "infrastructure": {
     "redis": {
@@ -50,7 +50,7 @@
     },
     "ops-exporter": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "cf95a5e73817ec01c77c8e7471a4fc8ae64ff2dd",
+      "revision": "a0e06a07cdf78809b8e9474457a79bbc957b7220",
       "package_dir": "kairos_persistence",
       "command": "kairos-persistence-exporter"
     }
