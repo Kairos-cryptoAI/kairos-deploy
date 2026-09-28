@@ -31,15 +31,15 @@
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "be14232634a47651de50fef0d64f80de871df03c"
+      "revision": "c9d38407ed2e378e50d28a59b14d31d099056ab8"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "2f6aeb6d3ae3ae7a47fc0a821d3b5068fb44b5d2"
+      "revision": "fa96ef3cdc3201f1f6437e79d0dc1388e97c23fa"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "7da4c18b133ee759bf755497e6d41db240582e5f"
+      "revision": "eb6ad85a8238ef6b38ff152b10d5790eef94d576"
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
@@ -47,7 +47,7 @@
     }
   },
   "gate": {
-    "project": "kairos-current-release-gate-20260928-r2",
+    "project": "kairos-current-release-gate-20260928-r3",
     "confirmation": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
   }
 }

@@ -31,13 +31,13 @@
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "7da4c18b133ee759bf755497e6d41db240582e5f",
+      "revision": "eb6ad85a8238ef6b38ff152b10d5790eef94d576",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "canary-controller": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "7da4c18b133ee759bf755497e6d41db240582e5f",
+      "revision": "eb6ad85a8238ef6b38ff152b10d5790eef94d576",
       "package_dir": "kairos_risk",
       "command": "kairos-paper-canary"
     },

@@ -22,7 +22,7 @@ required-version = "==0.12.3"
 # source-lock-verified current revision so uv cannot resolve stale core metadata.
 override-dependencies = [
   "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@9c8659545218147ae181cac04d22a68b5a6549ef",
-  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@be14232634a47651de50fef0d64f80de871df03c",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@c9d38407ed2e378e50d28a59b14d31d099056ab8",
   "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@34b5214f366338e4b898f2d7bb46b2fcfbf4051e",
 ]
 
@@ -31,9 +31,9 @@ kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev 
 kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "34b5214f366338e4b898f2d7bb46b2fcfbf4051e" }
 kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "3da00e64c7eabc1dbc026c4965ea46345495af0b" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "20c8ff50812e3c438c3aa13c6402ae6ff2222b95" }
-kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "be14232634a47651de50fef0d64f80de871df03c" }
-kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "2f6aeb6d3ae3ae7a47fc0a821d3b5068fb44b5d2" }
-kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "7da4c18b133ee759bf755497e6d41db240582e5f" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "c9d38407ed2e378e50d28a59b14d31d099056ab8" }
+kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "fa96ef3cdc3201f1f6437e79d0dc1388e97c23fa" }
+kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "eb6ad85a8238ef6b38ff152b10d5790eef94d576" }
 kairos-execution-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git", rev = "4a055469322a1f9939550b094daee45ef60f480f" }
 
 [tool.pytest.ini_options]
