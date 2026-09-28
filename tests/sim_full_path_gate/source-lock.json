@@ -15,43 +15,43 @@
   "dependencies": {
     "kairos-core": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
-      "revision": "9c8659545218147ae181cac04d22a68b5a6549ef"
+      "revision": "2b3b0d5b3966eebc8a8f59a8557dd1cc505a933d"
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "34b5214f366338e4b898f2d7bb46b2fcfbf4051e"
+      "revision": "3ff23687bf559be84b318e47588b61f8cf4e0ece"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "3da00e64c7eabc1dbc026c4965ea46345495af0b"
+      "revision": "61762aefb930d259e1521ff390d3509b7bffa6d2"
     },
     "kairos-router": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-router",
-      "revision": "20c8ff50812e3c438c3aa13c6402ae6ff2222b95"
+      "revision": "c9776497c2f50943c9a20bfe1b0f19bc715c1a21"
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "c9d38407ed2e378e50d28a59b14d31d099056ab8"
+      "revision": "54ef1176720a1e078c947d8217468b3c66f07382"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "fa96ef3cdc3201f1f6437e79d0dc1388e97c23fa"
+      "revision": "1a8c0acd1acf880f66f06da442ff7a40554299c4"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "eb6ad85a8238ef6b38ff152b10d5790eef94d576"
+      "revision": "7e9a5dc3340805d942fba758876eea6f44c6a0ce"
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "4a055469322a1f9939550b094daee45ef60f480f"
+      "revision": "f708001b7e03992ff40831708bac1e3da748da14"
     }
   },
   "infrastructure": {
     "timescaledb": "timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
   },
   "gate": {
-    "project": "kairos-sim-full-path-gate-20260928-r3",
-    "database": "kairos_sim_full_path_gate_202609280003",
+    "project": "kairos-sim-full-path-gate-20260928-r4",
+    "database": "kairos_sim_full_path_gate_202609280004",
     "confirmation": "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
   }
 }

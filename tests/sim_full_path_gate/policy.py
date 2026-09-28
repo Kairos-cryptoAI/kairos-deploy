@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-PROJECT = "kairos-sim-full-path-gate-20260928-r3"
-DATABASE = "kairos_sim_full_path_gate_202609280003"
+PROJECT = "kairos-sim-full-path-gate-20260928-r4"
+DATABASE = "kairos_sim_full_path_gate_202609280004"
 CONFIRMATION = "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
 DATABASE_URL = f"postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/{DATABASE}"
 TIMESCALE_IMAGE = (
@@ -20,14 +20,14 @@ TIMESCALE_IMAGE = (
     "sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
 )
 PINS = {
-    "kairos-core": "9c8659545218147ae181cac04d22a68b5a6549ef",
-    "kairos-persistence": "34b5214f366338e4b898f2d7bb46b2fcfbf4051e",
-    "kairos-strategy-engine": "3da00e64c7eabc1dbc026c4965ea46345495af0b",
-    "kairos-router": "20c8ff50812e3c438c3aa13c6402ae6ff2222b95",
-    "kairos-llm": "c9d38407ed2e378e50d28a59b14d31d099056ab8",
-    "kairos-aggregator": "fa96ef3cdc3201f1f6437e79d0dc1388e97c23fa",
-    "kairos-risk-manager": "eb6ad85a8238ef6b38ff152b10d5790eef94d576",
-    "kairos-execution-engine": "4a055469322a1f9939550b094daee45ef60f480f",
+    "kairos-core": "2b3b0d5b3966eebc8a8f59a8557dd1cc505a933d",
+    "kairos-persistence": "3ff23687bf559be84b318e47588b61f8cf4e0ece",
+    "kairos-strategy-engine": "61762aefb930d259e1521ff390d3509b7bffa6d2",
+    "kairos-router": "c9776497c2f50943c9a20bfe1b0f19bc715c1a21",
+    "kairos-llm": "54ef1176720a1e078c947d8217468b3c66f07382",
+    "kairos-aggregator": "1a8c0acd1acf880f66f06da442ff7a40554299c4",
+    "kairos-risk-manager": "7e9a5dc3340805d942fba758876eea6f44c6a0ce",
+    "kairos-execution-engine": "f708001b7e03992ff40831708bac1e3da748da14",
 }
 MODULES = {
     "kairos-core": "kairos_core",
@@ -343,7 +343,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("full-path simulator gate must use its dedicated Dockerfile")
     if gate.get("command") is not None or gate.get("entrypoint") is not None:
         errors.append("full-path simulator gate must not override the sealed Dockerfile test command")
-    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260928-r3":
+    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260928-r4":
         errors.append("full-path simulator gate image identity changed")
     if _environment(gate.get("environment")) != {
         "KAIROS_SIM_FULL_PATH_GATE_CONFIRM": CONFIRMATION,
