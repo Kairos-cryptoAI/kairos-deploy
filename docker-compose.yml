@@ -129,11 +129,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#74ee29aed90f5fa62410b351537232293cffce2c
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#806d284845a944f8e6730dc4651b76b6c2ee25b2
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: 74ee29aed90f5fa62410b351537232293cffce2c
+        SOURCE_REVISION: 806d284845a944f8e6730dc4651b76b6c2ee25b2
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
@@ -148,12 +148,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#022e5c959a282eed93290f69e8e57cbf7ebf91c8
+        service: https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git#3da00e64c7eabc1dbc026c4965ea46345495af0b
       args:
         PACKAGE_DIR: kairos_strategy
         SERVICE_EXTRA: runtime
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-strategy-engine
-        SOURCE_REVISION: 022e5c959a282eed93290f69e8e57cbf7ebf91c8
+        SOURCE_REVISION: 3da00e64c7eabc1dbc026c4965ea46345495af0b
     command: ["kairos-strategy-engine"]
     environment:
       <<: *common-environment
@@ -169,11 +169,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#57c43a264977f5326e1b12aaf1c5e58f51e8cc60
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#4f94486d99884c3714e4b32d438e9ec4ae80966e
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 57c43a264977f5326e1b12aaf1c5e58f51e8cc60
+        SOURCE_REVISION: 4f94486d99884c3714e4b32d438e9ec4ae80966e
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
@@ -198,11 +198,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-router.git#d625e371250f8f0cdc27365130e33aa2d2de52b9
+        service: https://github.com/Kairos-cryptoAI/kairos-router.git#20c8ff50812e3c438c3aa13c6402ae6ff2222b95
       args:
         PACKAGE_DIR: kairos_router
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-router
-        SOURCE_REVISION: d625e371250f8f0cdc27365130e33aa2d2de52b9
+        SOURCE_REVISION: 20c8ff50812e3c438c3aa13c6402ae6ff2222b95
     command: ["kairos-router"]
     environment:
       <<: *common-environment
@@ -216,11 +216,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#d2092158ed71e185f49f0d2af11c88a0fdd0765e
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#2f6aeb6d3ae3ae7a47fc0a821d3b5068fb44b5d2
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: d2092158ed71e185f49f0d2af11c88a0fdd0765e
+        SOURCE_REVISION: 2f6aeb6d3ae3ae7a47fc0a821d3b5068fb44b5d2
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -240,11 +240,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#3b8af1335162d9b279d1c206b0a84f924931d84f
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#2c0fc18721060a5cdc1a647499ba40c41468eb57
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: 3b8af1335162d9b279d1c206b0a84f924931d84f
+        SOURCE_REVISION: 2c0fc18721060a5cdc1a647499ba40c41468eb57
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
@@ -264,11 +264,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#4efbdc1b2c4948737d77aef5b0f3d11484d1f8ba
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#7da4c18b133ee759bf755497e6d41db240582e5f
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: 4efbdc1b2c4948737d77aef5b0f3d11484d1f8ba
+        SOURCE_REVISION: 7da4c18b133ee759bf755497e6d41db240582e5f
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment
@@ -285,12 +285,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#bcdd01bbe2e8281ce6251c91f150f68318ef823b
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#4a055469322a1f9939550b094daee45ef60f480f
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: bcdd01bbe2e8281ce6251c91f150f68318ef823b
+        SOURCE_REVISION: 4a055469322a1f9939550b094daee45ef60f480f
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
