@@ -17,25 +17,33 @@ from urllib.parse import urlsplit
 
 import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
-from kairos_core import Topics
+from kairos_core import Topics, canonical_sha256
 from kairos_core.bus.base import BusEnvelope, MessageBus, Publishable
 from kairos_core.contracts import (
     EvidenceReferenceV1,
+    LLMProposalCompletionReceiptV1,
     LLMProposalModelProvenanceV1,
     LLMTradeProposalV1,
     RecordedBookLevelV1,
     RecordedTopNBookFrameV2,
+    ResearchDecisionSampleV1,
     SimulationAdmissionV2,
     SimulationAssumptionsV1,
     SimulationSessionV1,
     SimulationStrategyRefV1,
 )
 from kairos_core.enums import LLMProposalAction, ReasoningEffort, ReviewDecision, Side
+from kairos_core.research_pairing import (
+    ScheduledResearchSampleV1,
+    StrategyEvaluationEvidenceV1,
+    build_research_decision_sample,
+)
 from kairos_execution.simulation import SimulationExecutionController
 from kairos_persistence import (
     Database,
     MigrationProfile,
     PersistenceSettings,
+    ResearchDecisionSampleRepository,
     SimulationRepository,
     SimulatorProposalRepository,
     consume_simulator_proposals,
@@ -45,6 +53,7 @@ from kairos_risk import SimulationRiskPolicy
 from kairos_router.aggregation import TextAggregate
 from kairos_router.candidate import CandidateRouterPolicy
 from kairos_strategy.candles import Candle
+from kairos_strategy.registry import get_strategy
 from kairos_strategy.runtime import (
     candle_to_closed_bar,
     canonical_intent_batch_bytes,
@@ -134,12 +143,11 @@ def _tick(value: float, *, rounding: str) -> float:
     return float((Decimal(str(value)) / tick).to_integral_value(rounding=rounding) * tick)
 
 
-def _strategy_bars():
+def _strategy_bars(*, hourly_return: float = 0.01):
     """The frozen sleeve receives exactly 25 complete synthetic UTC hours."""
 
     price = 100.0
     candles: list[Candle] = []
-    hourly_return = 0.01
     minute_return = (1 + hourly_return) ** (1 / 60) - 1
     for minute in range(25 * 60):
         opened = price
@@ -205,25 +213,34 @@ def _exit_bar(intent):
     )
 
 
-def _research_proposal(intent, *, sample_id: str) -> LLMTradeProposalV1:
-    input_bar_sha256 = intent.provenance.input_bar_sha256s[0]
+def _independent_research_proposal(
+    *,
+    sample_id: str,
+    symbol: str,
+    market_as_of_ts_ms: int,
+    market_snapshot_sha256: str,
+    evidence_bar_sha256: str,
+    action: LLMProposalAction,
+) -> LLMTradeProposalV1:
+    """A local zero-cost hypothesis; it never receives a strategy intent."""
+
     return LLMTradeProposalV1(
         campaign_id="sim-full-path-proposal-boundary-v1",
         arm_id="llm-generated-candidate",
         sample_id=sample_id,
-        symbol=intent.symbol,
+        symbol=symbol,
         timeframe="1m",
-        market_as_of_ts_ms=intent.decision_ts_ms,
-        expires_at_ts_ms=intent.decision_ts_ms + 60_000,
-        market_snapshot_sha256=_hash(f"{intent.symbol}:{intent.decision_ts_ms}:{sample_id}"),
-        action=LLMProposalAction.LONG_BIAS,
+        market_as_of_ts_ms=market_as_of_ts_ms,
+        expires_at_ts_ms=market_as_of_ts_ms + 60_000,
+        market_snapshot_sha256=market_snapshot_sha256,
+        action=action,
         rationale="Synthetic test proposal; advisory only.",
         evidence=(
             EvidenceReferenceV1(
                 kind="closed_bar",
-                reference=f"{intent.symbol}:1m:{intent.decision_ts_ms}",
-                content_sha256=input_bar_sha256,
-                observed_at_ms=intent.decision_ts_ms,
+                reference=f"{symbol}:1m:{market_as_of_ts_ms}",
+                content_sha256=evidence_bar_sha256,
+                observed_at_ms=market_as_of_ts_ms,
             ),
         ),
         model_provenance=LLMProposalModelProvenanceV1(
@@ -237,6 +254,111 @@ def _research_proposal(intent, *, sample_id: str) -> LLMTradeProposalV1:
             latency_ms=0,
             cost_usd=0.0,
         ),
+    )
+
+
+def _research_proposal(intent, *, sample_id: str) -> LLMTradeProposalV1:
+    decision_bar_sha256 = intent.provenance.input_bar_sha256s[-1]
+    return _independent_research_proposal(
+        sample_id=sample_id,
+        symbol=intent.symbol,
+        market_as_of_ts_ms=intent.decision_ts_ms,
+        market_snapshot_sha256=decision_bar_sha256,
+        evidence_bar_sha256=decision_bar_sha256,
+        action=LLMProposalAction.LONG_BIAS,
+    )
+
+
+def _research_schedule(proposal: LLMTradeProposalV1) -> ScheduledResearchSampleV1:
+    definition = get_strategy("regime_aligned_right_tail_v1")
+    return ScheduledResearchSampleV1(
+        campaign_id=proposal.campaign_id,
+        arm_id=proposal.arm_id,
+        sample_id=proposal.sample_id,
+        symbol=proposal.symbol,
+        timeframe=proposal.timeframe,
+        market_as_of_ts_ms=proposal.market_as_of_ts_ms,
+        market_snapshot_sha256=proposal.market_snapshot_sha256,
+        strategy_id=definition.strategy_id,
+        strategy_revision=definition.revision,
+        paired_at_ts_ms=proposal.market_as_of_ts_ms + 1,
+        sample_deadline_ts_ms=proposal.market_as_of_ts_ms + 60_000,
+    )
+
+
+def _synthetic_strategy_evaluation(
+    schedule: ScheduledResearchSampleV1,
+    *,
+    bars,
+    config: RegimeAlignedRightTailConfig,
+    intents,
+) -> StrategyEvaluationEvidenceV1:
+    """Hash the actual deterministic run; this local fixture is not alpha evidence."""
+
+    decision_bars = tuple(bar for bar in bars if bar.close_time_ms <= schedule.market_as_of_ts_ms)
+    assert decision_bars and decision_bars[-1].close_time_ms == schedule.market_as_of_ts_ms
+    assert decision_bars[-1].bar_sha256 == schedule.market_snapshot_sha256
+    assert all(intent.decision_ts_ms == schedule.market_as_of_ts_ms for intent in intents)
+    assert len(intents) <= 1
+    evaluation_sha256 = canonical_sha256(
+        {
+            "contract_version": "sim-full-path-local-evaluation.v1",
+            "campaign_id": schedule.campaign_id,
+            "arm_id": schedule.arm_id,
+            "sample_id": schedule.sample_id,
+            "strategy_id": schedule.strategy_id,
+            "strategy_revision": schedule.strategy_revision,
+            "config_sha256": config.fingerprint,
+            "input_bar_sha256s": [bar.bar_sha256 for bar in decision_bars],
+            "intent_batch_sha256": hashlib.sha256(canonical_intent_batch_bytes(intents)).hexdigest(),
+        }
+    )
+    return StrategyEvaluationEvidenceV1(
+        campaign_id=schedule.campaign_id,
+        arm_id=schedule.arm_id,
+        sample_id=schedule.sample_id,
+        strategy_id=schedule.strategy_id,
+        strategy_revision=schedule.strategy_revision,
+        symbol=schedule.symbol,
+        timeframe=schedule.timeframe,
+        evidence_as_of_ts_ms=schedule.market_as_of_ts_ms,
+        market_snapshot_sha256=schedule.market_snapshot_sha256,
+        evaluation_sha256=evaluation_sha256,
+        intent_id=intents[0].intent_id if intents else None,
+    )
+
+
+def _paired_research_sample(
+    proposal: LLMTradeProposalV1,
+    *,
+    bars,
+    config: RegimeAlignedRightTailConfig,
+    intents,
+) -> ResearchDecisionSampleV1:
+    schedule = _research_schedule(proposal)
+    evaluation = _synthetic_strategy_evaluation(schedule, bars=bars, config=config, intents=intents)
+    completion = LLMProposalCompletionReceiptV1(
+        campaign_id=schedule.campaign_id,
+        arm_id=schedule.arm_id,
+        sample_id=schedule.sample_id,
+        symbol=schedule.symbol,
+        timeframe=schedule.timeframe,
+        market_as_of_ts_ms=schedule.market_as_of_ts_ms,
+        market_snapshot_sha256=schedule.market_snapshot_sha256,
+        sample_deadline_ts_ms=schedule.sample_deadline_ts_ms,
+        attempt_id=proposal.model_provenance.budget_reservation_id,
+        proposal_id=proposal.proposal_id,
+        model_provenance=proposal.model_provenance,
+        attempt_started_at_ts_ms=schedule.market_as_of_ts_ms,
+        response_observed_at_ts_ms=schedule.paired_at_ts_ms,
+    )
+    return build_research_decision_sample(
+        schedule,
+        strategy_evaluation=evaluation,
+        strategy_intent=intents[0] if intents else None,
+        llm_proposal=proposal,
+        llm_completion=completion,
+        llm_was_called=True,
     )
 
 
@@ -362,6 +484,68 @@ async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str
     return intent, session, frames[intent.symbol], exit_bar
 
 
+async def _seed_wait_session(repository: SimulationRepository, *, tape_id: str):
+    """Seal flat synthetic bars for a pure-generator no-intent check.
+
+    This 25-hour fixture does not meet the production service's larger
+    scheduling/warmup requirement and is not evidence of runtime uptime.
+    """
+
+    bars = _strategy_bars(hourly_return=0.0)
+    config = RegimeAlignedRightTailConfig(regime_sma_bars=3)
+    assert generate_runtime_strategy_intents("regime_aligned_right_tail_v1", bars, config) == ()
+    for bar in bars:
+        assert await repository.record_closed_bar(tape_id, bar)
+    for symbol in _SYMBOLS[1:]:
+        assert await repository.record_closed_bar(tape_id, _auxiliary_bar(symbol))
+
+    market_as_of_ts_ms = bars[-1].close_time_ms
+    previous: str | None = None
+    for sequence, symbol in enumerate(_SYMBOLS, start=1):
+        frame = _frame(
+            tape_id=tape_id,
+            sequence=sequence,
+            symbol=symbol,
+            persisted_at_ms=market_as_of_ts_ms + sequence,
+            previous_frame_sha256=previous,
+            bid=99.99,
+            ask=100.01,
+        )
+        assert await repository.record_book_frame(frame)
+        previous = frame.frame_sha256
+    seal = await repository.seal_tape(tape_id, sealed_at_ms=market_as_of_ts_ms + 100)
+    assert seal.execution_environment == "SIMULATED"
+    assert not seal.paper_qualification_eligible and not seal.trial15_eligible and not seal.alpha_claim
+    assert await repository.verify_tape(tape_id)
+
+    definition = get_strategy("regime_aligned_right_tail_v1")
+    session = SimulationSessionV1(
+        source="sim-full-path-gate",
+        tape_id=tape_id,
+        tape_sha256=seal.tape_sha256,
+        assumptions=SimulationAssumptionsV1(
+            latency_ms=25,
+            maximum_book_age_ms=5_000,
+            maximum_frame_latency_ms=1_000,
+            depth_participation_fraction=1.0,
+            adverse_slippage_bps=0.0,
+            taker_fee_bps=5.0,
+            price_tick=0.01,
+            quantity_step=0.001,
+        ),
+        strategy_allowlist=(
+            SimulationStrategyRefV1(
+                strategy_id=definition.strategy_id,
+                strategy_revision=definition.revision,
+            ),
+        ),
+        started_at_ms=market_as_of_ts_ms,
+        ends_at_ms=market_as_of_ts_ms + 120_000,
+    )
+    assert await repository.create_session(session)
+    return bars, config, session
+
+
 async def _assert_strategy_replays_from_sealed_tape(
     repository: SimulationRepository, tape_id: str, intent
 ) -> None:
@@ -413,6 +597,59 @@ async def _review(intent, decision: ReviewDecision):
     return review
 
 
+def test_independent_research_pair_keeps_wait_and_opposite_signal_non_executable() -> None:
+    config = RegimeAlignedRightTailConfig(regime_sma_bars=3)
+    flat_bars = _strategy_bars(hourly_return=0.0)
+    flat_intents = generate_runtime_strategy_intents("regime_aligned_right_tail_v1", flat_bars, config)
+    assert flat_intents == ()
+    assert canonical_intent_batch_bytes(flat_intents) == canonical_intent_batch_bytes(
+        generate_runtime_strategy_intents("regime_aligned_right_tail_v1", flat_bars, config)
+    )
+    final_bar = flat_bars[-1]
+    assert final_bar.bar_sha256 is not None
+    wait_proposal = _independent_research_proposal(
+        sample_id="wait-arm-sample-1",
+        symbol=final_bar.symbol,
+        market_as_of_ts_ms=final_bar.close_time_ms,
+        market_snapshot_sha256=final_bar.bar_sha256,
+        evidence_bar_sha256=final_bar.bar_sha256,
+        action=LLMProposalAction.LONG_BIAS,
+    )
+    wait_sample = _paired_research_sample(wait_proposal, bars=flat_bars, config=config, intents=flat_intents)
+    assert wait_sample.strategy_outcome == "NO_INTENT"
+    assert wait_sample.strategy_intent_id is None
+    assert wait_sample.strategy_evaluation_sha256 is not None
+    assert wait_sample.llm_outcome == "LONG_BIAS"
+    assert wait_sample.llm_proposal_id == wait_proposal.proposal_id
+    assert wait_sample.llm_completion_receipt_id is not None
+
+    trend_bars = _strategy_bars()
+    trend_intents = generate_runtime_strategy_intents("regime_aligned_right_tail_v1", trend_bars, config)
+    assert len(trend_intents) == 1 and trend_intents[0].side is Side.LONG
+    intent = trend_intents[0]
+    decision_bar_sha256 = intent.provenance.input_bar_sha256s[-1]
+    opposite_proposal = _independent_research_proposal(
+        sample_id="opposite-arm-sample-1",
+        symbol=intent.symbol,
+        market_as_of_ts_ms=intent.decision_ts_ms,
+        market_snapshot_sha256=decision_bar_sha256,
+        evidence_bar_sha256=decision_bar_sha256,
+        action=LLMProposalAction.SHORT_BIAS,
+    )
+    opposite_sample = _paired_research_sample(
+        opposite_proposal, bars=trend_bars, config=config, intents=trend_intents
+    )
+    assert opposite_sample.strategy_outcome == "LONG"
+    assert opposite_sample.strategy_intent_id == intent.intent_id
+    assert opposite_sample.llm_outcome == "SHORT_BIAS"
+    assert opposite_sample.llm_proposal_id == opposite_proposal.proposal_id
+    for sample in (wait_sample, opposite_sample):
+        assert sample.authority == "SIM_RESEARCH_ONLY"
+        assert not {"order", "quantity", "price", "venue", "risk_decision"}.intersection(
+            sample.identity_payload()
+        )
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -> None:
@@ -461,8 +698,38 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
             arm_id=proposal.arm_id,
             limit=10,
         ) == (proposal,)
+
+        decision_bar_sha256 = intent.provenance.input_bar_sha256s[-1]
+        opposite_proposal = _independent_research_proposal(
+            sample_id="opposite-arm-sample-1",
+            symbol=intent.symbol,
+            market_as_of_ts_ms=intent.decision_ts_ms,
+            market_snapshot_sha256=decision_bar_sha256,
+            evidence_bar_sha256=decision_bar_sha256,
+            action=LLMProposalAction.SHORT_BIAS,
+        )
+        opposite_sample = _paired_research_sample(
+            opposite_proposal,
+            bars=_strategy_bars(),
+            config=RegimeAlignedRightTailConfig(regime_sma_bars=3),
+            intents=(intent,),
+        )
+        assert opposite_sample.strategy_outcome == "LONG"
+        assert opposite_sample.llm_outcome == "SHORT_BIAS"
+        assert await proposal_repository.record(opposite_proposal)
+        sample_repository = ResearchDecisionSampleRepository(database)
+        assert await sample_repository.record(opposite_sample)
+        assert not await sample_repository.record(opposite_sample)
+        assert await sample_repository.load_page(
+            campaign_id=opposite_sample.campaign_id,
+            arm_id=opposite_sample.arm_id,
+            limit=10,
+        ) == (opposite_sample,)
         assert await database.pool.fetchval(
             "SELECT count(*) FROM sim_risk_decisions WHERE session_id=$1", session.session_id
+        ) == 0
+        assert await database.pool.fetchval(
+            "SELECT count(*) FROM sim_admissions WHERE session_id=$1", session.session_id
         ) == 0
         assert await database.pool.fetchval(
             "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
@@ -544,6 +811,82 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
             await database.pool.fetchval("SELECT count(*) FROM sim_results WHERE trade_id=$1", trade.trade_id)
             == 1
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_strategy_wait_and_independent_llm_proposal_are_only_sim_research_evidence() -> None:
+    policy.validate_environment()
+    policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
+    policy.validate_installed_sources()
+    settings, database_name = _settings()
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+    await connect_verified_database(database, database_name, local_only=True)
+    try:
+        await database.migrate()
+        repository = SimulationRepository(database.pool)
+        bars, config, session = await _seed_wait_session(repository, tape_id="full-path-wait-tape")
+        assert await repository.verify_tape(session.tape_id)
+
+        replayed_bars = []
+        cursor: int | None = None
+        while True:
+            page = await repository.load_closed_bar_page(
+                session.tape_id,
+                "BTCUSDT",
+                after_open_time_ms=cursor,
+                limit=257,
+            )
+            if not page:
+                break
+            replayed_bars.extend(page)
+            cursor = page[-1].open_time_ms
+            if len(page) < 257:
+                break
+        assert tuple(replayed_bars) == bars
+        intents = generate_runtime_strategy_intents("regime_aligned_right_tail_v1", replayed_bars, config)
+        assert intents == ()
+        assert canonical_intent_batch_bytes(intents) == canonical_intent_batch_bytes(
+            generate_runtime_strategy_intents("regime_aligned_right_tail_v1", replayed_bars, config)
+        )
+
+        final_bar = replayed_bars[-1]
+        assert final_bar.bar_sha256 is not None
+        proposal = _independent_research_proposal(
+            sample_id="wait-arm-sample-1",
+            symbol=final_bar.symbol,
+            market_as_of_ts_ms=final_bar.close_time_ms,
+            market_snapshot_sha256=final_bar.bar_sha256,
+            evidence_bar_sha256=final_bar.bar_sha256,
+            action=LLMProposalAction.LONG_BIAS,
+        )
+        sample = _paired_research_sample(proposal, bars=replayed_bars, config=config, intents=intents)
+        assert sample.strategy_outcome == "NO_INTENT" and sample.strategy_intent_id is None
+        assert sample.llm_outcome == "LONG_BIAS" and sample.llm_proposal_id == proposal.proposal_id
+        assert sample.authority == "SIM_RESEARCH_ONLY"
+
+        proposal_repository = SimulatorProposalRepository(database)
+        sample_repository = ResearchDecisionSampleRepository(database)
+        assert await proposal_repository.record(proposal)
+        assert await sample_repository.record(sample)
+        assert not await proposal_repository.record(proposal)
+        assert not await sample_repository.record(sample)
+        assert proposal in await proposal_repository.load_page(
+            campaign_id=proposal.campaign_id,
+            arm_id=proposal.arm_id,
+            limit=10,
+        )
+        assert sample in await sample_repository.load_page(
+            campaign_id=sample.campaign_id,
+            arm_id=sample.arm_id,
+            limit=10,
+        )
+        for table in ("sim_risk_decisions", "sim_admissions", "sim_trades", "sim_commands"):
+            assert await database.pool.fetchval(
+                f"SELECT count(*) FROM {table} WHERE session_id=$1", session.session_id
+            ) == 0
     finally:
         await database.close()
 

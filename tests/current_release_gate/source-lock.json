@@ -15,11 +15,11 @@
   "dependencies": {
     "kairos-core": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
-      "revision": "0c8717c18d535465ae89c51bcd958b0884ec02ab"
+      "revision": "9c8659545218147ae181cac04d22a68b5a6549ef"
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "a0e06a07cdf78809b8e9474457a79bbc957b7220"
+      "revision": "34b5214f366338e4b898f2d7bb46b2fcfbf4051e"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
@@ -31,7 +31,7 @@
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "2a7f0f6087186fb7495124e434b8dbfd8fa73e45"
+      "revision": "be14232634a47651de50fef0d64f80de871df03c"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
@@ -47,7 +47,7 @@
     }
   },
   "gate": {
-    "project": "kairos-current-release-gate-20260923-r2",
+    "project": "kairos-current-release-gate-20260928-r1",
     "confirmation": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
   }
 }

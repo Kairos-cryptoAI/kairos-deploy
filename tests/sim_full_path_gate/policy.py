@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-PROJECT = "kairos-sim-full-path-gate-20260923-r2"
-DATABASE = "kairos_sim_full_path_gate_202609230002"
+PROJECT = "kairos-sim-full-path-gate-20260928-r1"
+DATABASE = "kairos_sim_full_path_gate_202609280001"
 CONFIRMATION = "ISOLATED_SIMULATOR_FULL_PATH_GATE_ONLY"
 DATABASE_URL = f"postgresql://kairos:synthetic_sim_full_path_gate_only@timescaledb:5432/{DATABASE}"
 TIMESCALE_IMAGE = (
@@ -20,11 +20,11 @@ TIMESCALE_IMAGE = (
     "sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9"
 )
 PINS = {
-    "kairos-core": "0c8717c18d535465ae89c51bcd958b0884ec02ab",
-    "kairos-persistence": "a0e06a07cdf78809b8e9474457a79bbc957b7220",
+    "kairos-core": "9c8659545218147ae181cac04d22a68b5a6549ef",
+    "kairos-persistence": "34b5214f366338e4b898f2d7bb46b2fcfbf4051e",
     "kairos-strategy-engine": "022e5c959a282eed93290f69e8e57cbf7ebf91c8",
     "kairos-router": "d625e371250f8f0cdc27365130e33aa2d2de52b9",
-    "kairos-llm": "2a7f0f6087186fb7495124e434b8dbfd8fa73e45",
+    "kairos-llm": "be14232634a47651de50fef0d64f80de871df03c",
     "kairos-aggregator": "d2092158ed71e185f49f0d2af11c88a0fdd0765e",
     "kairos-risk-manager": "4efbdc1b2c4948737d77aef5b0f3d11484d1f8ba",
     "kairos-execution-engine": "bcdd01bbe2e8281ce6251c91f150f68318ef823b",
@@ -343,7 +343,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("full-path simulator gate must use its dedicated Dockerfile")
     if gate.get("command") is not None or gate.get("entrypoint") is not None:
         errors.append("full-path simulator gate must not override the sealed Dockerfile test command")
-    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260923-r2":
+    if gate.get("image") != "kairos-sim-full-path-gate-tests:20260928-r1":
         errors.append("full-path simulator gate image identity changed")
     if _environment(gate.get("environment")) != {
         "KAIROS_SIM_FULL_PATH_GATE_CONFIRM": CONFIRMATION,
