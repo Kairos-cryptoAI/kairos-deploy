@@ -12,25 +12,32 @@ import json
 import os
 import re
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
-from kairos_core import Topics, canonical_sha256
+from kairos_core import RESEARCH_ARMS, Topics, canonical_sha256
 from kairos_core.bus.base import BusEnvelope, MessageBus, Publishable
 from kairos_core.contracts import (
+    AdaptiveCandidateProtocolV1,
     EvidenceReferenceV1,
+    LLMProposalAdaptiveCandidateArmV1,
     LLMProposalCompletionReceiptV1,
     LLMProposalModelProvenanceV1,
     LLMTradeProposalV1,
     RecordedBookLevelV1,
     RecordedTopNBookFrameV2,
     ResearchDecisionSampleV1,
+    ResearchObservationScheduleV1,
+    ResearchObservationWindowV1,
     SimulationAdmissionV2,
     SimulationAssumptionsV1,
     SimulationSessionV1,
     SimulationStrategyRefV1,
+    StrategyOnlyAdaptiveCandidateArmV1,
+    StrategyReviewAdaptiveCandidateArmV1,
 )
 from kairos_core.enums import LLMProposalAction, ReasoningEffort, ReviewDecision, Side
 from kairos_core.research_pairing import (
@@ -43,7 +50,9 @@ from kairos_persistence import (
     Database,
     MigrationProfile,
     PersistenceSettings,
+    ResearchAdaptiveCandidateProtocolRepository,
     ResearchDecisionSampleRepository,
+    ResearchObservationScheduleRepository,
     SimulationRepository,
     SimulatorProposalRepository,
     consume_simulator_proposals,
@@ -134,6 +143,103 @@ class _ProposalGateBus(MessageBus):
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _adaptive_protocol_fixture() -> tuple[ResearchObservationScheduleV1, AdaptiveCandidateProtocolV1]:
+    """Build a fully deterministic three-arm roster with no provider calls."""
+
+    market_as_of_ts_ms = 1_760_000_000_000
+    schedule = ResearchObservationScheduleV1(
+        campaign_id="sim-full-path-adaptive-protocol-v1",
+        strategy_id="regime-aligned-right-tail-v1",
+        strategy_revision="synthetic-fixed-config-v1",
+        source_set_sha256=_hash("synthetic-closed-bars-source-set-v1"),
+        evaluator_sha256=_hash("deterministic-sim-evaluator-v1"),
+        windows=(
+            ResearchObservationWindowV1(
+                sample_id="fixed-sample-0001",
+                symbol="BTCUSDT",
+                timeframe="1m",
+                market_as_of_ts_ms=market_as_of_ts_ms,
+                market_snapshot_sha256=_hash("synthetic-closed-btc-1m-bar-v1"),
+                paired_at_ts_ms=market_as_of_ts_ms + 1_000,
+                sample_deadline_ts_ms=market_as_of_ts_ms + 10_000,
+            ),
+        ),
+    )
+    protocol = AdaptiveCandidateProtocolV1(
+        campaign_id=schedule.campaign_id,
+        schedule_digest=schedule.schedule_digest,
+        arms=(
+            StrategyOnlyAdaptiveCandidateArmV1(
+                candidate_id="strategy-baseline",
+                candidate_revision="synthetic-fixed-config-v1",
+                artifact_sha256=_hash("strategy-baseline-artifact-v1"),
+                input_feature_sha256=_hash("shared-input-features-v1"),
+                decision_mapping_sha256=_hash("strategy-intent-mapping-v1"),
+                hypothetical_exit_sha256=_hash("shared-hypothetical-exits-v1"),
+                cost_model_sha256=_hash("shared-simulated-cost-model-v1"),
+            ),
+            StrategyReviewAdaptiveCandidateArmV1(
+                candidate_id="strategy-review-candidate",
+                candidate_revision="synthetic-fixed-config-v1",
+                artifact_sha256=_hash("strategy-review-artifact-v1"),
+                input_feature_sha256=_hash("shared-input-features-v1"),
+                decision_mapping_sha256=_hash("allow-veto-defer-mapping-v1"),
+                hypothetical_exit_sha256=_hash("shared-hypothetical-exits-v1"),
+                cost_model_sha256=_hash("shared-simulated-cost-model-v1"),
+                provider="openai",
+                model="local-test-identity-only",
+                prompt_sha256=_hash("local-review-prompt-v1"),
+                schema_sha256=_hash("local-review-schema-v1"),
+            ),
+            LLMProposalAdaptiveCandidateArmV1(
+                candidate_id="llm-proposal-candidate",
+                candidate_revision="synthetic-fixed-config-v1",
+                artifact_sha256=_hash("llm-proposal-artifact-v1"),
+                input_feature_sha256=_hash("shared-input-features-v1"),
+                decision_mapping_sha256=_hash("research-proposal-mapping-v1"),
+                hypothetical_exit_sha256=_hash("shared-hypothetical-exits-v1"),
+                cost_model_sha256=_hash("shared-simulated-cost-model-v1"),
+                provider="deepseek",
+                model="local-test-identity-only",
+                prompt_sha256=_hash("local-proposal-prompt-v1"),
+                schema_sha256=_hash("local-proposal-schema-v1"),
+            ),
+        ),
+    )
+    return schedule, protocol
+
+
+def _adaptive_protocol_sample(
+    schedule: ResearchObservationScheduleV1,
+    protocol: AdaptiveCandidateProtocolV1,
+    arm_id: str,
+) -> ResearchDecisionSampleV1:
+    """Create a matched, no-LLM-call observation linked to its frozen arm."""
+
+    window = schedule.windows[0]
+    assert window.market_snapshot_sha256 is not None
+    assert schedule.schedule_digest is not None
+    return ResearchDecisionSampleV1(
+        campaign_id=schedule.campaign_id,
+        arm_id=arm_id,
+        arm_protocol_digest=protocol.arm_digest(arm_id),  # type: ignore[arg-type]
+        sample_id=window.sample_id,
+        symbol=window.symbol,
+        timeframe=window.timeframe,
+        market_as_of_ts_ms=window.market_as_of_ts_ms,
+        market_snapshot_sha256=window.market_snapshot_sha256,
+        paired_at_ts_ms=window.paired_at_ts_ms,
+        sample_deadline_ts_ms=window.sample_deadline_ts_ms,
+        strategy_id=schedule.strategy_id,
+        strategy_revision=schedule.strategy_revision,
+        strategy_outcome="NO_INTENT",
+        strategy_evaluation_sha256=_hash("shared-no-intent-evaluation-v1"),
+        strategy_evidence_as_of_ts_ms=window.market_as_of_ts_ms,
+        strategy_market_snapshot_sha256=window.market_snapshot_sha256,
+        llm_outcome="NOT_CALLED",
+    )
 
 
 def _tick(value: float, *, rounding: str) -> float:
@@ -935,5 +1041,126 @@ async def test_veto_persists_rejected_sim_evidence_without_admission_or_command(
             )
             == 0
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_adaptive_candidate_protocol_is_sealed_as_non_authoritative_sim_evidence() -> None:
+    """Persist the exact preregistered three-arm matrix without affecting readiness or execution."""
+
+    policy.validate_environment()
+    policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
+    policy.validate_installed_sources()
+    source_lock = json.loads(Path(__file__).with_name("source-lock.json").read_text(encoding="utf-8"))
+    assert source_lock["classification"] == "SIMULATED"
+    assert source_lock["readiness"] == {
+        "paper_qualified": False,
+        "alpha_ready": False,
+        "live_ready": False,
+        "strategy_policy": "REJECT_ALL",
+    }
+
+    settings, database_name = _settings()
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+    await connect_verified_database(database, database_name, local_only=True)
+    try:
+        await database.migrate()
+        schedule_repository = ResearchObservationScheduleRepository(database)
+        protocol_repository = ResearchAdaptiveCandidateProtocolRepository(database)
+        sample_repository = ResearchDecisionSampleRepository(database)
+        schedule, protocol = _adaptive_protocol_fixture()
+
+        # Capture execution-side counts so this proof asserts that registering
+        # research evidence has no trade, order, result, or risk side effect.
+        execution_tables = (
+            "sim_risk_decisions",
+            "sim_admissions",
+            "sim_trades",
+            "sim_commands",
+            "sim_results",
+        )
+        execution_counts_before = {
+            table: await database.pool.fetchval(f"SELECT count(*) FROM {table}") for table in execution_tables
+        }
+
+        assert schedule.authority == "SIM_RESEARCH_ONLY"
+        assert protocol.authority == "SIM_RESEARCH_ONLY"
+        assert await schedule_repository.register(schedule)
+        assert not await schedule_repository.register(schedule)
+        assert await protocol_repository.register(protocol)
+        assert not await protocol_repository.register(protocol)
+
+        stored_arm_digests: dict[str, str] = {}
+        research_samples: list[ResearchDecisionSampleV1] = []
+        for arm_id in RESEARCH_ARMS:
+            expected_digest = protocol.arm_digest(arm_id)
+            assert (
+                await protocol_repository.resolve_arm_digest(
+                    campaign_id=schedule.campaign_id,
+                    arm_id=arm_id,
+                )
+                == expected_digest
+            )
+            sample = _adaptive_protocol_sample(schedule, protocol, arm_id)
+            research_samples.append(sample)
+            assert sample.authority == "SIM_RESEARCH_ONLY"
+            assert sample.llm_outcome == "NOT_CALLED"
+            assert sample.arm_protocol_digest == expected_digest
+            assert await sample_repository.record(sample)
+            assert not await sample_repository.record(sample)
+            stored = await sample_repository.load_page(
+                campaign_id=schedule.campaign_id,
+                arm_id=arm_id,
+                limit=1,
+            )
+            assert stored == (sample,)
+            stored_arm_digests[arm_id] = sample.arm_protocol_digest
+
+        seal = await schedule_repository.seal_coverage(campaign_id=schedule.campaign_id)
+        assert seal.authority == "SIM_RESEARCH_ONLY"
+        assert seal.campaign_id == schedule.campaign_id
+        assert seal.schedule_digest == schedule.schedule_digest
+        assert seal.candidate_protocol_digest == protocol.protocol_digest
+        assert seal.expected_result_count == len(schedule.windows) * len(RESEARCH_ARMS)
+        assert stored_arm_digests == {arm_id: protocol.arm_digest(arm_id) for arm_id in RESEARCH_ARMS}
+
+        stored_seal = await database.pool.fetchrow(
+            """SELECT schedule_digest, candidate_protocol_digest, expected_result_count,
+                      authority, payload
+               FROM sim_research_coverage_seals WHERE campaign_id=$1""",
+            schedule.campaign_id,
+        )
+        assert stored_seal is not None
+        assert stored_seal["schedule_digest"] == schedule.schedule_digest
+        assert stored_seal["candidate_protocol_digest"] == protocol.protocol_digest
+        assert stored_seal["expected_result_count"] == 3
+        assert stored_seal["authority"] == "SIM_RESEARCH_ONLY"
+
+        forbidden_identity_fields = {
+            "admission",
+            "order",
+            "pnl",
+            "performance",
+            "price",
+            "quantity",
+            "risk_decision",
+            "trade",
+            "venue",
+        }
+        research_payloads = (
+            schedule.identity_payload(),
+            protocol.identity_payload(),
+            *(sample.identity_payload() for sample in research_samples),
+            seal.identity_payload(),
+        )
+        for payload in research_payloads:
+            assert not forbidden_identity_fields.intersection(payload)
+
+        execution_counts_after = {
+            table: await database.pool.fetchval(f"SELECT count(*) FROM {table}") for table in execution_tables
+        }
+        assert execution_counts_after == execution_counts_before
     finally:
         await database.close()

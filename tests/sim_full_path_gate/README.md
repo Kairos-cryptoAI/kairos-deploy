@@ -32,6 +32,17 @@ SIM pair ledger does not yet store or independently replay the strategy
 evaluation and provider-attempt source receipts; these fixtures cannot be used
 as a sealed blind-campaign denominator.
 
+The adaptive-protocol case additionally registers one fixed
+`ResearchObservationScheduleV1` and its exact three-arm
+`AdaptiveCandidateProtocolV1` through the SIM-only Persistence repositories.
+Each arm result carries the digest of its frozen arm, and the coverage seal
+records both the schedule and candidate-protocol digests. The fixture marks
+LLM arms `NOT_CALLED`; provider/model strings only identify the preregistered
+candidate and are never used to construct a provider client. The test checks
+that sealing leaves SIM risk decisions, admissions, trades, commands, results,
+and all readiness fields unchanged. This proves storage and identity linkage,
+not model quality, an outcome comparison, or authorization.
+
 After the fixture tape is sealed, the gate reads the strategy's closed-bar
 history back from the bounded persistence page API and requires replay to
 produce the byte-identical intent. This verifies durable historical replay;
