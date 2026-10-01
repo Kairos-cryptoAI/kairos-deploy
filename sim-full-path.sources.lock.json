@@ -31,11 +31,11 @@
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "eeb96412bcd715eaf729ff5bd84f48d2530cd3f7"
+      "revision": "fb987266c66ebcc8861e73b5b7d6f1750c32bc5e"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "55159794a41ab05c23b2a8ce3c74bdf6f5bfcc09"
+      "revision": "4195897e4b5112b96f4683e97567cd6400a0cd90"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
