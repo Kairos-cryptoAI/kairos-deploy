@@ -201,16 +201,31 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
             docker_calls.append(values)
             return subprocess.CompletedProcess(values, 0, stdout="")
 
-        expected_roles = ["source_owner|f|f|f|f|f|f|f"]
+        expected_roles = ["source_owner|false|false|false|false|false|false|false"]
         with (
             mock.patch.object(self.runtime_controller, "_docker", side_effect=fake_docker),
-            mock.patch.object(self.runtime_controller, "_psql", return_value=expected_roles),
+            mock.patch.object(self.runtime_controller, "_psql", return_value=expected_roles) as role_query,
         ):
             owners = self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["source_owner"])
         self.assertEqual(owners, ("source_owner",))
         self.assertTrue(any("NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS" in value for call in docker_calls for value in call))
+        for privilege in ("rolcanlogin", "rolsuper", "rolcreatedb", "rolcreaterole", "rolinherit", "rolreplication", "rolbypassrls"):
+            self.assertIn(privilege + "::text", role_query.call_args.args[3])
         with self.assertRaises(self.runtime_controller.RehearsalError):
             self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["clone_user"])
+
+    def test_timescaledb_owner_placeholder_rejects_each_enabled_privilege(self) -> None:
+        for index in range(7):
+            values = ["false"] * 7
+            values[index] = "true"
+            with self.subTest(privilege=index), mock.patch.object(self.runtime_controller, "_docker"), mock.patch.object(self.runtime_controller, "_psql", return_value=["source_owner|" + "|".join(values)]), self.assertRaises(self.runtime_controller.RehearsalError):
+                self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["source_owner"])
+
+    def test_timescaledb_owner_placeholder_rejects_missing_duplicate_extra_or_raw_bool_rows(self) -> None:
+        row = "source_owner|false|false|false|false|false|false|false"
+        for rows in ([], [row, row], [row, "unexpected|false|false|false|false|false|false|false"], ["source_owner|f|f|f|f|f|f|f"]):
+            with self.subTest(rows=rows), mock.patch.object(self.runtime_controller, "_docker"), mock.patch.object(self.runtime_controller, "_psql", return_value=rows), self.assertRaises(self.runtime_controller.RehearsalError):
+                self.runtime_controller._ensure_timescaledb_job_owners("clone", "clone_user", ["source_owner"])
 
     def test_missing_immutable_runner_has_actionable_non_substitutable_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

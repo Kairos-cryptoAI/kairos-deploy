@@ -768,7 +768,8 @@ def _ensure_timescaledb_job_owners(container: str, clone_user: str, owners: obje
         + "]::text[]) ORDER BY rolname;",
         "verify constrained TimescaleDB background-job owner placeholders",
     )
-    expected = [f"{owner}|f|f|f|f|f|f|f" for owner in sorted(owners)]
+    # Explicit boolean::text casts render false/true, not psql's raw f/t.
+    expected = [f"{owner}|false|false|false|false|false|false|false" for owner in sorted(owners)]
     if rows != expected:
         raise RehearsalError("TimescaleDB background-job owner placeholders are not constrained clone-only roles")
     return tuple(sorted(owners))
