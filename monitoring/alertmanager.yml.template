@@ -1,0 +1,23 @@
+# Non-operational template. Render only after explicit cadence/source binding.
+global:
+  resolve_timeout: 5m
+route:
+  receiver: kairos-owner-telegram
+  group_by: [alertname, severity, kairos_project, kairos_environment, kairos_source_sha256]
+  group_wait: @@GROUP_WAIT@@s
+  group_interval: @@GROUP_INTERVAL@@s
+  repeat_interval: @@REPEAT_INTERVAL@@s
+receivers:
+  - name: kairos-owner-telegram
+    telegram_configs:
+      - api_url: https://api.telegram.org
+        bot_token_file: /run/secrets/telegram_bot_token
+        chat_id: @@CHAT_ID@@
+        send_resolved: true
+        parse_mode: ""
+        message: '{{ .Status }} KAIROS {{ .CommonLabels.kairos_environment }} {{ range .Alerts }}{{ .Labels.alertname }} [{{ .Labels.severity }}] {{ end }}'
+        http_config:
+          follow_redirects: false
+          proxy_from_environment: false
+          tls_config:
+            insecure_skip_verify: false

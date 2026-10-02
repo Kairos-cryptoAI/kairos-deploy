@@ -1,0 +1,23 @@
+# Synthetic native-parser fixture; never a launchable operator configuration.
+global:
+  resolve_timeout: 5m
+route:
+  receiver: kairos-owner-telegram
+  group_by: [alertname, severity, kairos_project, kairos_environment, kairos_source_sha256]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 300s
+receivers:
+  - name: kairos-owner-telegram
+    telegram_configs:
+      - api_url: https://api.telegram.org
+        bot_token_file: /fixtures/synthetic-token
+        chat_id: -5155583216
+        send_resolved: true
+        parse_mode: ""
+        message: '{{ .Status }} KAIROS {{ .CommonLabels.kairos_environment }} {{ range .Alerts }}{{ .Labels.alertname }} [{{ .Labels.severity }}] {{ end }}'
+        http_config:
+          follow_redirects: false
+          proxy_from_environment: false
+          tls_config:
+            insecure_skip_verify: false

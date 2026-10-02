@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "receiver": "telegram",
+  "profile": "paper",
+  "source_sha256": null,
+  "expected_bot_username": "KairosCryptoAI_bot",
+  "expected_chat_id": -5155583216,
+  "group_wait_seconds": null,
+  "group_interval_seconds": null,
+  "repeat_interval_seconds": null
+}

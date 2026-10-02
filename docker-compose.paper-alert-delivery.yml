@@ -1,0 +1,5 @@
+# Apply to the standalone operational project only, never as a PAPER app file.
+networks:
+  alert-input:
+    external: true
+    name: kairos-paper_paper-observability
