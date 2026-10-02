@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "mode": "offline-preparation",
+  "enabled": false,
+  "profile": "paper",
+  "destination": null,
+  "repository_id": null,
+  "managed_secret_reference": null,
+  "retention": null,
+  "rpo_seconds": null,
+  "rto_seconds": null,
+  "transfer_budget_usd": null
+}

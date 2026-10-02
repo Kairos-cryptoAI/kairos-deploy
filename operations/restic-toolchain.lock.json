@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "tool": "restic",
+  "version": "0.19.1",
+  "platform": "windows/amd64",
+  "release_url": "https://github.com/restic/restic/releases/tag/v0.19.1",
+  "archive_name": "restic_0.19.1_windows_amd64.zip",
+  "archive_bytes": 11237567,
+  "archive_sha256": "da948ad707ed690426473aaba2046cd61f8f90f6f0e7dab6be0d5796531de67d",
+  "checksums_sha256": "fb520966ee01d2a3d4219c66762c66efa56300833b6f639f36082b7462f91cb8",
+  "signature_sha256": "649f3a48d322c3d7a457ef58e2dc4c5094b1f823192cdbac3f092ea23e194d9a",
+  "maintainer_fingerprint": "CF8F18F2844575973F79D4E191A6868BD3F7A907",
+  "key_url": "https://restic.net/gpg-key-alex.asc",
+  "executable_name": "restic_0.19.1_windows_amd64.exe",
+  "metadata_basis": "official_https_release_asset_metadata",
+  "native_signature_verified": false,
+  "installed": false
+}
