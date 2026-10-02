@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -264,6 +266,122 @@ kairos_outbox_oldest_age_seconds 0
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def _backup_directory(self, root: Path, output: str, shell: str) -> dict:
+        source = Path(__file__).resolve().parents[1] / "scripts" / "Backup-Kairos.ps1"
+        literal = lambda value: "'" + str(value).replace("'", "''") + "'"
+        # Load only the actual path helpers, not the backup's Docker/data path.
+        command = (
+            "$ErrorActionPreference='Stop'; $taskTokens=$null; $taskErrors=$null; "
+            f"$taskAst=[Management.Automation.Language.Parser]::ParseFile({literal(source)},"
+            "[ref]$taskTokens,[ref]$taskErrors); if($taskErrors.Count){throw 'Parse error'}; "
+            "$taskFunctions=$taskAst.FindAll({param($taskNode) "
+            "$taskNode -is [Management.Automation.Language.FunctionDefinitionAst] -and "
+            "$taskNode.Name -in @('Assert-BackupDirectoryBoundary','Resolve-BackupExistingDirectory',"
+            "'Initialize-BackupDirectory')},$true); "
+            "if($taskFunctions.Count -ne 3){throw 'Missing backup path helpers'}; "
+            "foreach($taskFunction in $taskFunctions){Invoke-Expression $taskFunction.Extent.Text}; "
+            "try { "
+            f"$taskPath=Initialize-BackupDirectory -Root {literal(root)} -OutputPath {literal(output)}; "
+            "@{accepted=$true; path=$taskPath} | ConvertTo-Json -Compress "
+            "} catch { @{accepted=$false; error=$_.Exception.Message} | ConvertTo-Json -Compress }"
+        )
+        result = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+        return json.loads(result.stdout)
+
+    def _windows_shells(self) -> tuple[str, ...]:
+        if os.name != "nt":
+            self.skipTest("Backup Windows junction and path boundary regression")
+        shells = tuple(dict.fromkeys(value for name in ("powershell", "pwsh") if (value := shutil.which(name))))
+        if not shells:
+            self.skipTest("PowerShell is not installed")
+        return shells
+
+    def test_backup_directory_keeps_existing_and_new_nested_protected_folders(self) -> None:
+        for shell in self._windows_shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix="backup-boundary-") as temporary:
+                root = Path(temporary) / "kairos-deploy"
+                existing = root / "backups" / "existing"
+                existing.mkdir(parents=True)
+                evidence = existing / "immutable.txt"
+                evidence.write_text("preserve", encoding="utf-8")
+                for output in ("backups/existing", "backups/new/nested", "backups/literal[1]/nested", str(existing)):
+                    result = self._backup_directory(root, output, shell)
+                    self.assertTrue(result["accepted"], (output, result))
+                    accepted = Path(result["path"])
+                    self.assertTrue(accepted.resolve().is_relative_to(root.resolve()))
+                    self.assertTrue(accepted.is_dir())
+                self.assertEqual(evidence.read_text(encoding="utf-8"), "preserve")
+
+    def test_backup_directory_rejects_traversal_and_sibling_prefix_before_mkdir(self) -> None:
+        for shell in self._windows_shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix="backup-boundary-") as temporary:
+                root = Path(temporary) / "kairos-deploy"
+                root.mkdir()
+                sibling = Path(temporary) / "kairos-deploy-adjacent"
+                unrelated = Path(temporary) / "outside"
+                for output in ("../kairos-deploy-adjacent/new", str(sibling / "new"), "../outside/new", str(unrelated)):
+                    result = self._backup_directory(root, output, shell)
+                    self.assertFalse(result["accepted"], result)
+                    self.assertIn("inside the deployment repository", result["error"])
+                    self.assertFalse(sibling.exists())
+                    self.assertFalse(unrelated.exists())
+
+    def test_backup_directory_resolves_junctions_before_creating_missing_children(self) -> None:
+        for shell in self._windows_shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix="backup-boundary-") as temporary:
+                root = Path(temporary) / "kairos-deploy"
+                root.mkdir()
+                outside = Path(temporary) / "outside"
+                outside.mkdir()
+                internal = root / "actual"
+                internal.mkdir()
+                for target, accepted in ((outside, False), (internal, True)):
+                    junction = root / "backup-link"
+                    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+                    subprocess.run(
+                        [shell, "-NoProfile", "-NonInteractive", "-Command",
+                         "$ErrorActionPreference='Stop'; "
+                         f"New-Item -ItemType Junction -Path {quote(junction)} -Target {quote(target)} | Out-Null"],
+                        capture_output=True, text=True, check=True, timeout=20,
+                    )
+                    try:
+                        for output in ("backup-link", "backup-link/new/nested"):
+                            result = self._backup_directory(root, output, shell)
+                            self.assertEqual(result["accepted"], accepted, result)
+                        if accepted:
+                            self.assertTrue((internal / "new" / "nested").is_dir())
+                        else:
+                            self.assertFalse((outside / "new").exists())
+                    finally:
+                        # Remove only this test's junction, never its target tree.
+                        junction.rmdir()
+
+    def test_backup_directory_rejects_dangling_junction_without_recreating_target(self) -> None:
+        for shell in self._windows_shells():
+            with self.subTest(shell=shell), tempfile.TemporaryDirectory(prefix="backup-boundary-") as temporary:
+                root = Path(temporary) / "kairos-deploy"
+                root.mkdir()
+                outside = Path(temporary) / "outside"
+                outside.mkdir()
+                junction = root / "dangling-backup-link"
+                quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+                subprocess.run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command",
+                     "$ErrorActionPreference='Stop'; "
+                     f"New-Item -ItemType Junction -Path {quote(junction)} -Target {quote(outside)} | Out-Null"],
+                    capture_output=True, text=True, check=True, timeout=20,
+                )
+                outside.rmdir()
+                try:
+                    result = self._backup_directory(root, "dangling-backup-link/new", shell)
+                    self.assertFalse(result["accepted"], result)
+                    self.assertFalse(outside.exists())
+                finally:
+                    junction.rmdir()
+
     def test_backup_owner_manifest_preserves_singleton_array(self) -> None:
         shell = shutil.which("pwsh") or shutil.which("powershell")
         if shell is None:

@@ -24,18 +24,101 @@ function Get-FileSha256 {
     }
 }
 
+function Assert-BackupDirectoryBoundary {
+    param([string]$Root, [string]$Candidate)
+
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd($separator)
+    $candidatePath = [System.IO.Path]::GetFullPath($Candidate).TrimEnd($separator)
+    $comparison = [System.StringComparison]::Ordinal
+    if ($separator -eq '\') { $comparison = [System.StringComparison]::OrdinalIgnoreCase }
+    if (-not [string]::Equals($candidatePath, $rootPath, $comparison) -and
+        -not $candidatePath.StartsWith($rootPath + $separator, $comparison)) {
+        throw "Backup output must remain inside the deployment repository"
+    }
+}
+
+function Resolve-BackupExistingDirectory {
+    param([string]$Path)
+
+    # Resolve-Path alone preserves Windows junction spellings. Follow every
+    # existing ancestor's link target, including links in a parent directory.
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    for ($hop = 0; $hop -lt 32; $hop++) {
+        $cursor = $resolved
+        $followed = $false
+        while ($cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer) { throw "Backup ancestor must be a directory" }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $targets = @($item.Target)
+                if ($targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$targets[0])) {
+                    throw "Backup ancestor has an unsupported reparse target"
+                }
+                $target = [string]$targets[0]
+                if (-not [System.IO.Path]::IsPathRooted($target)) {
+                    $target = [System.IO.Path]::Combine($item.Parent.FullName, $target)
+                }
+                $suffix = $resolved.Substring($cursor.Length).TrimStart([char[]]@('\', '/'))
+                $resolved = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($target, $suffix))
+                $followed = $true
+                break
+            }
+            $cursor = [System.IO.Path]::GetDirectoryName($cursor)
+        }
+        if (-not $followed) { return (Resolve-Path -LiteralPath $resolved -ErrorAction Stop).ProviderPath }
+    }
+    throw "Backup ancestor reparse chain is cyclic or too deep"
+}
+
+function Initialize-BackupDirectory {
+    param([string]$Root, [string]$OutputPath)
+
+    $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $candidate = $OutputPath
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+        $candidate = [System.IO.Path]::Combine($rootPath, $candidate)
+    }
+    $candidate = [System.IO.Path]::GetFullPath($candidate)
+    Assert-BackupDirectoryBoundary -Root $rootPath -Candidate $candidate
+
+    # Verify the closest existing ancestor before creating any missing child.
+    # Object-not-found is expected; permission and other lookup errors fail closed.
+    $ancestor = $candidate
+    $suffix = [System.Collections.Generic.List[string]]::new()
+    while ($true) {
+        $existing = $null
+        try {
+            $existing = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop
+            if ($null -ne $existing) { break }
+        }
+        catch {
+            if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::ObjectNotFound) { throw }
+        }
+        # Windows PowerShell 5.1 can return no item instead of ObjectNotFound
+        # for a missing literal path containing brackets.
+        $suffix.Insert(0, [System.IO.Path]::GetFileName($ancestor))
+        $ancestor = [System.IO.Path]::GetDirectoryName($ancestor)
+        if (-not $ancestor) { throw "Backup directory has no existing ancestor" }
+    }
+    if (-not $existing.PSIsContainer) { throw "Backup ancestor must be a directory" }
+    $canonicalRoot = Resolve-BackupExistingDirectory -Path $rootPath
+    $canonicalCandidate = Resolve-BackupExistingDirectory -Path $ancestor
+    foreach ($part in $suffix) { $canonicalCandidate = [System.IO.Path]::Combine($canonicalCandidate, $part) }
+    Assert-BackupDirectoryBoundary -Root $canonicalRoot -Candidate $canonicalCandidate
+    [System.IO.Directory]::CreateDirectory($canonicalCandidate) | Out-Null
+    $created = Resolve-BackupExistingDirectory -Path $canonicalCandidate
+    Assert-BackupDirectoryBoundary -Root $canonicalRoot -Candidate $created
+    return $created
+}
+
 if ($ComposeProject -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]*$') {
     throw "ComposeProject contains unsupported filename characters"
 }
 $root = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $composePath = (Resolve-Path -LiteralPath (Join-Path $root $ComposeFile)).Path
 $envPath = (Resolve-Path -LiteralPath (Join-Path $root $EnvFile)).Path
-$backupRoot = Join-Path $root $OutputDirectory
-New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-$backupRoot = (Resolve-Path -LiteralPath $backupRoot).Path
-if (-not $backupRoot.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Backup output must remain inside the deployment repository"
-}
+$backupRoot = Initialize-BackupDirectory -Root $root -OutputPath $OutputDirectory
 
 $compose = @("compose", "-p", $ComposeProject, "--env-file", $envPath, "-f", $composePath)
 $container = (& docker @compose ps -q timescaledb).Trim()
