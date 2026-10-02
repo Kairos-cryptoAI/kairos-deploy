@@ -95,7 +95,36 @@ class ShadowRuntimeSchemaUpgradeTests(unittest.TestCase):
     def test_valid_fresh_backup_preserves_historical_authority(self) -> None:
         manifest, dump = controller._backup(self.manifest_path)
         self.assertEqual(manifest, self.manifest)
-        self.assertEqual(dump, self.dump)
+        # tempfile may retain an 8.3 parent alias on Windows; _backup returns
+        # the canonical path after enforcing the protected backup-root guard.
+        self.assertEqual(dump, self.dump.resolve(strict=True))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 8.3 path aliases only")
+    def test_short_backup_path_alias_resolves_to_the_same_protected_archive(self) -> None:
+        from ctypes import WinDLL, create_unicode_buffer
+        from ctypes.wintypes import DWORD, LPCWSTR, LPWSTR
+
+        get_short_path = WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path.argtypes = (LPCWSTR, LPWSTR, DWORD)
+        get_short_path.restype = DWORD
+        required = get_short_path(str(self.manifest_path), None, 0)
+        if not required:
+            self.skipTest("Filesystem does not expose a Windows short path")
+        buffer = create_unicode_buffer(required)
+        written = get_short_path(str(self.manifest_path), buffer, required)
+        self.assertGreater(written, 0)
+        self.assertLess(written, required)
+        alias = Path(buffer.value)
+        if alias == self.manifest_path:
+            self.skipTest("Filesystem does not expose an alternate 8.3 spelling")
+
+        manifest, dump = controller._backup(alias)
+        self.assertEqual(manifest, self.manifest)
+        self.assertEqual(dump, self.dump.resolve(strict=True))
+        self.assertTrue(dump.samefile(self.dump))
+
+        with mock.patch.object(controller, "BACKUP_ROOT", self.root / "unrelated"), self.assertRaises(controller.UpgradeError):
+            controller._backup(alias)
 
     def test_wrong_project_database_and_incomplete_historical_rows_rejected(self) -> None:
         for field, value in (("compose_project", "kairos-paper-gate"), ("database", "kairos_sim"), ("bytes", self.dump.stat().st_size + 1), ("sha256", "0" * 64)):
