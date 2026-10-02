@@ -5,8 +5,8 @@ requires-python = "==3.11.*"
 [manifest]
 overrides = [
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=56df50787eff83c898aa2aeefb426c6ee8482820" },
-    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=fb987266c66ebcc8861e73b5b7d6f1750c32bc5e" },
-    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=63bffca5c8e6c3c77635219b368a864f03916430" },
+    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=711413405b40871786f60b580e13406b27959638" },
+    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=600d37694d9da650d3137cff2e24d1a77b4fa413" },
 ]
 
 [[package]]
@@ -293,7 +293,7 @@ wheels = [
 [[package]]
 name = "kairos-aggregator"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=4195897e4b5112b96f4683e97567cd6400a0cd90#4195897e4b5112b96f4683e97567cd6400a0cd90" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=03ec618b0efe96bf8ae145fdb663b91143548487#03ec618b0efe96bf8ae145fdb663b91143548487" }
 dependencies = [
     { name = "kairos-core" },
     { name = "kairos-llm" },
@@ -321,7 +321,7 @@ dependencies = [
 [[package]]
 name = "kairos-execution-engine"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=29d94b95e4331410b56e49f9f7bd2e118363f5d3#29d94b95e4331410b56e49f9f7bd2e118363f5d3" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=af04ec7000b64f95ada90b9fa956274788301023#af04ec7000b64f95ada90b9fa956274788301023" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
@@ -335,7 +335,7 @@ dependencies = [
 [[package]]
 name = "kairos-llm"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=fb987266c66ebcc8861e73b5b7d6f1750c32bc5e#fb987266c66ebcc8861e73b5b7d6f1750c32bc5e" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=711413405b40871786f60b580e13406b27959638#711413405b40871786f60b580e13406b27959638" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
@@ -347,7 +347,7 @@ dependencies = [
 [[package]]
 name = "kairos-persistence"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=63bffca5c8e6c3c77635219b368a864f03916430#63bffca5c8e6c3c77635219b368a864f03916430" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=600d37694d9da650d3137cff2e24d1a77b4fa413#600d37694d9da650d3137cff2e24d1a77b4fa413" }
 dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "kairos-risk-manager"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=8a50bbac47674f9d8613171245ff5f5cbc6a99d7#8a50bbac47674f9d8613171245ff5f5cbc6a99d7" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=4765891e2d9a8781aeacfd6e2be39316ad0c18c9#4765891e2d9a8781aeacfd6e2be39316ad0c18c9" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },
@@ -374,7 +374,7 @@ dependencies = [
 [[package]]
 name = "kairos-router"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=13c68701fca164947c51c24db06405683ef95439#13c68701fca164947c51c24db06405683ef95439" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=17ba67e8aa6e7a56a52bf12b924420e8625e8ae7#17ba67e8aa6e7a56a52bf12b924420e8625e8ae7" }
 dependencies = [
     { name = "kairos-core" },
     { name = "kairos-persistence" },
@@ -399,14 +399,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=4195897e4b5112b96f4683e97567cd6400a0cd90" },
+    { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=03ec618b0efe96bf8ae145fdb663b91143548487" },
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=56df50787eff83c898aa2aeefb426c6ee8482820" },
-    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=29d94b95e4331410b56e49f9f7bd2e118363f5d3" },
-    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=fb987266c66ebcc8861e73b5b7d6f1750c32bc5e" },
-    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=63bffca5c8e6c3c77635219b368a864f03916430" },
-    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=8a50bbac47674f9d8613171245ff5f5cbc6a99d7" },
-    { name = "kairos-router", git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=13c68701fca164947c51c24db06405683ef95439" },
-    { name = "kairos-strategy-engine", git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git?rev=5cc18636104adac53ea2e9e50331c7b973c79f91" },
+    { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=af04ec7000b64f95ada90b9fa956274788301023" },
+    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=711413405b40871786f60b580e13406b27959638" },
+    { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=600d37694d9da650d3137cff2e24d1a77b4fa413" },
+    { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=4765891e2d9a8781aeacfd6e2be39316ad0c18c9" },
+    { name = "kairos-router", git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=17ba67e8aa6e7a56a52bf12b924420e8625e8ae7" },
+    { name = "kairos-strategy-engine", git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git?rev=c2479c6155337a41f25df71254479220253910b1" },
     { name = "pytest", specifier = "==9.1.1" },
     { name = "pytest-asyncio", specifier = "==1.4.0" },
 ]
@@ -414,7 +414,7 @@ requires-dist = [
 [[package]]
 name = "kairos-strategy-engine"
 version = "0.2.11"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git?rev=5cc18636104adac53ea2e9e50331c7b973c79f91#5cc18636104adac53ea2e9e50331c7b973c79f91" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git?rev=c2479c6155337a41f25df71254479220253910b1#c2479c6155337a41f25df71254479220253910b1" }
 dependencies = [
     { name = "kairos-core" },
     { name = "numpy" },
