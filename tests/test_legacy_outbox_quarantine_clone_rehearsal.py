@@ -101,6 +101,18 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
         self.assertIn("--output", gpg.call_args.args[0])
         self.assertEqual(gpg.call_args.args[0][gpg.call_args.args[0].index("--output") + 1], "-")
 
+    def test_signing_uses_input_without_an_explicit_stdin_pipe(self) -> None:
+        with (
+            mock.patch.dict(self.runtime_controller.os.environ, {"KAIROS_GPG_PASSPHRASE": "unit-only-not-a-key"}),
+            mock.patch.object(self.runtime_controller, "_gpg_executable", return_value=Path(r"C:\Program Files\Git\usr\bin\gpg.exe")),
+            mock.patch.object(self.runtime_controller.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="signed", stderr="")) as run,
+        ):
+            self.runtime_controller._gpg(["--batch", "--detach-sign", "receipt.json"], "unit signing")
+        self.assertNotIn("stdin", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["input"], "unit-only-not-a-key\n")
+        self.assertNotIn("unit-only-not-a-key", run.call_args.args[0])
+        self.assertIn("--passphrase-fd", run.call_args.args[0])
+
     def test_worker_result_rejects_each_immutable_identity_difference(self) -> None:
         identity = {
             "id": 7,
@@ -255,6 +267,39 @@ class LegacyOutboxQuarantineCloneRehearsalTests(unittest.TestCase):
             with self.assertRaises(self.runtime_controller.RehearsalError):
                 self.runtime_controller._write_signed_receipt({"schema_version": 1}, receipt_directory, str(output))
             self.assertEqual(output.read_bytes(), b"existing")
+
+    def test_runner_inventory_pins_canonical_signed_revision_bytes(self) -> None:
+        controller = self.runtime_controller
+        canonical_sha = "49d7c47561543b4676566b4b85fe903bb125d6ece8a7ee49eb3414a7a16502dd"
+        self.assertEqual(controller.EXPECTED_PERSISTENCE_REPOSITORY_SHA256, canonical_sha)
+        inventory = {
+            "directory": "/app/kairos_persistence/migrations",
+            "repository_sha256": canonical_sha,
+            "migrations": [{"name": name, "sha256": controller.MIGRATION_SHA256[name]} for name in controller.ALL_PACKAGE_MIGRATIONS],
+        }
+        self.assertEqual(controller._verify_runner_inventory(inventory), inventory["directory"])
+        altered = copy.deepcopy(inventory)
+        altered["repository_sha256"] = "0" * 64
+        with self.assertRaises(controller.RehearsalError):
+            controller._verify_runner_inventory(altered)
+
+        for field, value in (("sha256", "0" * 64), ("name", "001_unreviewed.sql")):
+            altered = copy.deepcopy(inventory)
+            altered["migrations"][0][field] = value
+            with self.assertRaises(controller.RehearsalError):
+                controller._verify_runner_inventory(altered)
+        altered = copy.deepcopy(inventory)
+        altered["migrations"] = altered["migrations"][1:]
+        with self.assertRaises(controller.RehearsalError):
+            controller._verify_runner_inventory(altered)
+
+    def test_clone_checkpoint_uses_the_frozen_event_sequence_column(self) -> None:
+        controller = self.runtime_controller
+        checkpoints = {table: 0 for table in controller.CHECKPOINT_TABLES}
+        checkpoints["public_execution_events_max_sequence"] = 0
+        with mock.patch.object(controller, "_psql", return_value=["0"]) as query:
+            controller._assert_checkpoints("clone", "user", "database", checkpoints)
+        self.assertEqual(query.call_args.args[3], "SELECT COALESCE(MAX(event_seq), 0) FROM public.public_execution_events;")
 
     def test_tampering_is_rejected(self) -> None:
         changed = self.controller.replace("018_offline_outbox_reconciliation.sql", "018_changed.sql", 1)

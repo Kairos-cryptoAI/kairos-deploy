@@ -53,7 +53,9 @@ EXPECTED_SIGNER = "40AF365C6682B73D056A6A274DBFF6B65BE9F827"
 EXPECTED_LEGACY_FINGERPRINT = "a2fec9fe81d6af73a1e44038a0e71c21d9aaf2e3933ea8c76793d9e6f25b9adf"
 EXPECTED_RUNNER_USER = "10001:10001"
 EXPECTED_RUNNER_SHA256 = "4667fac75725dadfed8e28454bea6d954a985f92495d981eb1cb60af47c148e2"
-EXPECTED_PERSISTENCE_REPOSITORY_SHA256 = "9eaff27041ca14da617b9d665b2e3e4409ea8fb9abecd3f19da4d8dc442672e1"
+# SHA256 of the canonical Git blob at EXPECTED_PERSISTENCE_REVISION, verified
+# independently against the exact immutable runner's installed module bytes.
+EXPECTED_PERSISTENCE_REPOSITORY_SHA256 = "49d7c47561543b4676566b4b85fe903bb125d6ece8a7ee49eb3414a7a16502dd"
 EXPECTED_MIGRATION_RUNNER_IMAGE = (
     "ghcr.io/kairos-cryptoai/kairos-runtime-schema-profile-runner@sha256:"
     "2e10e9e936eae3a4a411f65d8b0bd14670ba808368eeff94b4e24021aa291077"
@@ -326,8 +328,9 @@ def _gpg(arguments: list[str], label: str) -> subprocess.CompletedProcess[str]:
         command,
         shell=False,
         check=False,
-        stdin=subprocess.PIPE if input_value is not None else subprocess.DEVNULL,
-        input=input_value,
+        # subprocess.run creates its own stdin pipe for input=; passing both
+        # stdin= and input= raises ValueError before GnuPG can sign anything.
+        **({"input": input_value} if input_value is not None else {"stdin": subprocess.DEVNULL}),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -700,7 +703,7 @@ def _assert_checkpoints(container: str, user: str, database: str, checkpoints: M
         value = _psql(container, user, database, f"SELECT COUNT(*) FROM public.{table};", "clone checkpoint validation")
         if len(value) != 1 or int(value[0]) != checkpoints[table]:
             raise RehearsalError("clone table checkpoint differs from the verified backup")
-    maximum = _psql(container, user, database, "SELECT COALESCE(MAX(sequence), 0) FROM public.public_execution_events;", "clone sequence checkpoint validation")
+    maximum = _psql(container, user, database, "SELECT COALESCE(MAX(event_seq), 0) FROM public.public_execution_events;", "clone sequence checkpoint validation")
     if len(maximum) != 1 or int(maximum[0]) != checkpoints["public_execution_events_max_sequence"]:
         raise RehearsalError("clone execution-event sequence differs from the verified backup")
 
@@ -824,6 +827,21 @@ print(json.dumps({'directory':str(root),'migrations':items,'repository_sha256':h
         observation = json.loads(output)
     except json.JSONDecodeError as exc:
         raise RehearsalError("migration runner probe returned malformed JSON") from exc
+    directory = _verify_runner_inventory(observation)
+    package_directory = posixpath.dirname(directory)
+    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", package_directory) or ".." in package_directory:
+        raise RehearsalError("migration runner reported an unsafe package directory")
+    exported_repository = temporary / "reviewed-kairos-persistence-repository.py"
+    if exported_repository.exists():
+        raise RehearsalError("temporary repository provenance path already exists")
+    _docker(["cp", f"{probe_name}:{package_directory}/repository.py", str(exported_repository)], "export reviewed persistence repository module")
+    if _file_sha256(exported_repository) != EXPECTED_PERSISTENCE_REPOSITORY_SHA256:
+        raise RehearsalError("exported persistence repository module differs from the reviewed source")
+    return directory
+
+
+def _verify_runner_inventory(observation: object) -> str:
+    """Require the canonical source bytes, not just a trusted OCI label."""
     if (
         not isinstance(observation, Mapping)
         or not isinstance(observation.get("directory"), str)
@@ -841,15 +859,6 @@ print(json.dumps({'directory':str(root),'migrations':items,'repository_sha256':h
     directory = observation["directory"]
     if not re.fullmatch(r"/[A-Za-z0-9_./-]+", directory) or ".." in directory:
         raise RehearsalError("migration runner reported an unsafe resource directory")
-    package_directory = posixpath.dirname(directory)
-    if not re.fullmatch(r"/[A-Za-z0-9_./-]+", package_directory) or ".." in package_directory:
-        raise RehearsalError("migration runner reported an unsafe package directory")
-    exported_repository = temporary / "reviewed-kairos-persistence-repository.py"
-    if exported_repository.exists():
-        raise RehearsalError("temporary repository provenance path already exists")
-    _docker(["cp", f"{probe_name}:{package_directory}/repository.py", str(exported_repository)], "export reviewed persistence repository module")
-    if _file_sha256(exported_repository) != EXPECTED_PERSISTENCE_REPOSITORY_SHA256:
-        raise RehearsalError("exported persistence repository module differs from the reviewed source")
     return directory
 
 
