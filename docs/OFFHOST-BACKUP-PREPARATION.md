@@ -14,7 +14,8 @@ prints fixed missing prerequisites and exits 2. Unknown fields, URLs, credential
 enablement, other profiles and non-null remote choices fail closed.
 
 Add `--manifest`, `--accepted-history-receipt` and
-`--accepted-history-signature` together to prepare a canonical four-file inventory:
+`--accepted-history-signature` together with `--verification-homedir` to prepare
+a canonical four-file inventory:
 the contained `Backup-Kairos.ps1` custom dump and exact manifest, plus the accepted
 signed PAPER read-only receipt/signature. The proof must bind the same archive and
 manifest bytes, reviewed controller/worker/catalog identities, unchanged primary,
@@ -22,6 +23,12 @@ all full-history table digests, public sequences and checkpoint counts. Only
 reviewed pure validators run; there is no DB, Redis, Docker, provider or secret
 connection. The dump limit is 256MiB and metadata limit 1MiB; hashing is streamed.
 The output remains unsigned/signing-required and blocked for remote transfer.
+The explicit verification home must be an isolated, private directory inside
+the operational workspace, containing only public verification material.
+Ambient user key stores are never selected. Nonempty private-key directories
+or a secret keyring are rejected by metadata before verification, without
+opening their contents. The checked-in trusted public signer is sufficient;
+the accepted receipt still requires its exact primary fingerprint.
 
 Historical backup preparation does not claim that the current runtime is fresh or
 recovered. Future source drift requires a newly accepted proof, not silent reuse.
@@ -30,8 +37,9 @@ recovered. Future source drift requires a newly accepted proof, not silent reuse
 
 The committed lock records official HTTPS release metadata for
 [Restic 0.19.1](https://github.com/restic/restic/releases/tag/v0.19.1), Windows AMD64.
-It explicitly says native signature verification and installation have not been
-performed. There is no implicit download, PATH lookup, update or installer.
+The static lock is metadata, not a native signature-verification or installation
+receipt. Separately dated local receipts must provide any actual execution
+evidence. There is no implicit download, PATH lookup, update or installer.
 
 After source/resource review, the operator may provide the exact locked archive,
 `SHA256SUMS`, `SHA256SUMS.asc` and `maintainer.asc` inside the private operational
@@ -44,6 +52,10 @@ and allows exactly one named executable ZIP entry of at most 32MiB. A caller dic
 claiming `maintainer_signature_verified=true` cannot authorize execution. Every
 fixture independently re-verifies the signed bundle; it cannot accept an arbitrary
 executable/hash or arbitrary commands. No private GPG/API keys are read.
+Git-for-Windows GPG receives resolved absolute forward-slash path operands,
+including its exclusively new public keyring; this avoids MSYS interpreting
+backslash keyring paths as relative paths. It does not relax signature or
+workspace validation.
 
 ## Optional fixed local synthetic fixture
 

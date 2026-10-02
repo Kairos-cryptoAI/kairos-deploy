@@ -95,7 +95,9 @@ class ModelTests(unittest.IsolatedAsyncioTestCase):
         value = plan()
         receipt = await rehearsal.run_offline_model(value, ModelBackend(value))
         with tempfile.TemporaryDirectory(prefix="atomic-native-verifier-unit-") as directory:
-            root = Path(directory)
+            # Preserve the native canonical-path requirement even when the
+            # hosted Windows TEMP environment contains a short-name alias.
+            root = Path(directory).resolve(strict=True)
             attempt = root / "paper-runtime-atomic-attempt-0123456789ab"
             attempt.mkdir()
             (attempt / "atomic-plan.json").write_bytes(value.serialized)

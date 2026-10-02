@@ -54,16 +54,41 @@ def _run(command: list[str], *, cwd: Path, data: bytes | None = None, expect_fai
 
 
 def _signature(path: Path, signature: Path, *, signer: str, homedir: Path | None = None) -> None:
+    if homedir is None:
+        raise contract.PreparationError("EXPLICIT_PUBLIC_VERIFICATION_HOME_REQUIRED")
+    _public_verification_home(homedir)
     options = [str(GPG), "--batch", "--no-options", "--no-auto-key-retrieve", "--no-auto-check-trustdb"]
-    if homedir is not None:
-        options += ["--homedir", str(homedir)]
-    result = _run(options + ["--status-fd", "1", "--verify", str(signature), str(path)], cwd=signature.parent)
+    options += ["--homedir", _gpg_path(homedir)]
+    result = _run(options + ["--status-fd", "1", "--verify", _gpg_path(signature), _gpg_path(path)], cwd=signature.parent)
     valid = [line.split() for line in result.decode("utf-8", errors="replace").splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
     if len(valid) != 1 or len(valid[0]) < 12 or valid[0][11] != signer:
         raise contract.PreparationError("SIGNATURE_IDENTITY_REJECTED")
 
 
-def prepare_inventory(manifest_path: Path, receipt_path: Path, signature_path: Path, policy: dict[str, Any], *, backups: Path = contract.BACKUPS) -> dict[str, Any]:
+def _gpg_path(path: Path) -> str:
+    # Git-for-Windows GPG is MSYS: backslash path operands may be interpreted
+    # as relative keyblock names. Forward-slash absolute paths retain identity.
+    return path.resolve().as_posix()
+
+
+def _public_verification_home(path: Path) -> None:
+    _no_reparse(path)
+    _no_reparse(OPS_ROOT)
+    if not path.is_absolute() or not path.is_dir() or path.resolve() == OPS_ROOT.resolve() or not path.resolve().is_relative_to(OPS_ROOT.resolve(strict=True)):
+        raise contract.PreparationError("OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED")
+    _private_acl(path)
+    private = path / "private-keys-v1.d"
+    _no_reparse(private)
+    # Metadata only: never open private material. GPG may create an empty dir.
+    if private.exists() and (not private.is_dir() or next(private.iterdir(), None) is not None):
+        raise contract.PreparationError("PRIVATE_MATERIAL_IN_VERIFICATION_HOME")
+    legacy_private = path / "secring.gpg"
+    _no_reparse(legacy_private)
+    if legacy_private.exists():
+        raise contract.PreparationError("PRIVATE_MATERIAL_IN_VERIFICATION_HOME")
+
+
+def prepare_inventory(manifest_path: Path, receipt_path: Path, signature_path: Path, policy: dict[str, Any], *, backups: Path = contract.BACKUPS, verification_homedir: Path | None = None) -> dict[str, Any]:
     status = contract.policy_status(policy)
     manifest_path = contract.contained(manifest_path, backups)
     receipt_path = contract.contained(receipt_path, backups)
@@ -71,7 +96,7 @@ def prepare_inventory(manifest_path: Path, receipt_path: Path, signature_path: P
     if signature_path != receipt_path.with_suffix(".json.asc") or re.fullmatch(r"paper-runtime-readonly-preflight-[0-9]{8}T[0-9]{6}Z\.json", receipt_path.name) is None:
         raise contract.PreparationError("ACCEPTED_PAPER_RECEIPT_REQUIRED")
     evidence_hashes = {p: contract.sha(p, maximum=contract.MAX_METADATA_BYTES) for p in (manifest_path, receipt_path, signature_path)}
-    _signature(receipt_path, signature_path, signer=contract.SIGNER)
+    _signature(receipt_path, signature_path, signer=contract.SIGNER, homedir=verification_homedir)
     manifest = contract.read_json(manifest_path)
     receipt = contract.read_json(receipt_path)
     fields = {"schema_version", "created_at_utc", "compose_project", "database", "file", "bytes", "sha256", "checkpoints", "timescaledb_bgw_owners"}
@@ -154,7 +179,7 @@ def verify_tool_bundle(bundle: Path, new_directory: Path, *, ops_root: Path = OP
         paths[key] = snapshot
     keyring = new_directory / "verification-keyring"
     keyring.mkdir(mode=0o777 if os.name == "nt" else 0o700)
-    _run([str(GPG), "--batch", "--no-options", "--homedir", str(keyring), "--import", str(paths["key"])], cwd=new_directory)
+    _run([str(GPG), "--batch", "--no-options", "--homedir", _gpg_path(keyring), "--import", _gpg_path(paths["key"])], cwd=new_directory)
     _signature(paths["checksums"], paths["signature"], signer=tool["maintainer_fingerprint"], homedir=keyring)
     lines = paths["checksums"].read_text(encoding="ascii").splitlines()
     expected_line = tool["archive_sha256"] + "  " + tool["archive_name"]
@@ -241,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--manifest", type=Path)
         parser.add_argument("--accepted-history-receipt", type=Path)
         parser.add_argument("--accepted-history-signature", type=Path)
+        parser.add_argument("--verification-homedir", type=Path)
         parser.add_argument("--native-fixture-bundle", type=Path)
         parser.add_argument("--new-fixture-directory", type=Path)
         parser.add_argument("--authorize-local-synthetic-fixture", action="store_true")
@@ -250,14 +276,16 @@ def main(argv: list[str] | None = None) -> int:
         fixture = [args.native_fixture_bundle, args.new_fixture_directory, args.authorize_local_synthetic_fixture]
         if any(fixture):
             contract.policy_status(policy)
-            if any(supplied) or not all(fixture):
+            if any(supplied) or args.verification_homedir is not None or not all(fixture):
                 raise contract.PreparationError("EXPLICIT_LOCAL_SYNTHETIC_SCOPE_REQUIRED")
             result = local_fixture(args.native_fixture_bundle, args.new_fixture_directory)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if any(supplied) and not all(supplied):
             raise contract.PreparationError("COMPLETE_ACCEPTED_ARTIFACT_SET_REQUIRED")
-        result = prepare_inventory(*supplied, policy) if all(supplied) else contract.policy_status(policy)
+        if args.verification_homedir is not None and not all(supplied):
+            raise contract.PreparationError("COMPLETE_ACCEPTED_ARTIFACT_SET_REQUIRED")
+        result = prepare_inventory(*supplied, policy, verification_homedir=args.verification_homedir) if all(supplied) else contract.policy_status(policy)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         # Even prepared inventory is not remote operational qualification.
         return 2

@@ -267,7 +267,10 @@ class IntentTests(unittest.TestCase):
     def test_durable_intent_is_create_only_fsynced_and_read_back(self):
         prepared = intent(plan())
         with tempfile.TemporaryDirectory(prefix="atomic-intent-unit-") as directory:
-            path = Path(directory) / ("atomic-precommit-" + contract.digest(prepared) + ".json")
+            # Hosted Windows TEMP may use a short-name alias. The admitted
+            # fixture supplies the canonical directory, just like the native
+            # controller; do not relax the worker's non-canonical-path guard.
+            path = Path(directory).resolve(strict=True) / ("atomic-precommit-" + contract.digest(prepared) + ".json")
             self.assertEqual(worker.persist_precommit_intent(path, prepared), contract.digest(prepared))
             self.assertEqual(path.read_bytes(), contract.canonical(prepared))
             with self.assertRaises(contract.AtomicError):
@@ -277,9 +280,21 @@ class IntentTests(unittest.TestCase):
     def test_intent_fsync_failure_cannot_acknowledge_commit(self):
         prepared = intent(plan())
         with tempfile.TemporaryDirectory(prefix="atomic-intent-unit-") as directory, mock.patch.object(worker.os, "fsync", side_effect=OSError("synthetic failure")):
-            path = Path(directory) / ("atomic-precommit-" + contract.digest(prepared) + ".json")
+            path = Path(directory).resolve(strict=True) / ("atomic-precommit-" + contract.digest(prepared) + ".json")
             with self.assertRaises(contract.AtomicError):
                 worker.persist_precommit_intent(path, prepared)
+
+    def test_noncanonical_parent_still_rejects_before_file_creation(self):
+        prepared = intent(plan())
+        with tempfile.TemporaryDirectory(prefix="atomic-intent-unit-") as directory:
+            root = Path(directory).resolve(strict=True)
+            child = root / "child"
+            child.mkdir()
+            filename = "atomic-precommit-" + contract.digest(prepared) + ".json"
+            path = child / ".." / filename
+            with self.assertRaisesRegex(contract.AtomicError, "precommit intent directory differs"):
+                worker.persist_precommit_intent(path, prepared)
+            self.assertFalse((root / filename).exists())
 
 
 if __name__ == "__main__":

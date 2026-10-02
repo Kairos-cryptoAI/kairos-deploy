@@ -283,6 +283,10 @@ class TopologyTests(unittest.TestCase):
             env = dict(os.environ)
             env["KAIROS_ALERT_CONFIG"] = str(root / "config/new/alertmanager.yml")
             env["KAIROS_ALERT_TOKEN_FILE"] = str(root / "secrets/telegram_bot_token")
+            version = delivery.subprocess.run(["docker", "compose", "version", "--short"], capture_output=True, text=True, env=env, timeout=15)
+            self.assertEqual(version.returncode, 0, "offline native compose version inspection failed")
+            compose_version = version.stdout.strip()
+            self.assertRegex(compose_version, r"\Av?[0-9]+\.[0-9]+\.[0-9]+\Z")
             for profile in ("base", "paper"):
                 command = ["docker", "compose", "-f", str(delivery.ROOT / "docker-compose.alert-delivery.yml")]
                 if profile == "paper":
@@ -290,7 +294,7 @@ class TopologyTests(unittest.TestCase):
                 command += ["--profile", "alert-delivery", "config", "--format", "json"]
                 result = delivery.subprocess.run(command, capture_output=True, text=True, env=env, timeout=15)
                 self.assertEqual(result.returncode, 0, "offline native compose rendering failed")
-                self.assertEqual(topology.validate(json.loads(result.stdout), profile=profile, ops_root=root), [])
+                self.assertEqual(topology.validate(json.loads(result.stdout), profile=profile, ops_root=root, compose_version=compose_version), [])
 
     @staticmethod
     def config() -> dict:
@@ -301,6 +305,52 @@ class TopologyTests(unittest.TestCase):
         paper = self.config()
         paper["networks"]["alert-input"]["name"] = "kairos-paper_paper-observability"
         self.assertEqual(topology.validate(paper, profile="paper"), [])
+
+    def test_only_reviewed_legacy_renderers_can_omit_bind_false(self) -> None:
+        for profile in ("base", "paper"):
+            for version in ("2.38.2", "v2.38.2", "2.40.3", "v2.40.3"):
+                with self.subTest(profile=profile, version=version):
+                    config = self.config()
+                    if profile == "paper":
+                        config["networks"]["alert-input"]["name"] = "kairos-paper_paper-observability"
+                    for mount in config["services"]["alertmanager"]["volumes"]:
+                        mount["bind"] = {}
+                    self.assertEqual(topology.validate(config, profile=profile, compose_version=version), [])
+        config = self.config()
+        for mount in config["services"]["alertmanager"]["volumes"]:
+            mount["bind"] = {}
+        for version in (None, "", "2.38.3", "5.0.0", "5.5.0", True, 2.38):
+            with self.subTest(version=version):
+                self.assertEqual(topology.validate(config, profile="base", compose_version=version), ["UNSAFE_MOUNT", "UNSAFE_MOUNT"])
+
+    def test_explicit_false_does_not_require_legacy_version_metadata(self) -> None:
+        for version in (None, "2.38.2", "2.40.3", "5.5.0", "unknown"):
+            with self.subTest(version=version):
+                self.assertEqual(topology.validate(self.config(), profile="base", compose_version=version), [])
+
+    def test_legacy_version_cannot_authorize_unsafe_or_ambiguous_mounts(self) -> None:
+        for version in ("2.38.2", "2.40.3"):
+            for bind in (None, [], {"create_host_path": True}, {"create_host_path": 0}, {"create_host_path": "false"}, {"create_host_path": None}, {"create_host_path": False, "propagation": "rshared"}, {"propagation": "rprivate"}, {"recursive": "writable"}):
+                with self.subTest(version=version, bind=bind):
+                    config = self.config()
+                    config["services"]["alertmanager"]["volumes"][0]["bind"] = bind
+                    self.assertIn("UNSAFE_MOUNT", topology.validate(config, profile="base", compose_version=version))
+            for change in ("missing-bind", "read-write", "volume-type", "extra-mount-field", "other-token-path"):
+                with self.subTest(version=version, change=change):
+                    config = self.config()
+                    mount = config["services"]["alertmanager"]["volumes"][1]
+                    mount["bind"] = {}
+                    if change == "missing-bind":
+                        del mount["bind"]
+                    elif change == "read-write":
+                        mount["read_only"] = False
+                    elif change == "volume-type":
+                        mount["type"] = "volume"
+                    elif change == "extra-mount-field":
+                        mount["consistency"] = "cached"
+                    else:
+                        mount["source"] = str(delivery.OPS_ROOT / "secrets/other_token")
+                    self.assertTrue(topology.validate(config, profile="base", compose_version=version))
 
     def test_no_apps_database_mounts_ports_or_resource_expansion(self) -> None:
         mutations = [("ports", ["9093:9093"]), ("privileged", True), ("mem_limit", 268435456), ("environment", {"TOKEN": "synthetic"}), ("networks", {"paper-management": {}}), ("volumes", [{"type": "bind", "source": "/db", "target": "/data", "read_only": False}])]

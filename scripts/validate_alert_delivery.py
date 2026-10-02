@@ -17,9 +17,20 @@ else:
 COMMAND = ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager", "--web.listen-address=:9093", "--cluster.listen-address=", "--data.retention=24h"]
 TMPFS = ["/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777", "/alertmanager:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700"]
 SERVICE_KEYS = {"image", "platform", "profiles", "user", "read_only", "init", "restart", "mem_limit", "cpus", "pids_limit", "cap_drop", "security_opt", "command", "tmpfs", "volumes", "networks"}
+# Exact hosted renderers whose compose-go bool/omitempty JSON omits false.
+# Newer OptOut encoders can omit true instead, so unknown versions fail closed.
+LEGACY_OMITTED_FALSE_COMPOSE_VERSIONS = frozenset({"2.38.2", "2.40.3"})
 
 
-def validate(config: Any, *, profile: str, ops_root: Path = OPS_ROOT) -> list[str]:
+def _safe_bind_options(bind: Any, compose_version: str | None) -> bool:
+    if not isinstance(bind, dict):
+        return False
+    if set(bind) == {"create_host_path"}:
+        return bind["create_host_path"] is False
+    return not bind and isinstance(compose_version, str) and compose_version.removeprefix("v") in LEGACY_OMITTED_FALSE_COMPOSE_VERSIONS
+
+
+def validate(config: Any, *, profile: str, ops_root: Path = OPS_ROOT, compose_version: str | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(config, dict) or set(config) != {"name", "services", "networks"}:
         return ["INVALID_OPERATIONAL_TOPOLOGY"]
@@ -64,7 +75,7 @@ def validate(config: Any, *, profile: str, ops_root: Path = OPS_ROOT) -> list[st
     if {item.get("target") for item in mounts if isinstance(item, dict)} != targets:
         errors.append("MOUNT_TARGET_CHANGED")
     for mount in mounts:
-        if not isinstance(mount, dict) or set(mount) != {"type", "source", "target", "read_only", "bind"} or mount.get("type") != "bind" or mount.get("read_only") is not True or mount.get("bind") != {"create_host_path": False} or not isinstance(mount.get("bind"), dict) or mount["bind"].get("create_host_path") is not False:
+        if not isinstance(mount, dict) or set(mount) != {"type", "source", "target", "read_only", "bind"} or mount.get("type") != "bind" or mount.get("read_only") is not True or not _safe_bind_options(mount.get("bind"), compose_version):
             errors.append("UNSAFE_MOUNT")
             continue
         if not isinstance(mount["source"], str):
@@ -89,11 +100,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compose-json", type=Path, required=True)
     parser.add_argument("--profile", choices=("base", "paper"), required=True)
+    parser.add_argument("--compose-version", help="Version metadata from the same native offline renderer; unknown versions cannot omit false")
     args = parser.parse_args()
     try:
         if args.compose_json.stat().st_size > 65_536:
             raise ValueError()
-        errors = validate(json.loads(args.compose_json.read_text(encoding="utf-8")), profile=args.profile)
+        errors = validate(json.loads(args.compose_json.read_text(encoding="utf-8")), profile=args.profile, compose_version=args.compose_version)
     except Exception:
         errors = ["INVALID_COMPOSE_INPUT"]
     print(json.dumps({"status": "BLOCKED" if errors else "TOPOLOGY_ONLY_PASS", "errors": errors, "operationally_qualified": False}))
