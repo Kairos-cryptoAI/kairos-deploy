@@ -56,7 +56,18 @@ migration hashes, repository primitive hash and snapshot worker bytes are checke
   framing, PostgreSQL C-collation ordering and 8 MiB work_mem. Fixed bounds:
   4 MiB per row, 1 GiB total row bytes, two million total rows, 300 seconds per
   snapshot, 120-second statements and 5-second lock timeout; backup <=256 MiB.
-  The disposable clone is limited to one CPU, 1536 MiB memory and 1 GiB data tmpfs.
+  The disposable clone is limited to one CPU, 3 GiB memory, 256 processes,
+  2 GiB data tmpfs and a separate 128 MiB temporary tmpfs; no host data volumes,
+  bind mounts or published ports are added. Its pinned PostgreSQL/TimescaleDB
+  command explicitly fixes `shared_buffers=64MB`, `work_mem=4MB`,
+  `max_connections=20`, `max_worker_processes=8` and
+  `timescaledb.max_background_workers=4`. The snapshot's transaction-local
+  8 MiB work_mem remains unchanged. Restore keeps its 300-second timeout and
+  source background-job owners remain constrained clone-local NOLOGIN roles.
+  The former 1 GiB data tmpfs exhausted its hard capacity during a read-only
+  clone restore; compressed archive bytes do not bound restored data/index/WAL
+  bytes. A resource failure still rejects the proof and cleans up the clone:
+  there is no automatic retry, volume fallback or further resource expansion.
 - A new detached-GPG-signed read-only receipt beside the protected backup;
   existing receipts/archives are not overwritten. Raw rows, lease ownership,
   client details and credentials do not enter stdout or the receipt.

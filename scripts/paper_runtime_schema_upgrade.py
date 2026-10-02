@@ -245,7 +245,19 @@ def _restore_snapshot(inputs: Any) -> dict[str, Any]:
     database = "kairos_paper_snapshot_" + suffix
     user = "kairos_paper_snapshot"
     try:
-        _docker(["create", "--name", container, "--network=none", "--memory=1536m", "--cpus=1", "--pids-limit=256", "--label", "com.kairos.scope=" + SCOPE, "--label", "com.kairos.drill=" + suffix, "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,nodev,size=1g", "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m", "--env", "POSTGRES_USER=" + user, "--env", "POSTGRES_DB=" + database, "--env", "POSTGRES_HOST_AUTH_METHOD=trust", CATALOG.EXPECTED_TIMESCALE_IMAGE])
+        # Keep hard tmpfs storage bounds: compressed dump size does not bound
+        # restored data/index/WAL size. No fallback volume or resource retry.
+        _docker([
+            "create", "--name", container, "--network=none", "--memory=3g",
+            "--cpus=1", "--pids-limit=256", "--label", "com.kairos.scope=" + SCOPE,
+            "--label", "com.kairos.drill=" + suffix, "--tmpfs",
+            "/var/lib/postgresql/data:rw,nosuid,nodev,size=2g", "--tmpfs",
+            "/tmp:rw,nosuid,nodev,size=128m", "--env", "POSTGRES_USER=" + user,
+            "--env", "POSTGRES_DB=" + database, "--env", "POSTGRES_HOST_AUTH_METHOD=trust",
+            CATALOG.EXPECTED_TIMESCALE_IMAGE, "postgres", "-c", "shared_buffers=64MB",
+            "-c", "work_mem=4MB", "-c", "max_connections=20",
+            "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4",
+        ])
         _docker(["start", container])
         deadline = time.monotonic() + 60
         ready = 0

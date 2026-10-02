@@ -167,15 +167,34 @@ class ControllerTests(unittest.TestCase):
 
     def test_clone_restore_is_generated_network_none_without_primary_mounts(self):
         completed = subprocess.CompletedProcess([], 0, stdout="kairos_paper_snapshot_" + "a" * 12 + "\n", stderr="")
-        with mock.patch.object(controller.uuid, "uuid4", return_value=types.SimpleNamespace(hex="a" * 32)), mock.patch.object(controller, "_docker", return_value="") as docker, mock.patch.object(controller.subprocess, "run", return_value=completed) as process, mock.patch.object(controller.time, "sleep"), mock.patch.object(controller.CATALOG, "_ensure_timescaledb_job_owners"), mock.patch.object(controller, "_snapshot", return_value=snapshot(False)), mock.patch.object(controller, "_cleanup_clone") as cleanup:
+        with mock.patch.object(controller.uuid, "uuid4", return_value=types.SimpleNamespace(hex="a" * 32)), mock.patch.object(controller, "_docker", return_value="") as docker, mock.patch.object(controller.subprocess, "run", return_value=completed) as process, mock.patch.object(controller.time, "sleep"), mock.patch.object(controller.CATALOG, "_ensure_timescaledb_job_owners") as owners, mock.patch.object(controller, "_snapshot", return_value=snapshot(False)), mock.patch.object(controller, "_cleanup_clone") as cleanup:
             controller._restore_snapshot(self.inputs)
         create = docker.call_args_list[0].args[0]
         self.assertIn("--network=none", create)
-        self.assertNotIn("--mount", create)
+        self.assertEqual([item for item in create if item.startswith("--memory=")], ["--memory=3g"])
+        self.assertEqual([item for item in create if item.startswith("--cpus=")], ["--cpus=1"])
+        self.assertEqual([item for item in create if item.startswith("--pids-limit=")], ["--pids-limit=256"])
+        self.assertEqual([create[index + 1] for index, item in enumerate(create) if item == "--tmpfs"], ["/var/lib/postgresql/data:rw,nosuid,nodev,size=2g", "/tmp:rw,nosuid,nodev,size=128m"])
+        self.assertEqual(create[create.index(controller.CATALOG.EXPECTED_TIMESCALE_IMAGE) + 1:], ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=4MB", "-c", "max_connections=20", "-c", "max_worker_processes=8", "-c", "timescaledb.max_background_workers=4"])
+        self.assertFalse(any(item.split("=", 1)[0] in {"--mount", "--volume", "--volumes-from", "-v", "--publish", "--publish-all", "-p", "-P", "--privileged"} for item in create))
         self.assertNotIn(controller.SOURCE_VOLUME, repr(docker.call_args_list))
         restore = [call for call in process.call_args_list if "pg_restore" in call.args[0]]
         self.assertEqual(len(restore), 1)
         self.assertIn("--no-owner", restore[0].args[0])
+        self.assertEqual(restore[0].kwargs["timeout"], 300)
+        owners.assert_called_once_with("kairos-paper-snapshot-clone-" + "a" * 12, "kairos_paper_snapshot", self.inputs.manifest["timescaledb_bgw_owners"])
+        cleanup.assert_called_once_with("kairos-paper-snapshot-clone-" + "a" * 12, "a" * 12)
+
+    def test_clone_restore_failure_never_retries_or_expands_resources(self):
+        def process(arguments, **kwargs):
+            if "pg_restore" in arguments:
+                return subprocess.CompletedProcess(arguments, 1, stdout="", stderr=b"raw restore details withheld")
+            return subprocess.CompletedProcess(arguments, 0, stdout="kairos_paper_snapshot_" + "a" * 12 + "\n", stderr="")
+        with mock.patch.object(controller.uuid, "uuid4", return_value=types.SimpleNamespace(hex="a" * 32)), mock.patch.object(controller, "_docker", return_value="") as docker, mock.patch.object(controller.subprocess, "run", side_effect=process) as operations, mock.patch.object(controller.time, "sleep"), mock.patch.object(controller.CATALOG, "_ensure_timescaledb_job_owners"), mock.patch.object(controller, "_snapshot") as restored, mock.patch.object(controller, "_cleanup_clone") as cleanup, self.assertRaisesRegex(controller.PreflightError, "raw output withheld"):
+            controller._restore_snapshot(self.inputs)
+        self.assertEqual(sum(call.args[0][0] == "create" for call in docker.call_args_list), 1)
+        self.assertEqual(sum("pg_restore" in call.args[0] for call in operations.call_args_list), 1)
+        restored.assert_not_called()
         cleanup.assert_called_once_with("kairos-paper-snapshot-clone-" + "a" * 12, "a" * 12)
 
     def test_foreign_cleanup_is_refused_before_remove(self):
