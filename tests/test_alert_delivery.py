@@ -283,7 +283,7 @@ class TopologyTests(unittest.TestCase):
             env = dict(os.environ)
             env["KAIROS_ALERT_CONFIG"] = str(root / "config/new/alertmanager.yml")
             env["KAIROS_ALERT_TOKEN_FILE"] = str(root / "secrets/telegram_bot_token")
-            version = delivery.subprocess.run(["docker", "compose", "version", "--short"], capture_output=True, text=True, env=env, timeout=15)
+            version = delivery.subprocess.run(["docker", "compose", "version", "--short"], stdin=delivery.subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=45)
             self.assertEqual(version.returncode, 0, "offline native compose version inspection failed")
             compose_version = version.stdout.strip()
             self.assertRegex(compose_version, r"\Av?[0-9]+\.[0-9]+\.[0-9]+\Z")
@@ -292,7 +292,7 @@ class TopologyTests(unittest.TestCase):
                 if profile == "paper":
                     command += ["-f", str(delivery.ROOT / "docker-compose.paper-alert-delivery.yml")]
                 command += ["--profile", "alert-delivery", "config", "--format", "json"]
-                result = delivery.subprocess.run(command, capture_output=True, text=True, env=env, timeout=15)
+                result = delivery.subprocess.run(command, stdin=delivery.subprocess.DEVNULL, capture_output=True, text=True, env=env, timeout=45)
                 self.assertEqual(result.returncode, 0, "offline native compose rendering failed")
                 self.assertEqual(topology.validate(json.loads(result.stdout), profile=profile, ops_root=root, compose_version=compose_version), [])
 
@@ -388,6 +388,82 @@ class TopologyTests(unittest.TestCase):
         service["entrypoint"] = None
         config["networks"]["alert-input"]["ipam"] = {"config": [{"subnet": "10.0.0.0/8"}]}
         self.assertIn("INPUT_NETWORK_IDENTITY_CHANGED", topology.validate(config, profile="base"))
+
+
+class NativeComposeInspectionContractTests(unittest.TestCase):
+    """Exercise the real inspection test with subprocesses fully mocked."""
+
+    @staticmethod
+    def response(command: list[str], *, version: str = "2.40.3", **kwargs):
+        if command == ["docker", "compose", "version", "--short"]:
+            output = version + "\n"
+        else:
+            config = TopologyTests.config()
+            if str(delivery.ROOT / "docker-compose.paper-alert-delivery.yml") in command:
+                config["networks"]["alert-input"]["name"] = "kairos-paper_paper-observability"
+            mounts = config["services"]["alertmanager"]["volumes"]
+            mounts[0]["source"] = kwargs["env"]["KAIROS_ALERT_CONFIG"]
+            mounts[1]["source"] = kwargs["env"]["KAIROS_ALERT_TOKEN_FILE"]
+            if version == "2.40.3":
+                for mount in mounts:
+                    mount["bind"] = {}
+            output = json.dumps(config)
+        return delivery.subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+    @staticmethod
+    def inspect() -> None:
+        TopologyTests("test_native_compose_json_is_valid_without_starting_services").test_native_compose_json_is_valid_without_starting_services()
+
+    def test_complete_native_json_uses_only_readonly_commands_closed_stdin_and_bounds(self) -> None:
+        for version in ("2.40.3", "5.5.0"):
+            with self.subTest(version=version), patch.object(shutil, "which", return_value="synthetic-docker-cli"), patch.object(delivery.subprocess, "run", side_effect=lambda command, **kwargs: self.response(command, version=version, **kwargs)) as run:
+                self.inspect()
+            standalone = ["docker", "compose", "-f", str(delivery.ROOT / "docker-compose.alert-delivery.yml")]
+            paper = standalone + ["-f", str(delivery.ROOT / "docker-compose.paper-alert-delivery.yml")]
+            suffix = ["--profile", "alert-delivery", "config", "--format", "json"]
+            self.assertEqual([call.args[0] for call in run.call_args_list], [["docker", "compose", "version", "--short"], standalone + suffix, paper + suffix])
+            for call in run.call_args_list:
+                self.assertEqual(call.kwargs["stdin"], delivery.subprocess.DEVNULL)
+                self.assertEqual(call.kwargs["timeout"], 45)
+                self.assertTrue(call.kwargs["capture_output"])
+                self.assertTrue(call.kwargs["text"])
+                self.assertFalse(call.kwargs.get("shell", False))
+
+    def test_timeout_or_nonzero_exit_fails_without_retry_or_skip(self) -> None:
+        for stage in ("version", "config"):
+            for category in ("timeout", "nonzero"):
+                def failure(command, **kwargs):
+                    is_version = command == ["docker", "compose", "version", "--short"]
+                    if is_version == (stage == "version"):
+                        if category == "timeout":
+                            raise delivery.subprocess.TimeoutExpired(command, 45)
+                        return delivery.subprocess.CompletedProcess(command, 1, stdout="", stderr="synthetic failure")
+                    return self.response(command, **kwargs)
+
+                error = delivery.subprocess.TimeoutExpired if category == "timeout" else AssertionError
+                with self.subTest(stage=stage, category=category), patch.object(shutil, "which", return_value="synthetic-docker-cli"), patch.object(delivery.subprocess, "run", side_effect=failure) as run, self.assertRaises(error):
+                    self.inspect()
+                self.assertEqual(run.call_count, 1 if stage == "version" else 2)
+
+    def test_invalid_version_json_or_topology_fails_instead_of_skip(self) -> None:
+        for category in ("version", "json", "topology"):
+            def failure(command, **kwargs):
+                result = self.response(command, **kwargs)
+                if command == ["docker", "compose", "version", "--short"]:
+                    if category == "version":
+                        result.stdout = "unsupported version output"
+                elif category == "json":
+                    result.stdout = "incomplete-json"
+                elif category == "topology":
+                    config = json.loads(result.stdout)
+                    config["services"]["alertmanager"]["volumes"][0]["read_only"] = False
+                    result.stdout = json.dumps(config)
+                return result
+
+            error = json.JSONDecodeError if category == "json" else AssertionError
+            with self.subTest(category=category), patch.object(shutil, "which", return_value="synthetic-docker-cli"), patch.object(delivery.subprocess, "run", side_effect=failure) as run, self.assertRaises(error):
+                self.inspect()
+            self.assertEqual(run.call_count, 1 if category == "version" else 2)
 
 
 if __name__ == "__main__":

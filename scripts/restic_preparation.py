@@ -32,6 +32,10 @@ FIXTURE_BYTES = b"KAIROS fixed synthetic backup fixture; no runtime rows or secr
 FIXTURE_NAME = "fixture.bin"
 MAX_CHILD_OUTPUT = 1024 * 1024
 CHILD_TIMEOUT = 120
+PUBLIC_GPG_OPTIONS = (
+    "--batch", "--no-options", "--no-autostart", "--disable-dirmngr",
+    "--no-auto-key-retrieve", "--no-auto-check-trustdb",
+)
 
 
 def _run(command: list[str], *, cwd: Path, data: bytes | None = None, expect_failure: bool = False) -> bytes:
@@ -57,7 +61,7 @@ def _signature(path: Path, signature: Path, *, signer: str, homedir: Path | None
     if homedir is None:
         raise contract.PreparationError("EXPLICIT_PUBLIC_VERIFICATION_HOME_REQUIRED")
     _public_verification_home(homedir)
-    options = [str(GPG), "--batch", "--no-options", "--no-auto-key-retrieve", "--no-auto-check-trustdb"]
+    options = [str(GPG), *PUBLIC_GPG_OPTIONS]
     options += ["--homedir", _gpg_path(homedir)]
     result = _run(options + ["--status-fd", "1", "--verify", _gpg_path(signature), _gpg_path(path)], cwd=signature.parent)
     valid = [line.split() for line in result.decode("utf-8", errors="replace").splitlines() if line.startswith("[GNUPG:] VALIDSIG ")]
@@ -66,8 +70,13 @@ def _signature(path: Path, signature: Path, *, signer: str, homedir: Path | None
 
 
 def _gpg_path(path: Path) -> str:
-    # Git-for-Windows GPG is MSYS: backslash path operands may be interpreted
-    # as relative keyblock names. Forward-slash absolute paths retain identity.
+    # The fixed Git-for-Windows GPG is MSYS. Even D:/... is relative to its
+    # keybox filename builder; use /d/... and never resolve unsupported roots.
+    if os.name == "nt":
+        if not path.is_absolute() or re.fullmatch(r"[A-Za-z]:", path.drive) is None:
+            raise contract.PreparationError("MSYS_LOCAL_DRIVE_PATH_REQUIRED")
+        resolved = path.resolve().as_posix()
+        return "/" + resolved[0].lower() + resolved[2:]
     return path.resolve().as_posix()
 
 
@@ -179,7 +188,7 @@ def verify_tool_bundle(bundle: Path, new_directory: Path, *, ops_root: Path = OP
         paths[key] = snapshot
     keyring = new_directory / "verification-keyring"
     keyring.mkdir(mode=0o777 if os.name == "nt" else 0o700)
-    _run([str(GPG), "--batch", "--no-options", "--homedir", _gpg_path(keyring), "--import", _gpg_path(paths["key"])], cwd=new_directory)
+    _run([str(GPG), *PUBLIC_GPG_OPTIONS, "--homedir", _gpg_path(keyring), "--import", _gpg_path(paths["key"])], cwd=new_directory)
     _signature(paths["checksums"], paths["signature"], signer=tool["maintainer_fingerprint"], homedir=keyring)
     lines = paths["checksums"].read_text(encoding="ascii").splitlines()
     expected_line = tool["archive_sha256"] + "  " + tool["archive_name"]

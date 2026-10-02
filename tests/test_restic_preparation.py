@@ -140,16 +140,26 @@ class NativeToolContractTests(unittest.TestCase):
     def test_signature_matches_exact_primary_maintainer_not_any_valid_key(self):
         fields = "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER
         with patch.object(preparation, "_run", return_value=fields.encode()), patch.object(preparation, "_public_verification_home"):
-            preparation._signature(Path("fixture"), Path("signature"), signer=contract.SIGNER, homedir=Path("isolated-public-home"))
+            preparation._signature(Path("fixture").resolve(), Path("signature").resolve(), signer=contract.SIGNER, homedir=Path("isolated-public-home").resolve())
             with self.assertRaisesRegex(contract.PreparationError, "SIGNATURE_IDENTITY_REJECTED"):
-                preparation._signature(Path("fixture"), Path("signature"), signer="B" * 40, homedir=Path("isolated-public-home"))
+                preparation._signature(Path("fixture").resolve(), Path("signature").resolve(), signer="B" * 40, homedir=Path("isolated-public-home").resolve())
 
     def test_signature_without_explicit_home_never_uses_ambient_key_store(self):
         with patch.object(preparation, "_run") as run, self.assertRaisesRegex(contract.PreparationError, "EXPLICIT_PUBLIC_VERIFICATION_HOME_REQUIRED"):
             preparation._signature(Path("fixture"), Path("signature"), signer=contract.SIGNER)
         run.assert_not_called()
 
-    def test_gpg_signature_operands_use_absolute_forward_slashes_and_keep_spaces(self):
+    def test_public_gpg_verification_cannot_start_agent_dirmngr_or_retrieve_keys(self):
+        expected = ("--batch", "--no-options", "--no-autostart", "--disable-dirmngr", "--no-auto-key-retrieve", "--no-auto-check-trustdb")
+        self.assertEqual(preparation.PUBLIC_GPG_OPTIONS, expected)
+        valid = ("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER).encode()
+        with patch.object(preparation, "_public_verification_home"), patch.object(preparation, "_run", return_value=valid) as run:
+            preparation._signature(Path("payload").resolve(), Path("signature").resolve(), signer=contract.SIGNER, homedir=Path("public-home").resolve())
+        self.assertEqual(run.call_args.args[0][1:7], list(expected))
+        self.assertIn("--status-fd", run.call_args.args[0])
+        self.assertIn("--verify", run.call_args.args[0])
+
+    def test_gpg_signature_operands_use_absolute_msys_paths_and_keep_spaces(self):
         fields = "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER
         with tempfile.TemporaryDirectory(prefix="kairos gpg ") as temporary, patch.object(preparation, "_private_acl"):
             root = Path(temporary).resolve()
@@ -160,9 +170,24 @@ class NativeToolContractTests(unittest.TestCase):
             with patch.object(preparation, "OPS_ROOT", root), patch.object(preparation, "_run", return_value=fields.encode()) as run:
                 preparation._signature(payload, signature, signer=contract.SIGNER, homedir=home)
             arguments = run.call_args.args[0]
-            self.assertEqual(arguments[arguments.index("--homedir") + 1], home.as_posix())
-            self.assertEqual(arguments[-2:], [signature.as_posix(), payload.as_posix()])
+            self.assertEqual(arguments[arguments.index("--homedir") + 1], preparation._gpg_path(home))
+            self.assertEqual(arguments[-2:], [preparation._gpg_path(signature), preparation._gpg_path(payload)])
             self.assertTrue(all("\\" not in argument for argument in arguments[arguments.index("--homedir") + 1:]))
+
+    @unittest.skipUnless(os.name == "nt", "fixed Git/MSYS path mapping is Windows-only")
+    def test_gpg_drive_paths_are_msys_absolute_before_native_execution(self):
+        self.assertEqual(preparation._gpg_path(Path("D:/Kairos/public home/file.asc")), "/d/Kairos/public home/file.asc")
+        self.assertEqual(preparation._gpg_path(Path("C:/Kairos/public home/file.asc")), "/c/Kairos/public home/file.asc")
+        for operand in ("\\\\server\\share\\file.asc", "//server/share/file.asc", "\\\\?\\D:\\Kairos\\file.asc", "D:relative.asc", "relative.asc", "\\rooted.asc"):
+            with self.subTest(operand=operand), patch.object(preparation, "_run") as run, self.assertRaisesRegex(contract.PreparationError, "MSYS_LOCAL_DRIVE_PATH_REQUIRED"):
+                preparation._gpg_path(Path(operand))
+            run.assert_not_called()
+
+    def test_non_windows_gpg_operand_keeps_normal_absolute_posix_behavior(self):
+        operand = Path("ordinary relative fixture.asc")
+        expected = operand.resolve().as_posix()
+        with patch.object(preparation.os, "name", "posix"):
+            self.assertEqual(preparation._gpg_path(operand), expected)
 
     def test_existing_private_material_is_rejected_by_metadata_without_opening_it(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(preparation, "_private_acl"):
@@ -186,7 +211,7 @@ class NativeToolContractTests(unittest.TestCase):
             with patch.object(preparation, "OPS_ROOT", root), patch.object(Path, "read_bytes", side_effect=AssertionError("private value must not be opened")), self.assertRaisesRegex(contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"):
                 preparation._public_verification_home(home)
 
-    def test_gpg_bundle_import_is_isolated_forward_slash_absolute_and_hash_bound(self):
+    def test_gpg_bundle_import_is_isolated_msys_absolute_and_hash_bound(self):
         with tempfile.TemporaryDirectory(prefix="kairos gpg ") as temporary, patch.object(preparation, "_private_acl"):
             root = Path(temporary).resolve()
             bundle = root / "public bundle"
@@ -210,8 +235,9 @@ class NativeToolContractTests(unittest.TestCase):
             with patch.object(contract, "lock", return_value=tool), patch.object(preparation, "OPS_ROOT", root), patch.object(preparation, "_run", side_effect=run) as commands:
                 receipt = preparation.verify_tool_bundle(bundle, work, ops_root=root)
             imported = commands.call_args_list[0].args[0]
-            self.assertEqual(imported[imported.index("--homedir") + 1], (work / "verification-keyring").as_posix())
-            self.assertEqual(imported[-1], (work / "signed-inputs/maintainer.asc").as_posix())
+            self.assertEqual(imported[1:7], list(preparation.PUBLIC_GPG_OPTIONS))
+            self.assertEqual(imported[imported.index("--homedir") + 1], preparation._gpg_path(work / "verification-keyring"))
+            self.assertEqual(imported[-1], preparation._gpg_path(work / "signed-inputs/maintainer.asc"))
             self.assertTrue(receipt["maintainer_signature_verified"])
 
     def test_tool_error_is_sanitized_bounded_no_proxy_or_ambient_provider_env(self):

@@ -52,10 +52,20 @@ and allows exactly one named executable ZIP entry of at most 32MiB. A caller dic
 claiming `maintainer_signature_verified=true` cannot authorize execution. Every
 fixture independently re-verifies the signed bundle; it cannot accept an arbitrary
 executable/hash or arbitrary commands. No private GPG/API keys are read.
-Git-for-Windows GPG receives resolved absolute forward-slash path operands,
-including its exclusively new public keyring; this avoids MSYS interpreting
-backslash keyring paths as relative paths. It does not relax signature or
-workspace validation.
+The fixed Git-for-Windows GPG receives resolved local MSYS absolute operands:
+`D:/...` becomes `/d/...` (and `C:/...` becomes `/c/...`), including its
+exclusively new public keyring. Both backslashes and native `D:/...` keyring
+operands are otherwise treated as relative by its keybox filename builder.
+UNC, device and unsupported/relative roots are rejected before GPG starts;
+non-Windows GPG retains normal absolute POSIX paths. Workspace containment,
+private public-only keyring checks and signature identity remain mandatory.
+All imports and verifications use `--no-autostart`, `--disable-dirmngr`,
+`--no-auto-key-retrieve` and `--no-auto-check-trustdb`, with `--no-options`:
+they never launch an agent/dirmngr or fetch keys, and never restore an owner
+profile or provider environment. These options are documented by
+[GnuPG](https://www.gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html).
+A public `IMPORT_OK` followed by a nonzero process exit is still a failure;
+no partial imported-key status can replace successful exit/signature checks.
 
 ## Optional fixed local synthetic fixture
 
