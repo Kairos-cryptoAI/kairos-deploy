@@ -46,7 +46,7 @@ def inspection() -> dict:
 class ControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="paper-readonly-unit-")
-        self.directory = Path(self.temporary.name)
+        self.directory = Path(self.temporary.name).resolve(strict=True)
         self.dump = self.directory / "kairos-paper-gate-20261002T170608Z.dump"
         self.dump.write_bytes(b"synthetic immutable backup")
         self.manifest_path = self.directory / (self.dump.name + ".json")
@@ -339,9 +339,16 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         connection.fetchval = mock.AsyncMock(return_value="kairos")
         connection.execute = mock.AsyncMock()
         connection.close = mock.AsyncMock()
-        connection.transaction.return_value = mock.MagicMock()
-        connection.transaction.return_value.__aenter__ = mock.AsyncMock()
-        connection.transaction.return_value.__aexit__ = mock.AsyncMock()
+        transaction = mock.MagicMock()
+        transaction.__aenter__ = mock.AsyncMock()
+        transaction.__aexit__ = mock.AsyncMock()
+        transaction_calls = []
+        # Use asyncpg's real public signature rather than a permissive Mock:
+        # the unsupported read_only keyword must fail this test immediately.
+        def create_transaction(*, isolation, readonly):
+            transaction_calls.append((isolation, readonly))
+            return transaction
+        connection.transaction = create_transaction
         driver = types.SimpleNamespace(connect=mock.AsyncMock(return_value=connection))
         guard = types.SimpleNamespace(connections=1, forbidden=0)
         context = mock.MagicMock()
@@ -350,7 +357,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict(sys.modules, {"asyncpg": driver}), mock.patch.object(worker, "_package"), mock.patch.object(worker, "_dsn", return_value="synthetic internal only"), mock.patch.object(worker, "LoopbackOnly", return_value=context), mock.patch.object(worker, "_snapshot", return_value={"history": {}, "target_role": {}}):
             result = await worker._run(config)
         self.assertEqual(driver.connect.call_args.kwargs["server_settings"]["default_transaction_read_only"], "on")
-        connection.transaction.assert_called_once_with(isolation="repeatable_read", read_only=True)
+        self.assertEqual(transaction_calls, [("repeatable_read", True)])
         self.assertEqual(connection.execute.call_count, 4)
         self.assertTrue(all(call.args[0].startswith("SET LOCAL ") for call in connection.execute.call_args_list))
         connection.close.assert_awaited_once()

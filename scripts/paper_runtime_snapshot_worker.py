@@ -201,7 +201,7 @@ async def _run(config: dict[str, Any]) -> dict[str, Any]:
         try:
             if await connection.fetchval("SELECT current_database()") != config["physical_database"]:
                 raise SnapshotError("connected database differs")
-            async with connection.transaction(isolation="repeatable_read", read_only=True):
+            async with connection.transaction(isolation="repeatable_read", readonly=True):
                 await connection.execute("SET LOCAL statement_timeout='120s'")
                 await connection.execute("SET LOCAL lock_timeout='5s'")
                 await connection.execute("SET LOCAL work_mem='8MB'")
