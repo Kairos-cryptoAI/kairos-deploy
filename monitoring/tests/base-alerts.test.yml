@@ -1,0 +1,534 @@
+# Deterministic offline rule evaluation; no venue, database, or notification receiver.
+rule_files:
+  - "../alerts.base.yml"
+evaluation_interval: "15s"
+tests:
+  -
+    name: "healthy explicit boundaries never fire"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+    alert_rule_test:
+      -
+        eval_time: "15m"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosOutboxBacklog"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosDeadLetters"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosInboxFailures"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosExpiredInboxLease"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosUnresolvedExecutionMutation"
+        exp_alerts:
+          []
+  -
+    name: "availability fails only after 30s and resolves immediately"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+    alert_rule_test:
+      -
+        eval_time: "15s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "45s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "45s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+      -
+        eval_time: "45s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "missing fixed target is unavailable not healthy"
+    interval: "15s"
+    input_series:
+      []
+    alert_rule_test:
+      -
+        eval_time: "15s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "15s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "15s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+  -
+    name: "stale samples start a fresh deadline and recover"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+    alert_rule_test:
+      -
+        eval_time: "45s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "90s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "45s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "90s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "45s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+      -
+        eval_time: "90s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "one failed scrape cannot satisfy the 30s deadline"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+    alert_rule_test:
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "another instance cannot mask missing authoritative exporter"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+    alert_rule_test:
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+  -
+    name: "durable failures and backlog respect existing deadlines"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60 61x20"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+    alert_rule_test:
+      -
+        eval_time: "45s"
+        alertname: "KairosDeadLetters"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosDeadLetters"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos outbox contains dead-lettered messages"
+      -
+        eval_time: "45s"
+        alertname: "KairosInboxFailures"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosInboxFailures"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable inbox contains failed messages"
+      -
+        eval_time: "45s"
+        alertname: "KairosExpiredInboxLease"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosExpiredInboxLease"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos inbox contains an expired processing lease requiring recovery"
+      -
+        eval_time: "45s"
+        alertname: "KairosUnresolvedExecutionMutation"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosUnresolvedExecutionMutation"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "An exchange mutation requires reconciliation"
+      -
+        eval_time: "2m"
+        alertname: "KairosOutboxBacklog"
+        exp_alerts:
+          []
+      -
+        eval_time: "2m15s"
+        alertname: "KairosOutboxBacklog"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "Kairos durable outbox is not draining"
+  -
+    name: "empty outbox never alarms only because an age value is old"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "120x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+    alert_rule_test:
+      -
+        eval_time: "3m"
+        alertname: "KairosOutboxBacklog"
+        exp_alerts:
+          []

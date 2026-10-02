@@ -2,21 +2,21 @@ groups:
   - name: kairos-durable-runtime
     rules:
       - alert: KairosDurableExporterUnavailable
-        expr: up{job="kairos-durable-runtime"} != 1
+        expr: up{job="kairos-durable-runtime", instance="ops-exporter:9108"} != 1 or absent(up{job="kairos-durable-runtime", instance="ops-exporter:9108"})
         for: 30s
         labels:
           severity: critical
         annotations:
           summary: Kairos durable runtime metrics exporter is unavailable
       - alert: KairosPersistenceUnavailable
-        expr: kairos_persistence_up != 1
+        expr: kairos_persistence_up{job="kairos-durable-runtime", instance="ops-exporter:9108"} != 1 or absent(kairos_persistence_up{job="kairos-durable-runtime", instance="ops-exporter:9108"})
         for: 30s
         labels:
           severity: critical
         annotations:
           summary: Kairos TimescaleDB is unavailable to the durable runtime exporter
       - alert: KairosRedisUnavailable
-        expr: kairos_redis_up != 1
+        expr: kairos_redis_up{job="kairos-durable-runtime", instance="ops-exporter:9108"} != 1 or absent(kairos_redis_up{job="kairos-durable-runtime", instance="ops-exporter:9108"})
         for: 30s
         labels:
           severity: critical

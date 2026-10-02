@@ -1,0 +1,1440 @@
+# Deterministic offline rule evaluation; no venue, database, or notification receiver.
+rule_files:
+  - "../alerts.yml"
+evaluation_interval: "15s"
+tests:
+  -
+    name: "healthy explicit boundaries never fire"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.999x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "90x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14400x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.99x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "30x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+    alert_rule_test:
+      -
+        eval_time: "15m"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosOutboxBacklog"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosDeadLetters"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosInboxFailures"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosExpiredInboxLease"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosUnresolvedExecutionMutation"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosClosedBarGap"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosClosedBarCoverageIncomplete"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosClosedBarStreamStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosVenueAvailabilityBelowGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosVenueMeasurementStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosVenueEconomicsOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosVenueTimingOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosPaperExposureUnprotected"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosPaperRecoveryBlocked"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosPaperAccountSnapshotStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosExecutionShortfallOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosQualificationBudgetExceeded"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosExecutionRuntimeHealthStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosEvedexAuthNearExpiry"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosEvedexMutationBudgetUnsafe"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosEvedexCompensationReserveExhausted"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosEvedexVenueRateLimitExhausted"
+        exp_alerts:
+          []
+  -
+    name: "availability fails only after 30s and resolves immediately"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0 0 0 1x6"
+    alert_rule_test:
+      -
+        eval_time: "15s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "45s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "45s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+      -
+        eval_time: "45s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "missing fixed target is unavailable not healthy"
+    interval: "15s"
+    input_series:
+      []
+    alert_rule_test:
+      -
+        eval_time: "15s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "15s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "15s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+  -
+    name: "stale samples start a fresh deadline and recover"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 stale _ _ _ 1x4"
+    alert_rule_test:
+      -
+        eval_time: "45s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "90s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "45s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "90s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "45s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+      -
+        eval_time: "90s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "one failed scrape cannot satisfy the 30s deadline"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 0 1x6"
+    alert_rule_test:
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          []
+  -
+    name: "another instance cannot mask missing authoritative exporter"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"other-exporter:9108\"}"
+        values: "1x60"
+    alert_rule_test:
+      -
+        eval_time: "30s"
+        alertname: "KairosDurableExporterUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos durable runtime metrics exporter is unavailable"
+      -
+        eval_time: "30s"
+        alertname: "KairosPersistenceUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos TimescaleDB is unavailable to the durable runtime exporter"
+      -
+        eval_time: "30s"
+        alertname: "KairosRedisUnavailable"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Kairos Redis is unavailable to the durable runtime exporter"
+  -
+    name: "unprotected exposure alarms at 15s and clears when flat"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1 1 0x8"
+    alert_rule_test:
+      -
+        eval_time: "0s"
+        alertname: "KairosPaperExposureUnprotected"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosPaperExposureUnprotected"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "A filled PAPER position has no reconciled protective stop"
+      -
+        eval_time: "30s"
+        alertname: "KairosPaperExposureUnprotected"
+        exp_alerts:
+          []
+  -
+    name: "integrity account budget and execution staleness deadlines"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.999x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "90x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14400x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.99x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15.01x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "61x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "30x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+    alert_rule_test:
+      -
+        eval_time: "45s"
+        alertname: "KairosClosedBarGap"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosClosedBarGap"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "A persisted Binance one-minute stream contains a gap or reorder boundary"
+      -
+        eval_time: "45s"
+        alertname: "KairosPaperAccountSnapshotStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosPaperAccountSnapshotStale"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "PAPER readiness is not backed by a fresh reconciled account snapshot"
+      -
+        eval_time: "45s"
+        alertname: "KairosQualificationBudgetExceeded"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosQualificationBudgetExceeded"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Durable API qualification spend exceeded the hard 15 USD cap"
+      -
+        eval_time: "45s"
+        alertname: "KairosExecutionRuntimeHealthStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "60s"
+        alertname: "KairosExecutionRuntimeHealthStale"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "Durable EVEDEX execution health is missing or stale"
+  -
+    name: "freshness gates fire at two minutes"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.999x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "91x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14400x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.99x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "61x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "30x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+    alert_rule_test:
+      -
+        eval_time: "1m45s"
+        alertname: "KairosClosedBarStreamStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "2m"
+        alertname: "KairosClosedBarStreamStale"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "At least one PAPER Binance closed-bar stream is stale"
+      -
+        eval_time: "1m45s"
+        alertname: "KairosVenueMeasurementStale"
+        exp_alerts:
+          []
+      -
+        eval_time: "2m"
+        alertname: "KairosVenueMeasurementStale"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "No fresh EVEDEX DEV venue-quality measurement is available"
+  -
+    name: "five minute gates preserve economics timing recovery and TCA policy"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.999x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "90x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14400x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.99x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25.1x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5001x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25.1x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "30x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+    alert_rule_test:
+      -
+        eval_time: "4m45s"
+        alertname: "KairosVenueEconomicsOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "5m"
+        alertname: "KairosVenueEconomicsOutsideGate"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "EVEDEX DEV basis, spread, or executable slippage exceeds 25 bps"
+      -
+        eval_time: "4m45s"
+        alertname: "KairosVenueTimingOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "5m"
+        alertname: "KairosVenueTimingOutsideGate"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "EVEDEX DEV book freshness, timestamp skew, or latency exceeds the PAPER gate"
+      -
+        eval_time: "4m45s"
+        alertname: "KairosPaperRecoveryBlocked"
+        exp_alerts:
+          []
+      -
+        eval_time: "5m"
+        alertname: "KairosPaperRecoveryBlocked"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "PAPER entries remain blocked because authoritative recovery is incomplete"
+      -
+        eval_time: "4m45s"
+        alertname: "KairosExecutionShortfallOutsideGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "5m"
+        alertname: "KairosExecutionShortfallOutsideGate"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "PAPER entry execution shortfall exceeds 25 bps at p95"
+  -
+    name: "incomplete observation windows remain warnings only after fifteen minutes"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.998x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "90x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14399x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.989x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "30x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "-1x60"
+    alert_rule_test:
+      -
+        eval_time: "14m45s"
+        alertname: "KairosClosedBarCoverageIncomplete"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosClosedBarCoverageIncomplete"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "The PAPER 24-hour closed-bar qualification window is incomplete"
+      -
+        eval_time: "14m45s"
+        alertname: "KairosVenueAvailabilityBelowGate"
+        exp_alerts:
+          []
+      -
+        eval_time: "15m"
+        alertname: "KairosVenueAvailabilityBelowGate"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "warning"
+            exp_annotations:
+              summary: "EVEDEX DEV read-only availability is below the 99 percent gate"
+  -
+    name: "authentication mutation and compensation reserve fail at fifteen seconds"
+    interval: "15s"
+    input_series:
+      -
+        series: "up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_persistence_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_redis_up{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_outbox_pending{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_oldest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_outbox_dead_lettered_total{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_inbox_processing_expired{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_prepared{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_execution_effects_failed{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_gaps_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_closed_bar_symbols_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5x60"
+      -
+        series: "kairos_closed_bar_minimum_coverage_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.999x60"
+      -
+        series: "kairos_closed_bar_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "90x60"
+      -
+        series: "kairos_venue_poll_expected_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "14400x60"
+      -
+        series: "kairos_venue_availability_ratio_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0.99x60"
+      -
+        series: "kairos_venue_measurements_24h{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_venue_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_venue_p95_abs_basis_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_spread_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_p95_slippage_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_venue_max_book_age_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_venue_max_timestamp_skew_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "2000x60"
+      -
+        series: "kairos_venue_p95_latency_ms{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "5000x60"
+      -
+        series: "kairos_paper_unprotected_trades{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_recovery_blocked{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+      -
+        series: "kairos_paper_account_latest_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_execution_p95_shortfall_bps{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "25x60"
+      -
+        series: "kairos_api_spend_month_usd{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "15x60"
+      -
+        series: "kairos_execution_runtime_health_age_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_auth_expires_in_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "59x60"
+      -
+        series: "kairos_evedex_local_mutation_capacity{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "29x60"
+      -
+        series: "kairos_evedex_local_mutation_compensation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "4x60"
+      -
+        series: "kairos_evedex_local_mutation_window_seconds{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "60x60"
+      -
+        series: "kairos_evedex_local_mutation_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "3x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_observable{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "1x60"
+      -
+        series: "kairos_evedex_venue_rate_limit_reserve{job=\"kairos-durable-runtime\",instance=\"ops-exporter:9108\"}"
+        values: "0x60"
+    alert_rule_test:
+      -
+        eval_time: "0s"
+        alertname: "KairosEvedexAuthNearExpiry"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosEvedexAuthNearExpiry"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "EVEDEX DEV authentication is unknown, expired, or near expiry"
+      -
+        eval_time: "0s"
+        alertname: "KairosEvedexMutationBudgetUnsafe"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosEvedexMutationBudgetUnsafe"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "EVEDEX mutation budget no longer preserves the fixed safety boundary"
+      -
+        eval_time: "0s"
+        alertname: "KairosEvedexCompensationReserveExhausted"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosEvedexCompensationReserveExhausted"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "EVEDEX cancel and emergency-close mutation reserve is exhausted"
+      -
+        eval_time: "0s"
+        alertname: "KairosEvedexVenueRateLimitExhausted"
+        exp_alerts:
+          []
+      -
+        eval_time: "15s"
+        alertname: "KairosEvedexVenueRateLimitExhausted"
+        exp_alerts:
+          -
+            exp_labels:
+              job: "kairos-durable-runtime"
+              instance: "ops-exporter:9108"
+              severity: "critical"
+            exp_annotations:
+              summary: "EVEDEX reported no remaining venue-side request capacity"
