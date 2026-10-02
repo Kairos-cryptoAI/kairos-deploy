@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -261,6 +264,19 @@ kairos_outbox_oldest_age_seconds 0
 
 
 class PowerShellScriptTests(unittest.TestCase):
+    def test_backup_owner_manifest_preserves_singleton_array(self) -> None:
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if shell is None:
+            self.skipTest("PowerShell is not installed")
+        backup = (Path(__file__).resolve().parents[1] / "scripts" / "Backup-Kairos.ps1").read_text(encoding="utf-8")
+        assignment = next(line.strip() for line in backup.splitlines() if line.strip().startswith("timescaledb_bgw_owners ="))
+        for owners in (("kairos",), ("kairos", "runtime_owner")):
+            with self.subTest(owners=owners):
+                values = ",".join("'" + owner + "'" for owner in owners)
+                command = f"$backgroundJobOwnersAfter = {values}; [ordered]@{{ {assignment} }} | ConvertTo-Json -Compress"
+                result = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", command], capture_output=True, text=True, check=True, timeout=20)
+                self.assertEqual(json.loads(result.stdout)["timescaledb_bgw_owners"], list(owners))
+
     def test_backup_and_recovery_are_scoped_and_do_not_overwrite_primary_database(
         self,
     ) -> None:
@@ -290,7 +306,7 @@ class PowerShellScriptTests(unittest.TestCase):
         self.assertIn('$name = "$ComposeProject-$stamp.dump"', backup)
         self.assertIn("checkpoints = $checkpointsAfter", backup)
         self.assertIn("Get-TimescaleBackgroundJobOwners", backup)
-        self.assertIn("timescaledb_bgw_owners = $backgroundJobOwnersAfter", backup)
+        self.assertIn("timescaledb_bgw_owners = @($backgroundJobOwnersAfter)", backup)
         self.assertIn("TimescaleDB background-job owner provenance changed during backup", backup)
         self.assertIn("Database changed during backup checkpoint", backup)
         self.assertIn("Refusing to qualify an empty backup", backup)

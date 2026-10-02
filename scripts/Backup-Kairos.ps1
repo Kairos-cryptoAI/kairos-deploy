@@ -149,7 +149,9 @@ $manifest = [ordered]@{
     bytes = $item.Length
     sha256 = Get-FileSha256 -Path $item.FullName
     checkpoints = $checkpointsAfter
-    timescaledb_bgw_owners = $backgroundJobOwnersAfter
+    # PowerShell unwraps a single returned owner; the manifest contract always
+    # requires an array so a one-owner backup can pass strict clone validation.
+    timescaledb_bgw_owners = @($backgroundJobOwnersAfter)
 }
 $manifestPath = "$localDump.json"
 $manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8
