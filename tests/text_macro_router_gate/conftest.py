@@ -194,6 +194,14 @@ def pytest_runtest_makereport(item, call):
             "PaperInputDeadlineExceeded",
             "PaperInputUnavailable",
             "CommittedAckLoss",
+            "PydanticSerializationError",
+            "ExceptionGroup",
+            "BaseExceptionGroup",
+            "ResponseError",
+            "PermissionError",
+            "OSError",
+            "Failed",
+            "CancelledError",
         }
         exception = call.excinfo.type.__name__ if call.excinfo else "UnknownFailure"
         exception = exception if exception in safe_classes else "OtherFailure"
@@ -220,7 +228,17 @@ def pytest_runtest_makereport(item, call):
         # exception text, locals, source lines, paths or provider payloads.
         while trace is not None:
             filename = Path(trace.tb_frame.f_code.co_filename).name
-            if filename in {"test_native_composition.py", "native_policy.py", "conftest.py"}:
+            if filename in {
+                "test_native_composition.py",
+                "native_policy.py",
+                "conftest.py",
+                "candidate_service.py",
+                "service.py",
+                "runtime.py",
+                "repository.py",
+                "redis_streams.py",
+                "base.py",
+            }:
                 locations.append(f"{filename}:{trace.tb_lineno}")
             trace = trace.tb_next
         location = ",".join(locations[-4:]) or "public-location-unavailable"
