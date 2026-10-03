@@ -10,6 +10,7 @@ import re
 import socket
 from pathlib import Path
 
+import asyncpg
 import pytest
 import pytest_asyncio
 
@@ -205,6 +206,15 @@ def pytest_runtest_makereport(item, call):
         }
         exception = call.excinfo.type.__name__ if call.excinfo else "UnknownFailure"
         exception = exception if exception in safe_classes else "OtherFailure"
+        sqlstate = "none"
+        if call.excinfo and isinstance(call.excinfo.value, asyncpg.PostgresError):
+            # SQLSTATE is a public five-character protocol category, not an
+            # exception message, query, argument, identifier or connection URL.
+            value = call.excinfo.value.sqlstate
+            if isinstance(value, str) and re.fullmatch(r"[0-9A-Z]{5}", value):
+                sqlstate = value
+            if exception == "OtherFailure":
+                exception = "PostgresError"
         phase = getattr(item, "_composition_phase", "admission")
         phases = {
             "admission",
@@ -242,4 +252,7 @@ def pytest_runtest_makereport(item, call):
                 locations.append(f"{filename}:{trace.tb_lineno}")
             trace = trace.tb_next
         location = ",".join(locations[-4:]) or "public-location-unavailable"
-        report.longrepr = f"NATIVE_COMPOSITION_FAILED phase={phase} class={exception} location={location}"
+        report.longrepr = (
+            f"NATIVE_COMPOSITION_FAILED phase={phase} class={exception} "
+            f"sqlstate={sqlstate} location={location}"
+        )
