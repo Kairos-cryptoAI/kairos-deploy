@@ -1,0 +1,88 @@
+# Dedicated BuildKit resource/cancellation qualification
+
+This opt-in engineering controller does not change the default builder, Docker
+context, existing Compose files, source locks, shared BuildKit caches or services.
+Its default is `PLAN_ONLY_NO_NATIVE_CALLS`. No prior Docker gate receipt is
+reinterpreted: prior `BUILD_RESOURCE_AND_SERVER_CANCELLATION_UNPROVEN` remains
+historical evidence. A new synthetic receipt is not production build qualification,
+runtime recovery proof, strategy evidence or trading authority.
+
+## Dependency and isolation
+
+The candidate is pinned to the official `moby/buildkit:v0.32.2-rootless`
+Linux/amd64 manifest digest
+`sha256:60d1f642e29dc938bd6c109ba5500849fccf41921927c5339788b8227f57feb9`.
+Official Hub metadata maps it from the release's multi-platform index
+`sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b`.
+This matches the release of the locally observed rootful v0.32.2 image; it is a
+separate dependency, not permission to substitute the rootful/default builder.
+Local exact image presence and independently verified Docker image ID are
+required before a reviewed native attempt. The controller never pulls images.
+
+The only instance is a fresh UUID-labelled rootless server: network `none`, no
+ports, host mounts/socket, devices or privileged mode; read-only root filesystem;
+1 CPU, 1 GiB RAM, zero swap, 128 PIDs; disposable tmpfs data 512 MiB/tmp 128 MiB plus
+two 16 MiB runtime directories. Rootless OCI uses the native snapshotter, parallelism
+one and **process sandbox enabled**. The three explicitly reviewed rootless
+exceptions are seccomp/AppArmor/systempaths unconfined. A platform which requires
+privileged operation, no-process-sandbox, extra devices, sysctl changes or relaxed
+resource caps is rejected; no automatic fallback occurs.
+
+Official interfaces: [rootless v0.32.2](https://github.com/moby/buildkit/blob/v0.32.2/docs/rootless.md),
+[daemon configuration](https://github.com/moby/buildkit/blob/v0.32.2/docs/buildkitd.toml.md),
+[built-in Dockerfile frontend](https://github.com/moby/buildkit/tree/v0.32.2#exploring-dockerfiles),
+[Docker container resource limits](https://docs.docker.com/engine/containers/resource_constraints/).
+The rootless documentation warns against no-process-sandbox because ExecOp
+descendants may not terminate; that shortcut is intentionally excluded here.
+
+## Proof and fail-closed handling
+
+All inputs are synthetic and generated inside the owned server. Its own public
+BusyBox/musl files are copied into a tiny scratch context; no registry/base image,
+Dockerfile frontend, provider, credentials or host project data is fetched. A
+deterministic tiny build must match the fixed payload hash. A separate exit37
+fault must produce its specific marker and exit37 failure, not merely any CLI
+error. A real two-process spin ExecOp is then observed by PID+start ticks,
+namespace and bounded cgroup ancestry as viewed by the server observer. OCI
+creates a distinct child cgroup namespace; its inode is recorded, not wrongly
+equated to the daemon inode. Exact old PID/start identities must disappear as
+well as argv markers. Kernel `cpu.max`, `memory.max`,
+`memory.swap.max`, `pids.max` must independently match Docker HostConfig; actual
+throttling must increase under spin load.
+
+The exact client PID/start-tick pair and fixed build arguments are checked before
+it is terminated **inside the Linux server**, not by a Windows timeout.
+Acceptance requires all marked server workers gone, acknowledged nonzero client
+exit, daemon still alive and a fresh uncached successful build after cancellation.
+Finally the exact owned server must stop with PID zero, be removed, and unrelated
+container/network/volume/image inventories must match the original snapshot. Concurrent
+unrelated resource changes fail the proof; they are not cleaned up by this tool.
+
+Create-only intent/ack/receipt files, exclusive workspace creation, an exclusive
+lease and exact reviewed source binding prevent duplicate launches or silent
+replacement. A workspace collision cannot append a receipt to the old workspace.
+An unknown creation, lost server cleanup or changed ownership retains its lease.
+Failure evidence is always retained; a failed work phase may release the lease
+only after exact positive owned cleanup and unchanged inventories are proved.
+The tool never automatically retries or prunes. Windows CLI
+descendants use the previously reviewed hash-bound suspend/assign/resume JobObject
+helper (fixed SHA 601d8c07…); this CLI containment is recorded separately and is
+**not** accepted as Linux BuildKit CPU/cancellation proof. Work deadline 160s and
+shared cleanup deadline 20s are inside a 180s native window; a reviewed outer Windows
+launcher must additionally enforce the whole controller process lifetime and
+independent cleanup handling before native execution is authorized.
+
+## Operation boundary
+
+Offline contracts: `python -m unittest tests.test_buildkit_resource_gate`.
+Plan: `python scripts/buildkit_resource_gate.py` (no files/native calls).
+An explicit native switch also requires fixed confirmation, complete reviewed
+controller/deploy hashes and exact pre-existing image identity; root must review
+its launcher, image acquisition and single attempt first. Do not invoke it as a
+normal CI dependency or grant an inherited/shared builder workload to it.
+
+Until an actual accepted new receipt exists, server qualification is `UNPROVEN`.
+Even an accepted synthetic proof leaves `production_build_qualified=false`,
+`PAPER_QUALIFIED=false`, `ALPHA_READY=false`, `LIVE_READY=false` and
+`STRATEGY_POLICY=REJECT_ALL`. Qualification of real repository builds needs a
+separate reviewed integration with this resource/cancellation boundary.
