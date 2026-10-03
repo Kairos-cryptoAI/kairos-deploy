@@ -372,6 +372,7 @@ def fixture_script(owner: str) -> str:
         "COPY --chmod=0444 payload /result\n"
     )
     cases = {
+        "inspect": rootfs,
         "success": rootfs + 'RUN ["/bin/busybox", "sh", "-c", "test -s /result"]\n',
         "fault": rootfs
         + 'RUN ["/bin/busybox", "sh", "-c", "echo KAIROS_SYNTHETIC_FAULT37; exit 37"]\n',
@@ -441,8 +442,9 @@ def fixture_script(owner: str) -> str:
 
 
 def build_arguments(case: str) -> list[str]:
-    if case not in {"success", "fault", "cancel"}:
+    if case not in {"success", "fault", "cancel", "inspect-before", "inspect-after"}:
         raise GateError("FIXED_SYNTHETIC_CASE_REQUIRED")
+    filename = "inspect" if case.startswith("inspect-") else case
     return [
         "buildctl",
         "--addr",
@@ -456,13 +458,51 @@ def build_arguments(case: str) -> list[str]:
         "--local",
         "dockerfile=" + ROOT + "/context",
         "--opt",
-        "filename=Dockerfile." + case,
+        "filename=Dockerfile." + filename,
         "--opt",
         "platform=linux/amd64",
         "--no-cache",
         "--output",
         "type=local,dest=" + ROOT + "/result-" + case,
     ]
+
+
+ROOTFS_PATHS = ("bin", "lib", "bin/busybox", "lib/ld-musl-x86_64.so.1", "result")
+
+
+def rootfs_mode_probe(case: str) -> str:
+    if case not in {"inspect-before", "inspect-after"}:
+        raise GateError("FIXED_ROOTFS_INSPECTION_REQUIRED")
+    commands = ["set -eu"]
+    for index, suffix in enumerate(ROOTFS_PATHS):
+        path = ROOT + "/result-" + case + "/" + suffix
+        commands.append("test ! -L " + path)
+        commands.append(("test -d " if index < 2 else "test -f ") + path)
+        commands.append("LC_ALL=C stat -c '%a|%u|%g' " + path)
+    return "; ".join(commands)
+
+
+def parse_rootfs_modes(value: str, *, corrected: bool) -> dict:
+    lines = value.splitlines()
+    if len(lines) != len(ROOTFS_PATHS):
+        raise GateError("SYNTHETIC_ROOTFS_MODE_PROOF_REQUIRED")
+    result = {}
+    for index, (path, line) in enumerate(zip(ROOTFS_PATHS, lines, strict=True)):
+        if (
+            re.fullmatch(
+                r"[0-7]{3}\|(?:0|[1-9][0-9]{0,9})\|(?:0|[1-9][0-9]{0,9})", line
+            )
+            is None
+        ):
+            raise GateError("SYNTHETIC_ROOTFS_MODE_PROOF_REQUIRED")
+        mode, uid, gid = line.split("|")
+        allowed = {"755"} if corrected else {"700", "755"}
+        if index >= 2:
+            allowed = {"444"} if index == 4 else {"555"}
+        if mode not in allowed or int(uid) > 2**32 - 1 or int(gid) > 2**32 - 1:
+            raise GateError("SYNTHETIC_ROOTFS_PERMISSION_CHANGED")
+        result[path] = {"mode": mode, "uid": int(uid), "gid": int(gid)}
+    return result
 
 
 def plan(image: str | None = None) -> dict:
@@ -825,6 +865,29 @@ class Controller:
         self.proofs["synthetic_binary_hashes"] = [
             line.split()[0] for line in binary_lines
         ]
+        # Inspect an exported COPY-only rootfs before any ExecOp. A file chmod
+        # does not prove that its parent directories are traversable.
+        for case in ("inspect-before", "inspect-after"):
+            if case == "inspect-after":
+                # Public synthetic context only; never the server's private
+                # cache root, tmpfs roots, credentials or host filesystem.
+                self.shell(
+                    "chmod 0755 " + ROOT + "/context/bin " + ROOT + "/context/lib"
+                )
+            self.call(
+                [
+                    "exec",
+                    "--env",
+                    "DOCKER_CONFIG=" + ROOT + "/empty-config",
+                    self.cid,
+                    *build_arguments(case),
+                ],
+                seconds=15,
+            )
+            _, modes = self.shell(rootfs_mode_probe(case))
+            self.proofs["rootfs_modes_" + case.removeprefix("inspect-")] = (
+                parse_rootfs_modes(modes, corrected=case == "inspect-after")
+            )
         self.call(
             [
                 "exec",

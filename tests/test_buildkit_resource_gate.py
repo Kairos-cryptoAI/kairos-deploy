@@ -231,14 +231,14 @@ class ContractTests(unittest.TestCase):
         self.assertIn("/bin/busybox", script)
         self.assertIn("/lib/ld-musl-x86_64.so.1", script)
         self.assertIn("FROM scratch", script)
-        self.assertEqual(script.count("COPY --chmod=0555 bin/busybox /bin/busybox"), 3)
+        self.assertEqual(script.count("COPY --chmod=0555 bin/busybox /bin/busybox"), 4)
         self.assertEqual(
             script.count(
                 "COPY --chmod=0555 lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1"
             ),
-            3,
+            4,
         )
-        self.assertEqual(script.count("COPY --chmod=0444 payload /result"), 3)
+        self.assertEqual(script.count("COPY --chmod=0444 payload /result"), 4)
         self.assertNotIn("COPY bin/busybox", script)
         self.assertNotIn("--chmod=0777", script)
         self.assertIn("exit 37", script)
@@ -665,6 +665,18 @@ class FakeNative:
             return 0, hashlib.sha256(
                 gate.PAYLOAD
             ).hexdigest() + "  " + gate.ROOT + "/result-success/result"
+        if script.startswith("set -eu; test ! -L " + gate.ROOT + "/result-inspect-"):
+            parent = "700" if "inspect-before" in script else "755"
+            if self.bad == "parent" and "inspect-after" in script:
+                parent = "700"
+            return 0, "\n".join(
+                [parent + "|1000|1000"] * 2 + ["555|1000|1000"] * 2 + ["444|1000|1000"]
+            )
+        if (
+            script
+            == "chmod 0755 " + gate.ROOT + "/context/bin " + gate.ROOT + "/context/lib"
+        ):
+            return 0, ""
         if script == gate.WORKER_PROBE:
             return (
                 0,
@@ -794,6 +806,35 @@ class LifecycleTests(unittest.TestCase):
 
     def test_cpu_counter_metadata_alone_does_not_qualify(self):
         self.assert_stage_rejected("cpu", "ACTUAL_SERVER_CPU_ENFORCEMENT_UNPROVEN")
+
+    def test_untraversable_corrected_parent_is_rejected_before_exec(self):
+        self.assert_stage_rejected("parent", "SYNTHETIC_ROOTFS_PERMISSION_CHANGED")
+
+    def test_rootfs_mode_proof_is_exact_typed_and_does_not_allow_world_writable(self):
+        good = (
+            "755|1000|1000\n755|1000|1000\n555|1000|1000\n555|1000|1000\n444|1000|1000"
+        )
+        self.assertEqual(
+            gate.parse_rootfs_modes(good, corrected=True)["bin"]["mode"], "755"
+        )
+        for bad in (
+            good + "\n755|0|0",
+            good.replace("755", "777", 1),
+            good.replace("1000", "-1", 1),
+            good.replace("555", "755", 1),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(gate.GateError):
+                gate.parse_rootfs_modes(bad, corrected=True)
+
+    def test_rootfs_inspection_is_copy_only_and_chmod_is_exact_synthetic_context(self):
+        script = gate.rootfs_mode_probe("inspect-after")
+        self.assertNotIn("/home/user", script)
+        self.assertEqual(script.count("test ! -L"), 5)
+        args = gate.build_arguments("inspect-after")
+        self.assertIn("filename=Dockerfile.inspect", args)
+        self.assertIn("type=local,dest=" + gate.ROOT + "/result-inspect-after", args)
+        with self.assertRaises(gate.GateError):
+            gate.rootfs_mode_probe("success")
 
     def test_unrelated_cli_error_is_not_synthetic_fault(self):
         self.assert_stage_rejected("fault", "SYNTHETIC_FAULT_NOT_REJECTED")

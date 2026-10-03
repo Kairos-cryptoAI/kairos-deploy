@@ -51,7 +51,14 @@ read-only. These modes do not depend on the context's restrictive umask, and do
 not relax the server's caps, rootless identity or process sandbox. Earlier
 permission-denied receipts remain failed evidence; only a new reviewed native
 attempt can qualify this corrected synthetic fixture. A
-deterministic tiny build must match the fixed payload hash. A separate exit37
+COPY-only rootfs is exported before any ExecOp and its five fixed public paths
+are inspected numerically (modes and UID/GID, rejecting symlinks and extra
+output). Only the synthetic context's `bin` and `lib` directories are changed
+to `0755`; a second COPY-only export must prove traversable parents and the
+fixed read-only file modes. The server's private roots retain `0700`. This
+records before/after facts instead of assuming that file-only chmod fixed the
+earlier permission error; an unsuccessful ExecOp still fails the gate.
+A deterministic tiny build must match the fixed payload hash. A separate exit37
 fault must produce its specific marker and exit37 failure, not merely any CLI
 error. A real two-process spin ExecOp is then observed by PID+start ticks,
 namespace and bounded cgroup ancestry as viewed by the server observer. OCI
