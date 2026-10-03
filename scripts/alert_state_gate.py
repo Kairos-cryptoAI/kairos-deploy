@@ -219,6 +219,8 @@ class Native:
         expected = self.expected[name]
         if (
             host.get("Memory") != 134_217_728
+            or type(host.get("MemorySwap")) is not int
+            or host.get("MemorySwap") != 134_217_728
             or host.get("NanoCpus") != 250_000_000
             or host.get("PidsLimit") != 64
             or host.get("Privileged") is not False
@@ -300,7 +302,8 @@ class Native:
             "entrypoint": [entrypoint],
             "command": command,
             "mounts": mounts,
-            "caps": ["CHOWN"] if init else [],
+            # Docker canonicalizes the fixed --cap-add CHOWN operand on inspect.
+            "caps": ["CAP_CHOWN"] if init else [],
             "tmpfs": {} if init else {"/tmp": "rw,noexec,nosuid,nodev,size=16m"},
         }
         save_new(
@@ -356,6 +359,8 @@ class Native:
                 "container:" + receiver_id,
                 "--read-only",
                 "--memory",
+                "128m",
+                "--memory-swap",
                 "128m",
                 "--cpus",
                 "0.25",
@@ -456,6 +461,8 @@ class Native:
                 "--read-only",
                 "--memory",
                 "128m",
+                "--memory-swap",
+                "128m",
                 "--cpus",
                 "0.25",
                 "--pids-limit",
@@ -506,6 +513,8 @@ class Native:
                 "10001:10001",
                 "--read-only",
                 "--memory",
+                "128m",
+                "--memory-swap",
                 "128m",
                 "--cpus",
                 "0.25",

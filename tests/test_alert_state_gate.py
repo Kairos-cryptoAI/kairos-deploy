@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
 import json
 import os
 import tempfile
@@ -62,6 +64,7 @@ class StateGateTests(unittest.TestCase):
             "Networks": {"none": {}},
             "Host": {
                 "Memory": 134_217_728,
+                "MemorySwap": 134_217_728,
                 "NanoCpus": 250_000_000,
                 "PidsLimit": 64,
                 "Privileged": False,
@@ -101,6 +104,8 @@ class StateGateTests(unittest.TestCase):
             ("NetworkMode", "host"),
             ("CapAdd", ["CHOWN"]),
             ("Memory", 0),
+            ("MemorySwap", 268_435_456),
+            ("MemorySwap", 134_217_728.0),
             ("PortBindings", {"9093/tcp": []}),
             ("ReadonlyRootfs", False),
             ("Tmpfs", {}),
@@ -132,6 +137,85 @@ class StateGateTests(unittest.TestCase):
                 self.assertRaises(gate.StateGateError, msg=key),
             ):
                 controller.verify("fixture")
+
+    def test_init_requires_exact_docker_canonical_capability(self) -> None:
+        controller = self.controller()
+        controller.directory = Path("D:/Kairos/runtime/synthetic-no-write")
+        command = ["-c", "synthetic initialization only"]
+        with (
+            patch.object(controller, "command", return_value="sha256:" + "b" * 64),
+            patch.object(gate, "save_new"),
+        ):
+            name = controller.register(
+                "init",
+                gate.ALERTMANAGER_IMAGE,
+                user="0:0",
+                network="none",
+                entrypoint="/bin/sh",
+                command=command,
+                mounts=[gate.volume()],
+                init=True,
+            )
+        self.assertEqual(controller.expected[name]["caps"], ["CAP_CHOWN"])
+        accepted = self.view()
+        accepted.update(
+            Name="/" + name,
+            User="0:0",
+            Entrypoint=["/bin/sh"],
+            Command=command,
+            Mounts=[
+                {
+                    "Type": "volume",
+                    "Destination": "/alertmanager",
+                    "RW": True,
+                    "Name": controller.volume,
+                }
+            ],
+        )
+        accepted["Host"].update(CapAdd=["CAP_CHOWN"], Tmpfs={})
+        with patch.object(controller, "inspect", return_value=accepted):
+            self.assertEqual(controller.verify(name), accepted)
+        for caps in (
+            None,
+            [],
+            ["CHOWN"],
+            ["CAP_SYS_ADMIN"],
+            ["CAP_CHOWN", "CAP_DAC_OVERRIDE"],
+            ["CAP_CHOWN", "CAP_CHOWN"],
+        ):
+            changed = copy.deepcopy(accepted)
+            changed["Host"]["CapAdd"] = caps
+            with (
+                patch.object(controller, "inspect", return_value=changed),
+                self.assertRaises(gate.StateGateError),
+            ):
+                controller.verify(name)
+
+    def test_all_three_create_paths_explicitly_disable_extra_swap(self) -> None:
+        # These fixed literal argv builders are the sole create call sites.
+        tree = ast.parse(inspect.getsource(gate))
+        creates = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            value = node.args[0]
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "command"
+                and isinstance(value, ast.List)
+                and isinstance(value.elts[0], ast.Constant)
+                and value.elts[0].value == "create"
+            ):
+                creates.append(value.elts)
+        self.assertEqual(len(creates), 3)
+        for elements in creates:
+            matches = [
+                index
+                for index, item in enumerate(elements)
+                if isinstance(item, ast.Constant) and item.value == "--memory-swap"
+            ]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(elements[matches[0] + 1].value, "128m")
 
     def test_no_unreviewed_bind_or_extra_mount(self) -> None:
         with self.assertRaises(gate.StateGateError):

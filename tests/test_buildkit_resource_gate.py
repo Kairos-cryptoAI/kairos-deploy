@@ -38,7 +38,9 @@ def view() -> dict:
             "NetworkMode": "none",
             "IpcMode": "private",
             "Tmpfs": gate.TMPFS,
-            "SecurityOpt": gate.SECURITY,
+            "SecurityOpt": gate.SECURITY[:2],
+            "MaskedPaths": [],
+            "ReadonlyPaths": [],
             "RestartPolicy": {"Name": "no"},
         },
         "Mounts": [],
@@ -138,6 +140,20 @@ class ContractTests(unittest.TestCase):
 
     def test_verify_exact_container(self):
         self.assertEqual(gate.verify_container(view(), OWNER, IMAGE_ID, {}), CID)
+
+    def test_systempaths_requires_exact_docker_inspector_representation(self):
+        for key, bad in (
+            ("SecurityOpt", gate.SECURITY),
+            ("SecurityOpt", gate.SECURITY[:2] + ["no-new-privileges:true"]),
+            ("MaskedPaths", ["/proc/kcore"]),
+            ("ReadonlyPaths", ["/proc/sys"]),
+            ("MaskedPaths", None),
+            ("ReadonlyPaths", None),
+        ):
+            invalid = view()
+            invalid["HostConfig"][key] = bad
+            with self.subTest(key=key, bad=bad), self.assertRaises(gate.GateError):
+                gate.verify_container(invalid, OWNER, IMAGE_ID, {})
 
     def test_host_limits_require_strict_types(self):
         for key, bad in {

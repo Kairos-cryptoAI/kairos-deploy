@@ -20,9 +20,12 @@ attempt creates fresh, UUID-labelled resources and a synthetic fixture. No
 Telegram token, real alert, provider, database, business network, host port or
 default Compose service is used. Both processes are limited to 0.25 CPU, 128 MiB
 and 64 PIDs, with read-only roots, dropped capabilities and no-new-privileges.
+All three create paths explicitly set total memory-plus-swap to the same 128 MiB
+as RAM, and require that exact integer on inspect: no extra swap is admitted.
 The receiver has network `none`; Alertmanager shares only that owned network
 namespace and reaches the receiver over loopback. The volume-init process has
-only CHOWN, is network-none, and accepts only a newly empty owned volume.
+only CHOWN (Docker's exact inspect form `CAP_CHOWN`), is network-none, and accepts
+only a newly empty owned volume. No extra or noncanonical capability is accepted.
 
 The fixture exercises one injected 503, one accepted firing notification,
 checkpoint persistence, abrupt process death, recreation with the same state,

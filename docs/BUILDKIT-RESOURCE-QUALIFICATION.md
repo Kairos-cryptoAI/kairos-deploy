@@ -24,7 +24,12 @@ ports, host mounts/socket, devices or privileged mode; read-only root filesystem
 1 CPU, 1 GiB RAM, zero swap, 128 PIDs; disposable tmpfs data 512 MiB/tmp 128 MiB plus
 two 16 MiB runtime directories. Rootless OCI uses the native snapshotter, parallelism
 one and **process sandbox enabled**. The three explicitly reviewed rootless
-exceptions are seccomp/AppArmor/systempaths unconfined. A platform which requires
+exceptions are seccomp/AppArmor/systempaths unconfined.
+Docker inspect must expose exactly the seccomp/AppArmor options and empty
+`MaskedPaths`/`ReadonlyPaths` for the consumed systempaths operand; omitted,
+nonempty or additional security settings are rejected. The create argv still
+contains all three reviewed exceptions, not a relaxed inspector wildcard.
+Any platform which requires
 privileged operation, no-process-sandbox, extra devices, sysctl changes or relaxed
 resource caps is rejected; no automatic fallback occurs.
 

@@ -199,7 +199,11 @@ def verify_container(view: dict, owner: str, image_id: str, image_labels: dict) 
         or host.get("IpcMode") not in ("private", "")
         or host.get("RestartPolicy", {}).get("Name") != "no"
         or host.get("Tmpfs") != TMPFS
-        or sorted(host.get("SecurityOpt") or []) != sorted(SECURITY)
+        # Docker consumes systempaths=unconfined into these two exact empty
+        # path lists; it does not retain that operand in SecurityOpt.
+        or sorted(host.get("SecurityOpt") or []) != sorted(SECURITY[:2])
+        or host.get("MaskedPaths") != []
+        or host.get("ReadonlyPaths") != []
         or config.get("User") != "1000:1000"
         or config.get("Entrypoint") != ["/bin/sh"]
         or config.get("Cmd") != ["-c", BOOT]
