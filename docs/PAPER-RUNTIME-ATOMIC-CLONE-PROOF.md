@@ -121,3 +121,31 @@ evidence, **not a completed atomic runtime/quarantine/restore gate**. No automat
 retry or resource-bound expansion follows. Further native work needs a separate
 reviewed authorization and fresh evidence as necessary; protected primary
 quarantine still requires independently accepted complete proof.
+
+## Bounded history transport preparation — 2026-10-03
+
+The atomic worker now streams the **same** ordered JSON-text SELECT through
+PostgreSQL binary COPY on the existing physical transaction. The original
+read-only snapshot worker and its cursor remain unchanged. No history scan,
+checkpoint, schema/sequence comparison, provenance, or risk boundary is skipped.
+The original eight-byte length-prefixed UTF-8 row digest is preserved; duplicates
+are included. This removes repeated 16-row cursor fetches, not SQL sorting or
+JSON serialization. The old retained phase label is assigned before that fault
+worker starts; it does not establish that migration 016 SQL caused the timeout.
+
+The incremental decoder retains only one bounded field and the previous row.
+It rejects unknown framing/extensions, NULL or multiple fields, invalid UTF-8,
+descending C-byte order, oversized fields/chunks, truncation/trailing bytes and
+an inconsistent COPY command count. It reuses the original 4 MiB row/1 GiB total/
+2,000,000-row/300-second budget, with the existing 120-second statement and all
+controller/worker resource limits unchanged. No file, network, mutation or
+primary CLI is added. Cancellation/error cannot return a partial digest.
+
+New receipt code provenance binds both the decoder and unchanged snapshot-budget
+module, in addition to the existing controller/worker/contract/validator. This
+does not re-sign, reinterpret, or promote the old failure. Unit golden/framing
+tests are transport checks only. A small synthetic PostgreSQL comparison is
+also not the full runtime 17 migration/quarantine/second-restore acceptance gate.
+Any future full native attempt still requires fresh independently accepted
+evidence and separately reviewed authorization; no retry is launched by this
+source change. All readiness flags remain false and primary stays guarded.

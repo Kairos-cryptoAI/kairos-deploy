@@ -26,7 +26,7 @@ CONFIRMATION = "CLONE_ONLY_ATOMIC_RUNTIME17_AND_EXACT_ROW_PROOF"
 FAULTS = (*("after_migration_" + name[:3] for name in contract.CATALOG.RUNTIME_SUFFIX), "after_migrations", "after_quarantine", "before_commit")
 SCOPE = "paper-runtime-atomic-clone-proof"
 SCRIPTS = Path(__file__).resolve().parent
-CODE_FILES = ("paper_runtime_atomic_contract.py", "paper_runtime_atomic_worker.py", "paper_runtime_atomic_clone_rehearsal.py", "validate_paper_runtime_atomic_receipt.py")
+CODE_FILES = ("paper_runtime_atomic_contract.py", "paper_runtime_atomic_worker.py", "paper_runtime_history_stream.py", "paper_runtime_snapshot_worker.py", "paper_runtime_atomic_clone_rehearsal.py", "validate_paper_runtime_atomic_receipt.py")
 MAX_SECONDS = 300
 
 

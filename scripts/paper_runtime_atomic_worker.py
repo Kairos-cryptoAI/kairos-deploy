@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import paper_runtime_atomic_contract as contract
+import paper_runtime_history_stream as history_stream
 import paper_runtime_snapshot_worker as snapshot
 
 
@@ -147,14 +148,14 @@ async def _other_clients(connection: Any) -> int:
 
 
 async def _digest_query(connection: Any, query: str, budget: Any, *args: Any) -> dict[str, Any]:
-    result = hashlib.sha256()
-    count = 0
-    async for item in connection.cursor(query, *args, prefetch=snapshot.PREFETCH):
-        data = budget.add(item["row"])
-        result.update(len(data).to_bytes(8, "big"))
-        result.update(data)
-        count += 1
-    return {"count": count, "row_digest_sha256": result.hexdigest()}
+    if not connection.is_in_transaction():
+        raise contract.AtomicError("history transport requires the existing physical transaction")
+    stream = history_stream.OrderedTextDigest(budget)
+    # Keep exact SELECT/arguments/C ordering and length-prefixed row digest.
+    # COPY removes repeated16-row cursor round trips, NOT any history scans,
+    # locks, rollback checkpoints, provenance checks, or resource/time caps.
+    status = await connection.copy_from_query(query, *args, output=stream.write, format="binary", encoding="UTF8", timeout=120)
+    return stream.finish(status)
 
 
 async def _history(connection: Any, *, runtime: bool, original_row: dict[str, Any] | None = None) -> dict[str, Any]:
