@@ -48,7 +48,7 @@ TOKEN_PREFIX = "KAIROS_SYNTHETIC_BUILDKIT_SPIN_"
 PAYLOAD = b"kairos-buildkit-synthetic-only\n"
 SECURITY = ["seccomp=unconfined", "apparmor=unconfined", "systempaths=unconfined"]
 TMPFS = {
-    "/home/user/.local/share/buildkit": "rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700",
+    "/home/user/.local/share/buildkit": "rw,exec,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700",
     "/run/user/1000": "rw,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700",
     "/tmp": "rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=0700",
     "/home/user/.local/tmp": "rw,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700",
@@ -363,6 +363,166 @@ done
 """
 
 
+MOUNT_DATA = "/home/user/.local/share/buildkit"
+MAX_MOUNT_OUTPUT = 8192
+MOUNT_PATHS = (
+    MOUNT_DATA,
+    "/home/user/.local/tmp",
+    "/run/user/1000",
+    "/tmp",
+)
+MOUNT_PROBE = r"""set -eu
+export LC_ALL=C
+locate() {
+  count=0; daemon=0
+  for file in /proc/[0-9]*/comm; do
+    [ -r "$file" ] || continue
+    IFS= read -r comm < "$file" || continue
+    [ "$comm" = buildkitd ] || continue
+    daemon=${file#/proc/}; daemon=${daemon%/comm}; count=$((count+1))
+  done
+  [ "$count" = 1 ] || exit 91
+  case "$daemon" in *[!0-9]*|"") exit 91;; esac
+}
+locate
+expected_daemon=$daemon
+identity() {
+  ticks=$(sed 's/.*) //' /proc/$daemon/stat | awk '{print $20}')
+  ns=$(readlink /proc/$daemon/ns/mnt)
+  printf 'I|%s|%s|%s|%s\n' "$1" "$daemon" "$ticks" "$ns"
+}
+identity before
+printf 'C|%s\n' "$(readlink /proc/self/ns/mnt)"
+for domain in container daemon; do
+  if [ "$domain" = container ]; then info=/proc/self/mountinfo; prefix=; else info=/proc/$daemon/mountinfo; prefix=/proc/$daemon/root; fi
+  for path in /home/user/.local/share/buildkit /home/user/.local/tmp /run/user/1000 /tmp; do
+    row=$(awk -v target="$path" '
+      $5==target {
+        n++; sep=0; for(i=7;i<=NF;i++)if($i=="-"){sep=i;break}
+        if(!sep || $(sep+1)!="tmpfs")exit 92
+        rw=nosuid=nodev=noexec=0; k=split($6,opts,",")
+        for(i=1;i<=k;i++){if(opts[i]=="rw")rw=1;if(opts[i]=="nosuid")nosuid=1;if(opts[i]=="nodev")nodev=1;if(opts[i]=="noexec")noexec=1}
+        printf "%s|%s|%s|tmpfs|%s|%s|%s|%s",$1,$2,$3,rw,nosuid,nodev,noexec
+      }
+      END {if(n!=1)exit 93}
+    ' "$info") || exit 94
+    [ ! -L "$prefix$path" ] && [ -d "$prefix$path" ] || exit 95
+    meta=$(stat -c '%a|%u|%g' "$prefix$path")
+    printf 'M|%s|%s|%s|%s\n' "$domain" "$path" "$row" "$meta"
+  done
+done
+locate
+[ "$daemon" = "$expected_daemon" ] || exit 96
+identity after
+"""
+
+
+def mount_unsigned(
+    value: str, maximum: int = 2**32 - 1, *, positive: bool = False
+) -> int:
+    if re.fullmatch(r"0|[1-9][0-9]{0,19}", value) is None:
+        raise GateError("NUMERIC_PROJECTION_REQUIRED")
+    number = int(value)
+    if number > maximum or (positive and number == 0):
+        raise GateError("NUMERIC_PROJECTION_BOUNDARY")
+    return number
+
+
+def mount_namespace(value: str) -> int:
+    match = re.fullmatch(r"mnt:\[([0-9]+)\]", value)
+    if match is None:
+        raise GateError("MOUNT_NAMESPACE_REQUIRED")
+    return mount_unsigned(match[1], 2**64 - 1, positive=True)
+
+
+def parse_mounts(text: str) -> dict:
+    if len(text.encode("utf-8")) > MAX_MOUNT_OUTPUT:
+        raise GateError("PROBE_OUTPUT_BOUNDARY")
+    lines = text.splitlines()
+    if len(lines) != 11:
+        raise GateError("EXACT_PROJECTION_ROWS_REQUIRED")
+    identities, mounts, container_ns = {}, {}, None
+    for line in lines:
+        fields = line.split("|")
+        if fields[0] == "I" and len(fields) == 5:
+            when = fields[1]
+            if when not in {"before", "after"} or when in identities:
+                raise GateError("DAEMON_IDENTITY_AMBIGUOUS")
+            pid = mount_unsigned(fields[2], positive=True)
+            if pid <= 1:
+                raise GateError("DAEMON_IDENTITY_REQUIRED")
+            identities[when] = {
+                "pid": pid,
+                "start_ticks": mount_unsigned(fields[3], 2**64 - 1, positive=True),
+                "mount_namespace_inode": mount_namespace(fields[4]),
+            }
+        elif fields[0] == "C" and len(fields) == 2 and container_ns is None:
+            container_ns = mount_namespace(fields[1])
+        elif fields[0] == "M" and len(fields) == 14:
+            domain, path = fields[1:3]
+            key = (domain, path)
+            if (
+                domain not in {"container", "daemon"}
+                or path not in MOUNT_PATHS
+                or key in mounts
+                or fields[6] != "tmpfs"
+            ):
+                raise GateError("FIXED_TMPFS_SELECTOR_REQUIRED")
+            device = fields[5].split(":")
+            if (
+                len(device) != 2
+                or fields[7:10] != ["1", "1", "1"]
+                or fields[10] not in {"0", "1"}
+                or re.fullmatch(r"[0-7]{3,4}", fields[11]) is None
+            ):
+                raise GateError("EFFECTIVE_MOUNT_POLICY_OR_MODE_CHANGED")
+            mounts[key] = {
+                "mount_id": mount_unsigned(fields[3], positive=True),
+                "parent_id": mount_unsigned(fields[4], positive=True),
+                "device_major": mount_unsigned(device[0]),
+                "device_minor": mount_unsigned(device[1]),
+                "filesystem": "tmpfs",
+                "rw": True,
+                "nosuid": True,
+                "nodev": True,
+                "noexec": fields[10] == "1",
+                "mode": fields[11],
+                "uid": mount_unsigned(fields[12]),
+                "gid": mount_unsigned(fields[13]),
+            }
+        else:
+            raise GateError("FIXED_PROJECTION_REQUIRED")
+    if (
+        set(identities) != {"before", "after"}
+        or identities["before"] != identities["after"]
+        or container_ns is None
+        or set(mounts)
+        != {
+            (domain, path) for domain in ("container", "daemon") for path in MOUNT_PATHS
+        }
+    ):
+        raise GateError("STABLE_EXACT_MOUNT_PROOF_REQUIRED")
+    # Actual mount policy, not Docker's requested options. Only the private
+    # snapshot backing data may execute; all other tmpfs roots stay noexec.
+    for (domain, path), row in mounts.items():
+        if (
+            row["mode"] != "700"
+            or (row["uid"], row["gid"]) != (1000, 1000)
+            or row["noexec"] != (path != MOUNT_DATA)
+        ):
+            raise GateError("EFFECTIVE_PRIVATE_TMPFS_POLICY_CHANGED")
+    return {
+        "daemon": identities["before"],
+        "container_mount_namespace_inode": container_ns,
+        "mounts": {
+            domain: {path: mounts[domain, path] for path in MOUNT_PATHS}
+            for domain in ("container", "daemon")
+        },
+        "build_execution_tested": False,
+        "resource_qualification": "UNPROVEN",
+    }
+
+
 def fixture_script(owner: str) -> str:
     owner_name(owner)
     rootfs = (
@@ -618,6 +778,11 @@ class Native:
         allow_failure: bool = False,
     ) -> tuple[int, str]:
         now = time.monotonic()
+        output_limit = (
+            MAX_MOUNT_OUTPUT
+            if arguments and arguments[-1] == MOUNT_PROBE
+            else MAX_OUTPUT
+        )
         if (
             not math.isfinite(deadline)
             or not math.isfinite(seconds)
@@ -661,8 +826,8 @@ class Native:
                 while process.poll() is None:
                     timed_out = time.monotonic() >= end
                     overflow = (
-                        outpath.stat().st_size > MAX_OUTPUT
-                        or errpath.stat().st_size > MAX_OUTPUT
+                        outpath.stat().st_size > output_limit
+                        or errpath.stat().st_size > output_limit
                     )
                     if timed_out or overflow:
                         break
@@ -688,8 +853,8 @@ class Native:
                 os.fsync(err.fileno())
         overflow = (
             overflow
-            or outpath.stat().st_size > MAX_OUTPUT
-            or errpath.stat().st_size > MAX_OUTPUT
+            or outpath.stat().st_size > output_limit
+            or errpath.stat().st_size > output_limit
         )
         result = {
             "sequence": self.sequence,
@@ -775,6 +940,15 @@ class Controller:
         if verify_container(value, self.owner, self.image_id, self.labels) != self.cid:
             raise GateError("EXACT_SERVER_ID_CHANGED")
         return value
+
+    def observe_mounts(self) -> dict:
+        # Exactly one read-only projection; its 5s operation + 4s CLI tree proof
+        # must fit the existing work phase. No build/mount mutation or retry.
+        phase_end = min(self.deadline, time.monotonic() + 9)
+        _, output = self.shell(MOUNT_PROBE, seconds=5, phase_deadline=phase_end)
+        if time.monotonic() >= phase_end:
+            raise GateError("EFFECTIVE_MOUNT_PROBE_DEADLINE")
+        return parse_mounts(output)
 
     def inventory(self) -> dict:
         result = {}
@@ -870,6 +1044,7 @@ class Controller:
         self.proofs["kernel_before"] = parse_cgroup(cg)
         _, server_path = self.shell("cat /proc/1/cgroup")
         cgroup_path(server_path)
+        self.proofs["effective_mounts_before"] = self.observe_mounts()
         _, binaries = self.shell(fixture_script(self.owner))
         binary_lines = binaries.splitlines()
         if len(binary_lines) != 2 or any(
@@ -1043,6 +1218,12 @@ class Controller:
             seconds=30,
         )
         self.proofs["fresh_build_after_cancel"] = True
+        self.proofs["effective_mounts_after"] = self.observe_mounts()
+        if (
+            self.proofs["effective_mounts_before"]
+            != self.proofs["effective_mounts_after"]
+        ):
+            raise GateError("EFFECTIVE_MOUNT_BOUNDARY_CHANGED_DURING_BUILD")
 
     def cleanup(self) -> bool:
         if self.cid is None and self.intended:

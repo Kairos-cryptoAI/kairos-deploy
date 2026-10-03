@@ -66,6 +66,32 @@ roots retain `0700`. This records new before/after facts, not reconstructed
 permissions for any old failed local export. The 96e5/v4 attempt failed at the
 local receiver before either numeric probe; it remains failed with no recorded
 rootfs modes. An unsuccessful ExecOp still fails the gate.
+The source-bound mount-only observation on Deploy2417ad
+(`run-0e49d3931c3a414f8d6a2decf2f5e79c`) proved effective `noexec` on
+all eight fixed mount rows in the container and daemon namespaces, including the
+private native-snapshot backing data. It executed no build and did not qualify
+server resources or production builds. Its positive cleanup and old failed
+ExecOp receipts remain distinct evidence, never rewritten.
+
+Only `/home/user/.local/share/buildkit` now requests explicit `exec` while
+retaining `nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700`. This is the
+private owned snapshot backing tmpfs, not a host mount, shared cache, root mount
+or process-sandbox exception. Other three requested tmpfs options are unchanged.
+Before any fixture/build and after the fresh post-cancellation build, a fixed
+read-only proc projection must independently prove exact effective tmpfs flags:
+the data path is executable; the other three paths remain `noexec`; all eight
+rows are rw/nosuid/nodev and directory mode0700 UID/GID1000. Daemon PID/start ticks
+and mount namespace are stable inside each projection; both complete projections
+must match across the synthetic campaign. Missing/duplicate selectors, PID reuse,
+incorrect required flags or identity drift fail closed. Only comm/stat/mountinfo and numeric
+stat for the fixed paths are read; no raw argv, environment, private cache file
+or mount-table contents are emitted. The single probe is limited to8KiB output,
+5s operation plus the existing4s CLI tree proof inside the unchanged160/20/180s
+budgets. This measurement cannot substitute for real ExecOp/fault/cancellation.
+
+Until a new reviewed full synthetic attempt actually passes, the explicit exec
+correction remains unqualified; chmod, COPY-only exports and requested Docker
+options are not accepted execution proof.
 A deterministic tiny build must match the fixed payload hash. A separate exit37
 fault must produce its specific marker and exit37 failure, not merely any CLI
 error. A real two-process spin ExecOp is then observed by PID+start ticks,

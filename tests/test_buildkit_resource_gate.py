@@ -49,7 +49,62 @@ def view() -> dict:
     }
 
 
+def mount_projection(*, data_noexec=False, changed=False):
+    rows = ["I|before|29|100|mnt:[600]", "C|mnt:[500]"]
+    for domain in ("container", "daemon"):
+        for i, path in enumerate(gate.MOUNT_PATHS):
+            noexec = int(data_noexec if path == gate.MOUNT_DATA else True)
+            mount_id = i + 10 + int(changed)
+            rows.append(
+                f"M|{domain}|{path}|{mount_id}|1|0:10|tmpfs|1|1|1|{noexec}|700|1000|1000"
+            )
+    rows.append("I|after|29|100|mnt:[600]")
+    return "\n".join(rows)
+
+
 class ContractTests(unittest.TestCase):
+    def test_only_private_backing_data_explicitly_exec(self):
+        values = list(gate.TMPFS.values())
+        self.assertEqual(sum("exec" in value.split(",") for value in values), 1)
+        self.assertEqual(
+            gate.TMPFS[gate.MOUNT_DATA],
+            "rw,exec,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700",
+        )
+        for path, value in gate.TMPFS.items():
+            if path != gate.MOUNT_DATA:
+                self.assertNotIn("exec", value.split(","))
+        self.assertEqual(gate.MAX_MOUNT_OUTPUT, 8192)
+
+    def test_effective_mount_projection_requires_actual_exec_data_only(self):
+        value = gate.parse_mounts(mount_projection())
+        self.assertFalse(value["mounts"]["daemon"][gate.MOUNT_DATA]["noexec"])
+        self.assertFalse(value["build_execution_tested"])
+        self.assertEqual(value["resource_qualification"], "UNPROVEN")
+        with self.assertRaisesRegex(
+            gate.GateError, "EFFECTIVE_PRIVATE_TMPFS_POLICY_CHANGED"
+        ):
+            gate.parse_mounts(mount_projection(data_noexec=True))
+        raw = mount_projection()
+        for bad in (
+            raw.replace("|tmpfs|", "|ext4|"),
+            raw.replace(gate.MOUNT_PATHS[1], gate.MOUNT_DATA),
+            raw.replace(gate.MOUNT_DATA, "/host-data"),
+            raw.replace("|700|", "|777|"),
+            raw.replace("|1000|1000", "|0|1000"),
+            raw.replace("I|after|29|100", "I|after|29|101"),
+            raw.replace("|1|1|1|1|700", "|1|1|1|0|700"),
+            raw + "\nextra",
+            "x" * 8193,
+        ):
+            with self.subTest(bad=bad[:30]), self.assertRaises(gate.GateError):
+                gate.parse_mounts(bad)
+
+    def test_fixed_mount_probe_has_no_raw_argv_or_mode_mutation(self):
+        for forbidden in ("cmdline", "environ", "chmod", "mount -", "buildctl", "runc"):
+            self.assertNotIn(forbidden, gate.MOUNT_PROBE)
+        self.assertIn('for(i=7;i<=NF;i++)if($i=="-")', gate.MOUNT_PROBE)
+        self.assertEqual(gate.MOUNT_PROBE.count("\nlocate\n"), 2)
+
     def test_default_is_plan_only_without_calls_or_files(self):
         with (
             patch.object(gate, "Native") as native,
@@ -587,6 +642,7 @@ class FakeNative:
         self.deadlines = []
         self.created = self.removed = self.cancelled = self.stopped = False
         self.kernel_reads = 0
+        self.mount_reads = 0
         self.errors = ""
 
     def last_errors(self):
@@ -655,6 +711,12 @@ class FakeNative:
                 return 1, ""
             return 0, ""
         script = args[-1]
+        if script == gate.MOUNT_PROBE:
+            self.mount_reads += 1
+            return 0, mount_projection(
+                data_noexec=self.bad == "mount-before",
+                changed=self.bad == "mount-after" and self.mount_reads == 2,
+            )
         if script == gate.CGROUP_PROBE:
             self.kernel_reads += 1
             throttled = 5 if self.kernel_reads == 1 or self.bad == "cpu" else 8
@@ -712,6 +774,63 @@ class FakeNative:
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_noexec_actual_data_fails_before_fixture_or_build(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(gate.time, "monotonic", side_effect=self.fake_clock()),
+            patch.object(gate.time, "sleep"),
+        ):
+            controller = self.setup_controller(folder, "mount-before")
+            with self.assertRaisesRegex(
+                gate.GateError, "EFFECTIVE_PRIVATE_TMPFS_POLICY_CHANGED"
+            ):
+                controller.run()
+            self.assertNotIn("effective_mounts_before", controller.proofs)
+            self.assertFalse(
+                any(
+                    "filename=Dockerfile.success" in args
+                    for args in controller.native.calls
+                )
+            )
+            self.assertFalse(
+                any(
+                    args[-1].startswith("set -eu; umask 077; mkdir ")
+                    for args in controller.native.calls
+                )
+            )
+            self.assertTrue(controller.cleanup())
+
+    def test_after_mount_identity_drift_fails_even_after_synthetic_exec(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(gate.time, "monotonic", side_effect=self.fake_clock()),
+            patch.object(gate.time, "sleep"),
+        ):
+            controller = self.setup_controller(folder, "mount-after")
+            with self.assertRaisesRegex(
+                gate.GateError, "EFFECTIVE_MOUNT_BOUNDARY_CHANGED_DURING_BUILD"
+            ):
+                controller.run()
+            self.assertNotEqual(
+                controller.proofs["effective_mounts_before"],
+                controller.proofs["effective_mounts_after"],
+            )
+            self.assertTrue(controller.cleanup())
+
+    def test_mount_probe_deadline_is_local_and_late_result_rejected(self):
+        controller = gate.Controller(
+            Path("unused"), OWNER, gate.BUILDKIT_IMAGE, IMAGE_ID, Mock(), 160
+        )
+        with (
+            patch.object(gate.time, "monotonic", side_effect=[10.0, 19.0]),
+            patch.object(
+                controller, "shell", return_value=(0, mount_projection())
+            ) as shell,
+            self.assertRaisesRegex(gate.GateError, "EFFECTIVE_MOUNT_PROBE_DEADLINE"),
+        ):
+            controller.observe_mounts()
+        shell.assert_called_once_with(gate.MOUNT_PROBE, seconds=5, phase_deadline=19.0)
+
     def setup_controller(self, folder, bad=None):
         return gate.Controller(
             Path(folder), OWNER, gate.BUILDKIT_IMAGE, IMAGE_ID, FakeNative(bad), 160
@@ -735,6 +854,11 @@ class LifecycleTests(unittest.TestCase):
             controller = self.setup_controller(folder)
             controller.run()
             self.assertTrue(controller.proofs["fresh_build_after_cancel"])
+            self.assertEqual(controller.native.mount_reads, 2)
+            self.assertEqual(
+                controller.proofs["effective_mounts_before"],
+                controller.proofs["effective_mounts_after"],
+            )
             self.assertEqual(controller.proofs["workers_after_cancel"], [])
             self.assertEqual(len(controller.proofs["workers_before_cancel"]), 2)
             self.assertTrue(
@@ -806,7 +930,7 @@ class LifecycleTests(unittest.TestCase):
                         args[-1] == gate.WORKER_PROBE
                         and not controller.native.cancelled
                     )
-                    cancel = "exit 92" in args[-1]
+                    cancel = "exit 92" in args[-1] and args[-1] != gate.MOUNT_PROBE
                     if (
                         (phase == "ready" and ready)
                         or (phase == "worker" and worker)
