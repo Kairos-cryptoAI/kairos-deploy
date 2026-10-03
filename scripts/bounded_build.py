@@ -60,7 +60,9 @@ for file in /proc/[0-9]*/comm; do
     uid=$(awk '$1=="Uid:" {print $2}' /proc/$pid/status)
     [ "$uid" = 1000 ] || exit 91
     ticks=$(sed 's/.*) //' /proc/$pid/stat | awk '{print $20}')
-    printf '%s|%s\n' "$pid" "$ticks"
+    cg=$(cat /proc/$pid/cgroup)
+    ns=$(readlink /proc/$pid/ns/cgroup)
+    printf '%s|%s|1000|%s|%s\n' "$pid" "$ticks" "$cg" "$ns"
   esac
 done
 """
@@ -339,31 +341,57 @@ def parse_capacity(text: str, expected_daemon: dict) -> dict:
     }
 
 
-def parse_transports(text: str) -> list[dict]:
+def parse_transports(
+    text: str, server_cgroup: str, namespace: str, *, allow_empty: bool = False
+) -> list[dict]:
+    if type(allow_empty) is not bool:
+        raise gate.GateError("EXACT_TRANSPORT_EMPTY_POLICY_REQUIRED")
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 8192:
+        raise gate.GateError("FIXED_TRANSPORT_PROJECTION_REQUIRED")
     lines = text.splitlines() if text else []
-    if not 1 <= len(lines) <= 4:
+    if not lines and not allow_empty:
         raise gate.GateError("OWNED_TRANSPORT_COUNT_UNPROVEN")
-    result = []
-    for line in lines:
-        fields = line.split("|")
-        if len(fields) != 2:
-            raise gate.GateError("FIXED_TRANSPORT_PROJECTION_REQUIRED")
-        row = {
-            "pid": gate.mount_unsigned(fields[0], positive=True),
-            "start_ticks": gate.mount_unsigned(fields[1], 2**64 - 1, positive=True),
-        }
-        if row["pid"] <= 1 or any(v["pid"] == row["pid"] for v in result):
-            raise gate.GateError("UNIQUE_TRANSPORT_IDENTITY_REQUIRED")
-        result.append(row)
-    return result
+    fields = [line.split("|") for line in lines]
+    if any(len(row) != 5 or row[2] != "1000" for row in fields):
+        raise gate.GateError("FIXED_TRANSPORT_PROJECTION_REQUIRED")
+    for row in fields:
+        gate.mount_unsigned(row[0], positive=True)
+        gate.mount_unsigned(row[1], 2**64 - 1, positive=True)
+    projection = "\n".join("|".join((r[0], r[1], r[3], r[4])) for r in fields)
+    result = gate.parse_workers(projection, server_cgroup, namespace)
+    if any(row["namespace"] != namespace for row in result):
+        raise gate.GateError("TRANSPORT_SERVER_NAMESPACE_REQUIRED")
+    return [row | {"uid": 1000} for row in result]
 
 
-def cancel_transport_script(rows: list[dict]) -> str:
-    # Revalidate the complete set before sending the first signal. Never signal
-    # buildkitd/ExecOp/host processes, or accept PID alone as identity.
+def cancel_transport_script(rows: list[dict], *, force: bool = False) -> str:
+    # First TERM is cooperative; a single KILL fallback disconnects ONLY the
+    # same fully revalidated proxy. Neither signal targets daemon/ExecOp/host.
+    if type(force) is not bool or not isinstance(rows, list) or not rows:
+        raise gate.GateError("EXACT_TRANSPORT_SIGNAL_POLICY_REQUIRED")
+    required = {"pid", "start_ticks", "cgroup", "namespace", "uid"}
+    if any(not isinstance(row, dict) or set(row) != required for row in rows):
+        raise gate.GateError("FIXED_TRANSPORT_IDENTITY_REQUIRED")
+    if any(
+        type(row["pid"]) is not int
+        or type(row["start_ticks"]) is not int
+        or type(row["uid"]) is not int
+        or row["uid"] != 1000
+        or not isinstance(row["cgroup"], str)
+        or not isinstance(row["namespace"], str)
+        for row in rows
+    ):
+        raise gate.GateError("FIXED_TRANSPORT_IDENTITY_REQUIRED")
     validated = parse_transports(
-        "\n".join(f"{r['pid']}|{r['start_ticks']}" for r in rows)
+        "\n".join(
+            f"{r['pid']}|{r['start_ticks']}|1000|0::{r['cgroup']}|{r['namespace']}"
+            for r in rows
+        ),
+        "0::" + rows[0]["cgroup"],
+        rows[0]["namespace"],
     )
+    if validated != rows:
+        raise gate.GateError("FIXED_TRANSPORT_IDENTITY_REQUIRED")
     parts = ["set -eu"]
     for row in validated:
         pid, ticks = row["pid"], row["start_ticks"]
@@ -372,8 +400,11 @@ def cancel_transport_script(rows: list[dict]) -> str:
             f"[ \"$(sed 's/.*) //' /proc/{pid}/stat | awk '{{print $20}}')\" = {ticks} ] || exit 91",
             f"[ \"$(tr '\\000' ' ' < /proc/{pid}/cmdline)\" = 'buildctl dial-stdio ' ] || exit 91",
             f'[ "$(awk \'$1=="Uid:" {{print $2}}\' /proc/{pid}/status)" = 1000 ] || exit 91',
+            f'[ "$(cat /proc/{pid}/cgroup)" = "0::{row["cgroup"]}" ] || exit 91',
+            f'[ "$(readlink /proc/{pid}/ns/cgroup)" = "{row["namespace"]}" ] || exit 91',
         ]
-    parts += [f"kill -TERM {r['pid']}" for r in validated]
+    signal = "KILL" if force else "TERM"
+    parts += [f"kill -{signal} {r['pid']}" for r in validated]
     return "; ".join(parts)
 
 
@@ -737,6 +768,35 @@ class Controller(gate.Controller):
             19,
         )
 
+    def request_transport_cancellation(
+        self, server_cgroup: str, namespace: str, cancel_end: float
+    ) -> list[dict]:
+        # All stimulus/observation calls share this existing 15-second deadline.
+        _, raw = self.shell(TRANSPORT_PROBE, phase_deadline=cancel_end)
+        transports = parse_transports(raw, server_cgroup, namespace)
+        self.proofs["transports_before_cancel"] = transports
+        self.shell(cancel_transport_script(transports), phase_deadline=cancel_end)
+        _, raw = self.shell(TRANSPORT_PROBE, phase_deadline=cancel_end)
+        remaining = parse_transports(raw, server_cgroup, namespace, allow_empty=True)
+        if any(row not in transports for row in remaining):
+            raise gate.GateError("TRANSPORT_IDENTITY_CHANGED_AFTER_TERM")
+        self.proofs["transports_after_term"] = remaining
+        if remaining:
+            # buildctl v0.32.2 dial-stdio ignores its canceled app context:
+            # TERM does not necessarily close the stream proxy. Do not relabel
+            # a forced disconnect as graceful Compose-context cancellation.
+            self.shell(
+                cancel_transport_script(remaining, force=True),
+                phase_deadline=cancel_end,
+            )
+        self.proofs["transport_cancellation"] = {
+            "mode": "TERM_THEN_FORCED_DISCONNECT" if remaining else "TERM_ONLY",
+            "forced_proxy_count": len(remaining),
+            "graceful_compose_context_proven": False,
+            "daemon_or_execop_signals": 0,
+        }
+        return transports
+
     def run(self) -> None:
         self.baseline = self.inventory()
         gate.save_new(self.work / "baseline.json", self.baseline)
@@ -886,11 +946,10 @@ class Controller(gate.Controller):
         ):
             raise gate.GateError("ACTUAL_COMPOSE_CPU_BOUND_UNPROVEN")
         self.proofs["kernel_under_load"] = busy
-        _, raw = self.shell(TRANSPORT_PROBE, phase_deadline=worker_end)
-        transports = parse_transports(raw)
-        self.proofs["transports_before_cancel"] = transports
-        self.shell(cancel_transport_script(transports), phase_deadline=worker_end)
         cancel_end = min(self.deadline, worker_end, time.monotonic() + 15)
+        transports = self.request_transport_cancellation(
+            server_path, busy["namespace"], cancel_end
+        )
         while time.monotonic() < cancel_end - gate.TREE_SECONDS:
             code = self.client.poll()
             _, raw = self.shell(gate.WORKER_PROBE, phase_deadline=cancel_end)

@@ -324,7 +324,11 @@ class ContractTests(unittest.TestCase):
                 bounded.parse_capacity(text, DAEMON)
 
     def test_transport_probe_and_signal_use_exact_pid_start_command_and_uid(self):
-        rows = bounded.parse_transports("72|900\n73|901")
+        rows = bounded.parse_transports(
+            "72|900|1000|0::/|cgroup:[4]\n73|901|1000|0::/|cgroup:[4]",
+            "0::/",
+            "cgroup:[4]",
+        )
         script = bounded.cancel_transport_script(rows)
         self.assertIn("/proc/72/comm", script)
         self.assertIn("/proc/72/stat", script)
@@ -346,7 +350,7 @@ class ContractTests(unittest.TestCase):
             "\n".join(f"{i}|9" for i in range(10, 15)),
         ):
             with self.subTest(value=value), self.assertRaises(gate.GateError):
-                bounded.parse_transports(value)
+                bounded.parse_transports(value, "0::/", "cgroup:[4]")
 
     def test_image_cleanup_identity_has_no_foreign_tags_labels_volumes_or_oversize(
         self,
@@ -433,6 +437,40 @@ class ContractTests(unittest.TestCase):
 
 
 class ExecutionBoundaryTests(unittest.TestCase):
+    def test_actual_non_windows_native_guard_refuses_before_lease_or_controller(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ops, shared = root / "new-ops", root / "shared"
+            ops.mkdir()
+            shared.mkdir()
+            with (
+                patch.object(bounded, "OPS", ops),
+                patch.object(gate, "OPS", shared),
+                patch.object(
+                    bounded,
+                    "source_bindings",
+                    return_value={
+                        "adapter": "e" * 64,
+                        "resource_gate": bounded.GATE_SHA,
+                        "windows_job": gate.JOB_SHA,
+                    },
+                ),
+                patch.object(bounded, "tool_bindings", return_value=TOOLS),
+                patch.object(bounded.os, "name", "posix"),
+                patch.object(bounded, "Native") as native,
+                patch.object(bounded, "Controller") as controller,
+                self.assertRaisesRegex(
+                    gate.GateError, "REVIEWED_WINDOWS_JOB_PLATFORM_REQUIRED"
+                ),
+            ):
+                bounded.execute(
+                    "e" * 64, "a" * 40, TOOLS, IMAGE_ID, invocation_owner=OWNER
+                )
+            native.assert_not_called()
+            controller.assert_not_called()
+            self.assertEqual(list(ops.iterdir()), [])
+            self.assertEqual(list(shared.iterdir()), [])
+
     def test_shared_existing_lease_is_never_adopted_or_removed(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -454,6 +492,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     },
                 ),
                 patch.object(bounded, "tool_bindings", return_value=TOOLS),
+                patch.object(bounded.os, "name", "nt"),
                 self.assertRaises(FileExistsError),
             ):
                 bounded.execute(
@@ -501,6 +540,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     },
                 ),
                 patch.object(bounded, "tool_bindings", return_value=TOOLS),
+                patch.object(bounded.os, "name", "nt"),
                 patch.object(bounded, "Native") as native,
                 self.assertRaises(gate.GateError),
             ):
@@ -549,6 +589,7 @@ class ExecutionBoundaryTests(unittest.TestCase):
                         },
                     ),
                     patch.object(bounded, "tool_bindings", return_value=TOOLS),
+                    patch.object(bounded.os, "name", "nt"),
                     patch.object(gate, "bounded", side_effect=read),
                     patch.object(
                         bounded.time,
@@ -834,6 +875,215 @@ class ExecutionBoundaryTests(unittest.TestCase):
             )
         self.assertEqual(execute.call_args.args, ("e" * 64, "a" * 40, TOOLS, IMAGE_ID))
         self.assertEqual(execute.call_args.kwargs, {"invocation_owner": OWNER})
+
+
+NAMESPACE = "cgroup:[4026532404]"
+CGROUP = "0::/owned"
+ONE = "245|2781525|1000|0::/owned|" + NAMESPACE
+TWO = ONE + "\n246|2781526|1000|0::/owned|" + NAMESPACE
+
+
+class ProjectionTests(unittest.TestCase):
+    def test_exact_numeric_projection_and_uid_cgroup_namespace(self):
+        rows = bounded.parse_transports(TWO, CGROUP, NAMESPACE)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            rows[0],
+            {
+                "pid": 245,
+                "start_ticks": 2781525,
+                "uid": 1000,
+                "cgroup": "/owned",
+                "namespace": NAMESPACE,
+            },
+        )
+        for marker in (
+            "cat /proc/$pid/cgroup",
+            "readlink /proc/$pid/ns/cgroup",
+            "|1000|",
+        ):
+            self.assertIn(marker, bounded.TRANSPORT_PROBE)
+
+    def test_empty_only_with_explicit_observation_policy(self):
+        self.assertEqual(
+            bounded.parse_transports("", CGROUP, NAMESPACE, allow_empty=True), []
+        )
+        for policy in (False, 1, "true", None):
+            with self.subTest(policy=policy), self.assertRaises(gate.GateError):
+                bounded.parse_transports("", CGROUP, NAMESPACE, allow_empty=policy)
+
+    def test_rejects_changed_scope_identity_and_numeric_ambiguity(self):
+        invalid = (
+            ONE.replace("1000|", "0|"),
+            ONE.replace("/owned|", "/foreign|"),
+            ONE.replace("/owned|", "/owned/../foreign|"),
+            ONE.replace("4026532404", "4026532405"),
+            ONE.replace("245|", "1|", 1),
+            ONE.replace("245|", "0245|", 1),
+            ONE.replace("245|", "٢٤٥|", 1),
+            ONE.replace("2781525", "0"),
+            ONE + "\n" + ONE,
+            ONE + "|extra",
+            "\n".join(f"{pid}|9|1000|{CGROUP}|{NAMESPACE}" for pid in range(5, 10)),
+            "a" * 8193,
+        )
+        for value in invalid:
+            with self.subTest(value=value[:70]), self.assertRaises(gate.GateError):
+                bounded.parse_transports(value, CGROUP, NAMESPACE)
+
+
+class SignalTests(unittest.TestCase):
+    def test_complete_live_identity_validation_before_any_signal(self):
+        rows = bounded.parse_transports(TWO, CGROUP, NAMESPACE)
+        for force, signal in ((False, "TERM"), (True, "KILL")):
+            with self.subTest(force=force):
+                script = bounded.cancel_transport_script(rows, force=force)
+                for pid in (245, 246):
+                    for name in ("comm", "stat", "cmdline", "status", "cgroup"):
+                        self.assertLess(
+                            script.index(f"/proc/{pid}/{name}"),
+                            script.index(f"kill -{signal} 245"),
+                        )
+                    self.assertLess(
+                        script.index(f"/proc/{pid}/ns/cgroup"),
+                        script.index(f"kill -{signal} 245"),
+                    )
+                self.assertIn("tr '\\000' ' '", script)
+                self.assertIn('= "0::/owned"', script)
+                self.assertIn(f'= "{NAMESPACE}"', script)
+                self.assertIn("buildctl dial-stdio ", script)
+                self.assertIn(f"kill -{signal} 246", script)
+                self.assertNotIn("buildkitd", script)
+                self.assertNotIn("kill -9", script)
+                self.assertNotIn("pkill", script)
+                self.assertNotIn("killall", script)
+
+    def test_force_flag_and_row_keys_cannot_expand_authority(self):
+        rows = bounded.parse_transports(ONE, CGROUP, NAMESPACE)
+        for force in (1, "KILL", None):
+            with self.subTest(force=force), self.assertRaises(gate.GateError):
+                bounded.cancel_transport_script(rows, force=force)
+        for mutate in (
+            lambda row: row.update(uid=True),
+            lambda row: row.update(pid="245; kill 1"),
+            lambda row: row.update(extra="signal"),
+            lambda row: row.update(namespace="cgroup:[1]; kill 1"),
+        ):
+            value = copy.deepcopy(rows)
+            mutate(value[0])
+            with self.subTest(mutate=mutate), self.assertRaises(gate.GateError):
+                bounded.cancel_transport_script(value, force=True)
+
+
+class PhaseTests(unittest.TestCase):
+    def controller(self):
+        return bounded.Controller(
+            Path("D:/public"),
+            OWNER,
+            gate.BUILDKIT_IMAGE,
+            "sha256:" + "b" * 64,
+            Mock(),
+            160,
+        )
+
+    def test_term_ignoring_proxy_forced_once_with_same_phase_bound(self):
+        controller = self.controller()
+        with patch.object(
+            controller, "shell", side_effect=[(0, ONE), (0, ""), (0, ONE), (0, "")]
+        ) as shell:
+            original = controller.request_transport_cancellation(CGROUP, NAMESPACE, 15)
+        self.assertEqual(original, bounded.parse_transports(ONE, CGROUP, NAMESPACE))
+        self.assertEqual(shell.call_count, 4)
+        self.assertIn("kill -TERM 245", shell.call_args_list[1].args[0])
+        self.assertIn("kill -KILL 245", shell.call_args_list[3].args[0])
+        self.assertTrue(
+            all(c.kwargs == {"phase_deadline": 15} for c in shell.call_args_list)
+        )
+        self.assertEqual(
+            controller.proofs["transport_cancellation"],
+            {
+                "mode": "TERM_THEN_FORCED_DISCONNECT",
+                "forced_proxy_count": 1,
+                "graceful_compose_context_proven": False,
+                "daemon_or_execop_signals": 0,
+            },
+        )
+
+    def test_disappeared_proxy_never_forced_or_reclassified_graceful(self):
+        controller = self.controller()
+        with patch.object(
+            controller, "shell", side_effect=[(0, ONE), (0, ""), (0, "")]
+        ) as shell:
+            controller.request_transport_cancellation(CGROUP, NAMESPACE, 15)
+        self.assertEqual(shell.call_count, 3)
+        self.assertEqual(controller.proofs["transports_after_term"], [])
+        self.assertEqual(
+            controller.proofs["transport_cancellation"]["forced_proxy_count"], 0
+        )
+        self.assertFalse(
+            controller.proofs["transport_cancellation"][
+                "graceful_compose_context_proven"
+            ]
+        )
+
+    def test_only_same_survivor_subset_can_be_forced(self):
+        controller = self.controller()
+        with patch.object(
+            controller, "shell", side_effect=[(0, TWO), (0, ""), (0, ONE), (0, "")]
+        ) as shell:
+            controller.request_transport_cancellation(CGROUP, NAMESPACE, 15)
+        self.assertIn("kill -KILL 245", shell.call_args_list[-1].args[0])
+        self.assertNotIn("kill -KILL 246", shell.call_args_list[-1].args[0])
+
+    def test_changed_pid_or_start_or_scope_cannot_trigger_force(self):
+        for value in (
+            ONE.replace("245|", "246|"),
+            ONE.replace("2781525", "2781526"),
+            ONE.replace("/owned|", "/foreign|"),
+            ONE.replace("4026532404", "4026532405"),
+            ONE.replace("1000|", "1001|"),
+        ):
+            controller = self.controller()
+            with (
+                self.subTest(value=value),
+                patch.object(
+                    controller, "shell", side_effect=[(0, ONE), (0, ""), (0, value)]
+                ) as shell,
+                self.assertRaises(gate.GateError),
+            ):
+                controller.request_transport_cancellation(CGROUP, NAMESPACE, 15)
+            self.assertEqual(shell.call_count, 3)
+            self.assertNotIn("transport_cancellation", controller.proofs)
+
+    def test_failed_term_or_forced_ack_never_publishes_success(self):
+        for operations in (
+            [(0, ONE), gate.GateError("NATIVE_DOCKER_OPERATION_FAILED")],
+            [
+                (0, ONE),
+                (0, ""),
+                (0, ONE),
+                gate.GateError("NATIVE_DOCKER_OPERATION_FAILED"),
+            ],
+        ):
+            controller = self.controller()
+            with (
+                self.subTest(operations=operations),
+                patch.object(controller, "shell", side_effect=operations),
+                self.assertRaises(gate.GateError),
+            ):
+                controller.request_transport_cancellation(CGROUP, NAMESPACE, 15)
+            self.assertNotIn("transport_cancellation", controller.proofs)
+
+    def test_worker_and_transport_absence_and_fresh_build_checks_unchanged(self):
+        # No mocked stimulus test represents native worker cancellation proof.
+        source = Path(bounded.__file__).read_text(encoding="utf-8")
+        self.assertIn("if code is not None and code != 0 and not remaining:", source)
+        self.assertIn("if gone == 0 and transports_gone == 0:", source)
+        self.assertIn("gate.exited_worker_script(workers)", source)
+        self.assertIn("gate.exited_worker_script(transports)", source)
+        self.assertIn("DAEMON_DIED_INSTEAD_OF_CANCELLING_BUILD", source)
+        self.assertIn('self.build("success", 30)', source)
+        self.assertNotIn('state == "Z"', source)
 
 
 if __name__ == "__main__":

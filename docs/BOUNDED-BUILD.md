@@ -70,14 +70,33 @@ outer launcher must additionally enforce the whole Python invocation and owned
 fallback cleanup before authorizing native execution; this adapter is not
 permission to run a bare unguarded process.
 
-Cancellation first projects only the owned server's exact `buildctl
-dial-stdio` PID/start identities and UID 1000, revalidates the entire set, and
-signals those transport clients with TERM. It never directly kills ExecOp
-workers to fabricate cancellation success. Acceptance requires nonzero Compose
-exit, disappearance of both observed worker identities, a still-running
-daemon, and a fresh successful **Compose** build. If this transport cannot be
-identified or cancellation is ambiguous, the test fails closed; an owned-daemon
-stop during cleanup does not turn it into a passed cancellation proof.
+Cancellation projects only the owned server's exact `buildctl dial-stdio`
+PID/start identities, UID 1000, bounded cgroup ancestry and the server's cgroup
+namespace. It validates the entire set before TERM, observes the same set again
+and, only for exact unchanged survivors, sends one identity-revalidated KILL.
+Both stimuli and their observation share the existing 15-second phase; no
+deadline is extended. New/reused PID, changed start, UID, namespace or cgroup
+fails closed before the forced signal. It never signals the daemon, ExecOp or
+host processes, and never accepts a zombie as disappearance.
+
+The receipt explicitly records `TERM_ONLY` or
+`TERM_THEN_FORCED_DISCONNECT`, the numeric proxy identities and forced count.
+This is a controlled transport-disconnect fallback, **not proof of graceful
+Compose/Solve-client context interruption**; `graceful_compose_context_proven`
+remains false. Acceptance still requires nonzero Compose exit, disappearance
+of both observed worker and transport PID/start identities, a still-running
+daemon, and a fresh successful **Compose** build. Owned-daemon stop during
+cleanup does not turn an unproven cancellation into a pass.
+
+The retained attempt
+`D:/Kairos/runtime/bounded-build-20261003/run-5ae0d524693c4e6bbf6e1a259dbdd4bb/receipt.json`
+failed `LINUX_COMPOSE_CANCELLATION_UNPROVEN`: all 26 post-TERM polls retained
+the same two token-bearing ExecOp identities; Compose did not exit until Job
+cleanup. Owned cleanup succeeded, but that is not cancellation acceptance.
+BuildKit v0.32.2 installs TERM/INT app-context handlers; its `dial-stdio`
+proxy action blocks on stream copies without observing that context. Therefore
+the old TERM-only stimulus does not establish a closed stream. This reviewed
+candidate is still unqualified until one separately authorized native run.
 
 The direct qualifier and adapter share an exclusive create-only lease. Old,
 stale or foreign leases are never adopted/deleted automatically. Fresh UUID4
@@ -125,6 +144,9 @@ there is no automatic increase of caps or default-builder fallback. Until then
 Official references: [remote driver](https://docs.docker.com/build/builders/drivers/remote/),
 [Compose explicit builder](https://docs.docker.com/reference/cli/docker/compose/build/),
 [rootless BuildKit](https://github.com/moby/buildkit/blob/v0.32.2/docs/rootless.md),
+[dial-stdio source](https://github.com/moby/buildkit/blob/v0.32.2/cmd/buildctl/dialstdio.go),
+[signal app context](https://github.com/moby/buildkit/blob/v0.32.2/util/appcontext/appcontext.go),
+[app-context attachment](https://github.com/moby/buildkit/blob/v0.32.2/cmd/buildctl/common/trace.go),
 [docker-container connection helper](https://github.com/moby/buildkit/blob/v0.32.2/client/connhelper/dockercontainer/dockercontainer.go),
 [Buildx store](https://github.com/docker/buildx/blob/master/store/store.go), and
 [Docker tmpfs](https://docs.docker.com/engine/storage/tmpfs/).
