@@ -6,7 +6,7 @@
   },
   "dependencies": {
     "kairos-core": "56df50787eff83c898aa2aeefb426c6ee8482820",
-    "kairos-llm": "9f8cde8501e8c0a84572983bbb8e8a20749681db",
+    "kairos-llm": "0f803a693a103102f1c8d039e59ee73cfcbfd0fd",
     "kairos-persistence": "568007866d170fbe63fb73a0c798c068dc563e1c"
   },
   "infrastructure": {
@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "fbca26b314b0e696f7d6a012db3e6e572c0f6e20",
+      "revision": "0022a2e86112cae4c3e641b5a68eca11648603b6",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
@@ -43,13 +43,13 @@
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "c4c7160b5067e1f50fdb7ea9f7e522334ee4e752",
+      "revision": "e3da76b723435520a5a0198057ca7c1b72cedfb7",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
     "macro-strategist": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "1fa33c389e5ef918492a71b1ce7bc617bc184998",
+      "revision": "0feecabc6f9d2befeb82e7edc70305efbaf9c2bd",
       "package_dir": "kairos_macro",
       "command": "kairos-macro-strategist"
     },

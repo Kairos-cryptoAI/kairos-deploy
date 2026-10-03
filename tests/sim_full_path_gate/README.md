@@ -27,10 +27,34 @@ strategy path still requires its separate review and risk gates. The local
 evaluation receipts and model responses are deterministic fixtures, not a
 production warmup/decision-scheduler proof, historical A/B result, or evidence of alpha.
 The gate also creates a local synthetic completion receipt and verifies that
-its response was observed before the pair clock. It never invokes an LLM. The
-SIM pair ledger does not yet store or independently replay the strategy
-evaluation and provider-attempt source receipts; these fixtures cannot be used
-as a sealed blind-campaign denominator.
+its response was observed before the pair clock. It never invokes an LLM.
+Those legacy pair fixtures do not independently store or replay the strategy
+evaluation and provider-attempt source receipts; they remain geometry-only
+evidence and cannot be used as a sealed blind-campaign denominator.
+
+Separate independent-source cases now compose the existing
+`ResearchEvidenceRepository` and `ResearchProposalCoordinator` against the
+disposable PostgreSQL database. They bind the roster to the actual sealed tape,
+installed Strategy source-tree/config fingerprints, and exact saved decision
+bar. A fresh generator run uses only DB-replayed bars up to the decision clock;
+its actual intent or no-intent output is saved as an independent evaluation
+receipt. A deterministic local proposal double can respond only after the
+durable START is committed, and its references resolve to independently stored
+source bytes. Both the wait/long-bias and long/short-bias cases preserve the
+conflict without creating risk decisions, admissions, trades, commands, or
+results. Late source observations and unknown source/evaluator hashes are
+rejected before local dispatch. Restart replays the exact START/terminal/sample
+without another response or reservation. Other arms are explicitly
+`NOT_CALLED`, not fabricated review outcomes.
+
+The resulting source-qualified seal is only
+`INDEPENDENT_SOURCE_REPLAY_ONLY`; economic qualification, PAPER qualification,
+and LIVE orders remain false. Its source/evaluation/attempt receipt roster
+hashes are verified separately. Synthetic token usage and price-table amounts
+exercise budget validation in an in-memory double only: they are neither paid
+API calls nor mutations of the real provider-spend ledger. This is not a
+production scheduler, real-feed recorder, completed matched A/B campaign, or
+sealed scientific pass.
 
 The adaptive-protocol case additionally registers one fixed
 `ResearchObservationScheduleV1` and its exact three-arm
@@ -48,6 +72,18 @@ history back from the bounded persistence page API and requires replay to
 produce the byte-identical intent. This verifies durable historical replay;
 the fixture is still synthetic and does not qualify a live market-data
 recorder or a strategy.
+
+The additional exit cases use the same real Strategy -> Router -> local review
+-> SIM risk -> durable controller path for target, timeout, and absence of a
+fresh exit book. They persist the exit command before logical arrival, restart
+the database connection/controller, and recover only that prepared command.
+The timeout fixture retains the existing 72-hour exit plan and supplies every
+intervening flat synthetic minute using the replay clock; it does not wait 72
+hours or modify Trial 15. Target/timeout fills require the saved causal book.
+With no fresh exit book the old entry book is stale, so no synthetic exit fill
+is produced and the position remains honestly `UNRESOLVED`. Duplicate closed
+bars/recovery preserve the terminal receipt, three lifecycle events, exactly
+two commands and one result; source and readiness gates remain unchanged.
 
 Every outcome is `SIMULATED`. This gate has no credentials, external endpoints,
 or durable host storage. It cannot change readiness flags, qualify a strategy,

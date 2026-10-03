@@ -46,13 +46,28 @@ from kairos_core.research_pairing import (
     build_research_decision_sample,
 )
 from kairos_execution.simulation import SimulationExecutionController
+from kairos_llm.budget import BudgetedLLMGateway
+from kairos_llm.models import LLMWorkload, ModelRouter
+from kairos_llm.pricing import PriceTable
+from kairos_llm.proposals import LLMProposalOutputV1
+from kairos_llm.research import (
+    RESEARCH_INPUT_FEATURE_SHA256,
+    ResearchEvidenceError,
+    ResearchPromptArtifactV1,
+    ResearchProposalCoordinator,
+)
+from kairos_llm.schemas import LLMResult, TokenUsage
 from kairos_persistence import (
     Database,
+    MessageIdentityConflict,
     MigrationProfile,
     PersistenceSettings,
     ResearchAdaptiveCandidateProtocolRepository,
     ResearchDecisionSampleRepository,
+    ResearchEvidenceRepository,
     ResearchObservationScheduleRepository,
+    ResearchSourceReceiptV1,
+    ResearchStrategyEvaluationReceiptV1,
     SimulationRepository,
     SimulatorProposalRepository,
     consume_simulator_proposals,
@@ -62,6 +77,7 @@ from kairos_risk import SimulationRiskPolicy
 from kairos_router.aggregation import TextAggregate
 from kairos_router.candidate import CandidateRouterPolicy
 from kairos_strategy.candles import Candle
+from kairos_strategy.provenance import installed_source_tree_sha256
 from kairos_strategy.registry import get_strategy
 from kairos_strategy.runtime import (
     candle_to_closed_bar,
@@ -107,6 +123,76 @@ class _LocalReviewGateway:
         )
 
 
+class _LocalResearchBudget:
+    """Synthetic accounting only; never the runtime or paid-provider budget."""
+
+    def __init__(self) -> None:
+        self.reservations: list[dict[str, object]] = []
+        self.commits: list[dict[str, object]] = []
+
+    async def reserve(self, **kwargs) -> None:
+        self.reservations.append(kwargs)
+
+    async def commit(self, **kwargs) -> None:
+        self.commits.append(kwargs)
+
+
+class _LocalResearchGateway:
+    """Fixed proposal double; checks committed START before any local response."""
+
+    def __init__(
+        self, journal: ResearchEvidenceRepository, action: LLMProposalAction, *, forbid_calls: bool = False
+    ) -> None:
+        self.journal, self.action = journal, action
+        self.forbid_calls = forbid_calls
+        self.settings = SimpleNamespace(max_retries=0, max_output_tokens=2_048)
+        self.router = ModelRouter()
+        self.calls: list[dict[str, object]] = []
+
+    async def complete(self, **kwargs) -> LLMResult:
+        assert not self.forbid_calls, "restart must replay durable receipts without another local response"
+        payload = json.loads(kwargs["user"].split("\n", 1)[1])
+        roster = await self.journal.pending_observations(campaign_id=payload["campaign_id"])
+        assert any(
+            row["sample_id"] == payload["sample_id"]
+            and row["arm_id"] == "llm-proposal-research"
+            and row["state"] == "STARTED_UNRESOLVED"
+            for row in roster
+        )
+        for item in payload["sources"]:
+            stored = await self.journal.load_source(item["receipt_sha256"])
+            assert stored.content == item["content"]
+            assert stored.content_sha256 == item["evidence"]["content_sha256"]
+        self.calls.append(kwargs)
+        route = self.router.resolve(workload=kwargs["workload"])
+        content = json.dumps(
+            {
+                "contract_version": "kairos-llm-proposal-output.v1",
+                "action": self.action.value,
+                "rationale": "Fixed synthetic conflict fixture; advisory only, not an order.",
+                "evidence_ids": [item["evidence_id"] for item in payload["sources"]],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        # Nonzero synthetic usage exercises the real budget validation. This
+        # price-table calculation is not a provider bill or paid reservation.
+        usage = TokenUsage(input_tokens=150, output_tokens=30)
+        return LLMResult(
+            content=content,
+            parsed=LLMProposalOutputV1.model_validate_json(content),
+            model=route.choice.model,
+            resolved_model=route.choice.model,
+            effort=route.effort.value,
+            usage=usage,
+            cost_usd=PriceTable().cost(route.choice.model, usage),
+            latency_s=0.0,
+            workload=kwargs["workload"].value,
+            provider=route.choice.provider.value,
+            request_id=f"local-research-{payload['sample_id']}",
+        )
+
+
 class _ProposalGateBus(MessageBus):
     """One-message transport double for the real SIM proposal consumer."""
 
@@ -119,9 +205,7 @@ class _ProposalGateBus(MessageBus):
 
     async def publish(self, topic: str, message: Publishable) -> str:
         message_id = f"sim-proposal-{self._messages.qsize() + 1}"
-        await self._messages.put(
-            BusEnvelope(id=message_id, topic=topic, payload=self._to_payload(message))
-        )
+        await self._messages.put(BusEnvelope(id=message_id, topic=topic, payload=self._to_payload(message)))
         return message_id
 
     async def subscribe(
@@ -298,19 +382,36 @@ def _auxiliary_bar(symbol: str):
     )
 
 
-def _exit_bar(intent):
+def _exit_bar(intent, *, exit_kind: str = "STOP_EXIT_IOC", open_time_ms: int | None = None):
     if intent.side is not Side.LONG:
         raise AssertionError("sealed full-path fixture must emit the expected frozen LONG intent")
+    opened_at = intent.entry_eligible_ts_ms if open_time_ms is None else open_time_ms
+    if exit_kind == "STOP_EXIT_IOC":
+        high, low, close = (
+            intent.exit_plan.target_price * 1.01,
+            intent.exit_plan.stop_price * 0.99,
+            intent.reference_price,
+        )
+    elif exit_kind == "TARGET_EXIT_IOC":
+        high, low, close = (
+            intent.exit_plan.target_price * 1.01,
+            intent.reference_price,
+            intent.reference_price,
+        )
+    elif exit_kind == "TIMEOUT_EXIT_IOC":
+        high = low = close = intent.reference_price
+    else:
+        raise ValueError("unsupported synthetic exit fixture")
     return candle_to_closed_bar(
         Candle(
             symbol=intent.symbol,
             timeframe="1m",
-            open_time_ms=intent.entry_eligible_ts_ms,
-            close_time_ms=intent.entry_eligible_ts_ms + 59_999,
+            open_time_ms=opened_at,
+            close_time_ms=opened_at + 59_999,
             open=intent.reference_price,
-            high=intent.exit_plan.target_price * 1.01,
-            low=intent.exit_plan.stop_price * 0.99,
-            close=intent.reference_price,
+            high=high,
+            low=low,
+            close=close,
             volume=100.0,
             quote_volume=100.0 * intent.reference_price,
             taker_buy_volume=55.0,
@@ -468,6 +569,125 @@ def _paired_research_sample(
     )
 
 
+def _source_qualified_fixture(bars, session: SimulationSessionV1):
+    """Bind a synthetic roster to actual installed code and immutable tape bytes.
+
+    This is a local engineering fixture, not a registered scientific campaign.
+    The evaluator is run separately from the persisted sources below.
+    """
+
+    definition = get_strategy("regime_aligned_right_tail_v1")
+    config = RegimeAlignedRightTailConfig(regime_sma_bars=3)
+    code_sha256 = installed_source_tree_sha256(definition.source_files)
+    evaluator_sha256 = canonical_sha256(
+        {
+            "contract_version": "sim-full-path-source-evaluator.v1",
+            "strategy_code_sha256": code_sha256,
+            "config_sha256": config.fingerprint,
+            "market_cutoff_ts_ms": bars[-1].close_time_ms,
+            "input_bar_sha256s": [bar.bar_sha256 for bar in bars],
+        }
+    )
+    prompt = ResearchPromptArtifactV1(
+        system="Use only the independently saved synthetic market evidence. Return strict JSON.",
+        user_prefix="Data:",
+        workload=LLMWorkload.AGGREGATOR_NORMAL,
+        reasoning_effort="medium",
+        provider_effort="medium",
+        max_output_tokens=2_048,
+    )
+    schedule = ResearchObservationScheduleV1(
+        campaign_id=f"{session.tape_id}-source-research",
+        strategy_id=definition.strategy_id,
+        strategy_revision=definition.revision,
+        source_set_sha256=session.tape_sha256,
+        evaluator_sha256=evaluator_sha256,
+        windows=(
+            ResearchObservationWindowV1(
+                sample_id="saved-bar-sample-1",
+                symbol=bars[-1].symbol,
+                timeframe=bars[-1].timeframe,
+                market_as_of_ts_ms=bars[-1].close_time_ms,
+                market_snapshot_sha256=bars[-1].bar_sha256,
+                paired_at_ts_ms=bars[-1].close_time_ms + 500,
+                sample_deadline_ts_ms=bars[-1].close_time_ms + 10_000,
+            ),
+        ),
+    )
+    common = {
+        "candidate_revision": definition.revision,
+        "artifact_sha256": code_sha256,
+        "input_feature_sha256": RESEARCH_INPUT_FEATURE_SHA256,
+        "decision_mapping_sha256": canonical_sha256({"outcomes": [item.value for item in LLMProposalAction]}),
+        "hypothetical_exit_sha256": canonical_sha256(
+            {
+                "stop_atr": config.stop_atr_multiple,
+                "reward_to_risk": config.target_reward_to_risk,
+                "max_hold_hours": config.max_hold_hours,
+            }
+        ),
+        "cost_model_sha256": session.assumptions.assumptions_sha256,
+    }
+    route = ModelRouter().resolve(workload=prompt.workload)
+    llm = {
+        "provider": route.choice.provider.value,
+        "model": route.choice.model,
+        "prompt_sha256": prompt.prompt_sha256,
+        "schema_sha256": canonical_sha256(LLMProposalOutputV1.model_json_schema()),
+    }
+    protocol = AdaptiveCandidateProtocolV1(
+        campaign_id=schedule.campaign_id,
+        schedule_digest=schedule.schedule_digest,
+        arms=(
+            StrategyOnlyAdaptiveCandidateArmV1(candidate_id="saved-strategy", **common),
+            StrategyReviewAdaptiveCandidateArmV1(candidate_id="not-called-review", **common, **llm),
+            LLMProposalAdaptiveCandidateArmV1(candidate_id="local-proposal-double", **common, **llm),
+        ),
+    )
+    window = schedule.windows[0]
+    source = ResearchSourceReceiptV1(
+        campaign_id=schedule.campaign_id,
+        sample_id=window.sample_id,
+        schedule_digest=schedule.schedule_digest,
+        candidate_protocol_digest=protocol.protocol_digest,
+        source_kind="MARKET_SNAPSHOT",
+        source_name="sealed-synthetic-bars",
+        reference=f"{window.symbol}:1m:{window.market_as_of_ts_ms}",
+        source_as_of_ts_ms=window.market_as_of_ts_ms,
+        observed_at_ts_ms=window.market_as_of_ts_ms,
+        content=bars[-1].identity_payload(),
+    )
+    assert source.content_sha256 == bars[-1].bar_sha256
+    return schedule, protocol, prompt, source, config
+
+
+def _uncalled_verified_sample(schedule, protocol, evaluation, arm_id: str):
+    """Explicitly retain uncalled arms, never infer review decisions from bias."""
+
+    window = schedule.windows[0]
+    sample = build_research_decision_sample(
+        ScheduledResearchSampleV1(
+            campaign_id=schedule.campaign_id,
+            arm_id=arm_id,
+            sample_id=window.sample_id,
+            symbol=window.symbol,
+            timeframe=window.timeframe,
+            market_as_of_ts_ms=window.market_as_of_ts_ms,
+            market_snapshot_sha256=window.market_snapshot_sha256,
+            strategy_id=schedule.strategy_id,
+            strategy_revision=schedule.strategy_revision,
+            paired_at_ts_ms=window.paired_at_ts_ms,
+            sample_deadline_ts_ms=window.sample_deadline_ts_ms,
+        ),
+        strategy_evaluation=evaluation.as_evidence(arm_id),
+        strategy_intent=evaluation.intent,
+        llm_was_called=False,
+    )
+    return ResearchDecisionSampleV1.model_validate(
+        {**sample.to_payload(), "sample_record_id": None, "arm_protocol_digest": protocol.arm_digest(arm_id)}
+    )
+
+
 def _frame(
     *,
     tape_id: str,
@@ -516,7 +736,13 @@ def _settings() -> tuple[PersistenceSettings, str]:
     return PersistenceSettings(database_url=url), database_name
 
 
-async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str):
+async def _seed_sealed_session(
+    repository: SimulationRepository,
+    *,
+    tape_id: str,
+    exit_kind: str = "STOP_EXIT_IOC",
+    include_exit_book: bool = True,
+):
     bars = _strategy_bars()
     config = RegimeAlignedRightTailConfig(regime_sma_bars=3)
     first = generate_runtime_strategy_intents("regime_aligned_right_tail_v1", bars, config)
@@ -524,10 +750,20 @@ async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str
     assert len(first) == len(replay) == 1
     assert canonical_intent_batch_bytes(first) == canonical_intent_batch_bytes(replay)
     intent = first[0]
-    exit_bar = _exit_bar(intent)
+    exit_open = intent.entry_eligible_ts_ms
+    if exit_kind == "TIMEOUT_EXIT_IOC":
+        exit_open += intent.exit_plan.max_holding_ms
+    exit_bar = _exit_bar(intent, exit_kind=exit_kind, open_time_ms=exit_open)
 
-    for bar in (*bars, exit_bar):
+    for bar in bars:
         assert await repository.record_closed_bar(tape_id, bar)
+    # Retain the unchanged 72-hour plan. Replay every intervening flat minute
+    # so the sealed tape remains contiguous; no elapsed-time waiting occurs.
+    for opened_at in range(intent.entry_eligible_ts_ms, exit_bar.open_time_ms, 60_000):
+        assert await repository.record_closed_bar(
+            tape_id, _exit_bar(intent, exit_kind="TIMEOUT_EXIT_IOC", open_time_ms=opened_at)
+        )
+    assert await repository.record_closed_bar(tape_id, exit_bar)
     for symbol in _SYMBOLS[1:]:
         assert await repository.record_closed_bar(tape_id, _auxiliary_bar(symbol))
 
@@ -547,17 +783,23 @@ async def _seed_sealed_session(repository: SimulationRepository, *, tape_id: str
         assert await repository.record_book_frame(frame)
         frames[symbol] = frame
         previous = frame.frame_sha256
-    exit_bid = _tick(intent.exit_plan.stop_price * 1.01, rounding=ROUND_FLOOR)
-    exit_frame = _frame(
-        tape_id=tape_id,
-        sequence=len(_SYMBOLS) + 1,
-        symbol=intent.symbol,
-        persisted_at_ms=exit_bar.close_time_ms + 10,
-        previous_frame_sha256=previous,
-        bid=exit_bid,
-        ask=_tick(exit_bid * 1.0002, rounding=ROUND_CEILING),
-    )
-    assert await repository.record_book_frame(exit_frame)
+    exit_price = {
+        "STOP_EXIT_IOC": intent.exit_plan.stop_price * 1.01,
+        "TARGET_EXIT_IOC": intent.exit_plan.target_price * 1.001,
+        "TIMEOUT_EXIT_IOC": intent.reference_price,
+    }[exit_kind]
+    if include_exit_book:
+        exit_bid = _tick(exit_price, rounding=ROUND_FLOOR)
+        exit_frame = _frame(
+            tape_id=tape_id,
+            sequence=len(_SYMBOLS) + 1,
+            symbol=intent.symbol,
+            persisted_at_ms=exit_bar.close_time_ms + 10,
+            previous_frame_sha256=previous,
+            bid=exit_bid,
+            ask=_tick(exit_bid * 1.0002, rounding=ROUND_CEILING),
+        )
+        assert await repository.record_book_frame(exit_frame)
     seal = await repository.seal_tape(tape_id, sealed_at_ms=exit_bar.close_time_ms + 100)
     assert seal.execution_environment == "SIMULATED"
     assert not seal.paper_qualification_eligible and not seal.trial15_eligible and not seal.alpha_claim
@@ -652,13 +894,9 @@ async def _seed_wait_session(repository: SimulationRepository, *, tape_id: str):
     return bars, config, session
 
 
-async def _assert_strategy_replays_from_sealed_tape(
-    repository: SimulationRepository, tape_id: str, intent
-) -> None:
-    """Prove strategy replay uses the bounded, immutable database bar reader."""
-
+async def _load_research_bars(repository: SimulationRepository, tape_id: str, market_as_of_ms: int):
+    """Bounded keyset replay; never feed a future exit bar into the evaluator."""
     assert await repository.verify_tape(tape_id)
-    expected_bars = _strategy_bars()
     cursor: int | None = None
     replayed_bars = []
     page_size = 257
@@ -671,15 +909,25 @@ async def _assert_strategy_replays_from_sealed_tape(
         )
         if not page:
             break
-        replayed_bars.extend(page)
+        replayed_bars.extend(bar for bar in page if bar.close_time_ms <= market_as_of_ms)
         cursor = page[-1].open_time_ms
-        if len(page) < page_size:
+        if len(page) < page_size or page[-1].close_time_ms >= market_as_of_ms:
             break
+    return tuple(replayed_bars)
 
-    assert tuple(replayed_bars[: len(expected_bars)]) == expected_bars
+
+async def _assert_strategy_replays_from_sealed_tape(
+    repository: SimulationRepository, tape_id: str, intent
+) -> None:
+    """Prove strategy replay uses the bounded, immutable database bar reader."""
+
+    expected_bars = _strategy_bars()
+    replayed_bars = await _load_research_bars(repository, tape_id, intent.decision_ts_ms)
+
+    assert replayed_bars == expected_bars
     replayed_intents = generate_runtime_strategy_intents(
         "regime_aligned_right_tail_v1",
-        tuple(replayed_bars[: len(expected_bars)]),
+        replayed_bars,
         RegimeAlignedRightTailConfig(regime_sma_bars=3),
     )
     assert canonical_intent_batch_bytes(replayed_intents) == canonical_intent_batch_bytes((intent,))
@@ -831,15 +1079,24 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
             arm_id=opposite_sample.arm_id,
             limit=10,
         ) == (opposite_sample,)
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_risk_decisions WHERE session_id=$1", session.session_id
-        ) == 0
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_admissions WHERE session_id=$1", session.session_id
-        ) == 0
-        assert await database.pool.fetchval(
-            "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
-        ) == 0
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_risk_decisions WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_admissions WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_commands WHERE session_id=$1", session.session_id
+            )
+            == 0
+        )
         stored_evidence = await database.pool.fetchrow(
             """SELECT frame_contract_version, source_reason, raw_payload_text, raw_payload_sha256
                FROM sim_book_frames WHERE tape_id=$1 AND tape_sequence=1""",
@@ -905,6 +1162,271 @@ async def test_sealed_full_path_is_deterministic_and_stop_wins_after_restart() -
         assert await repository.verify_trade_chain(trade.trade_id)
         journal = await repository.load_trade_journal(trade.trade_id)
         assert journal is not None and journal.state == "FLAT" and len(journal.events) == 3
+        assert await repository.list_prepared_commands(session.session_id) == ()
+        assert await repository.list_terminal_trades_without_result(session.session_id) == ()
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_commands WHERE trade_id=$1", trade.trade_id
+            )
+            == 2
+        )
+        assert (
+            await database.pool.fetchval("SELECT count(*) FROM sim_results WHERE trade_id=$1", trade.trade_id)
+            == 1
+        )
+    finally:
+        await database.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scenario", "action", "expected_strategy"),
+    [("wait", LLMProposalAction.LONG_BIAS, "NO_INTENT"), ("opposite", LLMProposalAction.SHORT_BIAS, "LONG")],
+)
+async def test_source_qualified_conflict_replays_independent_receipts_without_another_call(
+    scenario, action, expected_strategy
+) -> None:
+    """Compose actual Strategy replay with the real journal, never an economic seal."""
+
+    policy.validate_environment()
+    policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
+    policy.validate_installed_sources()
+    settings, database_name = _settings()
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+    await connect_verified_database(database, database_name, local_only=True)
+    try:
+        await database.migrate()
+        simulation = SimulationRepository(database.pool)
+        if scenario == "wait":
+            _, _, session = await _seed_wait_session(simulation, tape_id="source-qualified-wait-tape")
+            market_clock = session.started_at_ms
+        else:
+            intent, session, _, _ = await _seed_sealed_session(
+                simulation, tape_id="source-qualified-opposite-tape"
+            )
+            market_clock = intent.decision_ts_ms
+        bars = await _load_research_bars(simulation, session.tape_id, market_clock)
+        assert len(bars) == 1_500 and bars[-1].close_time_ms == market_clock
+        schedule, protocol, prompt, source, config = _source_qualified_fixture(bars, session)
+        journal = ResearchEvidenceRepository(database)
+        execution_tables = (
+            "sim_risk_decisions",
+            "sim_admissions",
+            "sim_trades",
+            "sim_commands",
+            "sim_results",
+        )
+        counts_before = {
+            table: await database.pool.fetchval(f"SELECT count(*) FROM {table}") for table in execution_tables
+        }
+        assert await ResearchObservationScheduleRepository(database).register(schedule)
+        assert await ResearchAdaptiveCandidateProtocolRepository(database).register(protocol)
+        assert await journal.enroll_campaign(schedule.campaign_id)
+        assert await journal.record_source(source)
+        assert not await journal.record_source(source)
+        assert await journal.load_source(source.receipt_sha256) == source
+
+        # Evaluate only DB-replayed, causal bars after the roster/source is
+        # committed. No supplied outcome can replace this actual generator run.
+        evaluated = generate_runtime_strategy_intents("regime_aligned_right_tail_v1", bars, config)
+        assert len(evaluated) <= 1
+        assert canonical_intent_batch_bytes(evaluated) == canonical_intent_batch_bytes(
+            generate_runtime_strategy_intents("regime_aligned_right_tail_v1", bars, config)
+        )
+        evaluation = ResearchStrategyEvaluationReceiptV1(
+            campaign_id=schedule.campaign_id,
+            sample_id=source.sample_id,
+            schedule_digest=schedule.schedule_digest,
+            candidate_protocol_digest=protocol.protocol_digest,
+            strategy_id=schedule.strategy_id,
+            strategy_revision=schedule.strategy_revision,
+            symbol=bars[-1].symbol,
+            timeframe=bars[-1].timeframe,
+            evidence_as_of_ts_ms=market_clock,
+            evaluated_at_ts_ms=market_clock + 10,
+            market_snapshot_sha256=source.content_sha256,
+            evaluator_sha256=schedule.evaluator_sha256,
+            source_receipt_sha256s=(source.receipt_sha256,),
+            intent=evaluated[0] if evaluated else None,
+        )
+        assert await journal.record_evaluation(evaluation)
+        assert not await journal.record_evaluation(evaluation)
+        assert await journal.load_evaluation(evaluation.receipt_sha256) == evaluation
+        wrong_evaluator = ResearchStrategyEvaluationReceiptV1.model_validate(
+            {**evaluation.model_dump(mode="json"), "receipt_sha256": None, "evaluator_sha256": "0" * 64}
+        )
+        with pytest.raises(MessageIdentityConflict, match="evaluator"):
+            await journal.record_evaluation(wrong_evaluator)
+
+        late_source = ResearchSourceReceiptV1(
+            campaign_id=schedule.campaign_id,
+            sample_id=source.sample_id,
+            schedule_digest=schedule.schedule_digest,
+            candidate_protocol_digest=protocol.protocol_digest,
+            source_kind="NEWS",
+            source_name="local-late-fixture",
+            reference="late-synthetic-news",
+            source_as_of_ts_ms=market_clock - 1,
+            observed_at_ts_ms=market_clock + 1,
+            content={"headline": "Synthetic late observation, never admitted as causal input."},
+        )
+        assert await journal.record_source(late_source)
+        budget = _LocalResearchBudget()
+        underlying = _LocalResearchGateway(journal, action)
+        clocks = iter((market_clock + 100, market_clock + 200))
+        coordinator = ResearchProposalCoordinator(
+            BudgetedLLMGateway(underlying, budget), journal, clock=lambda: next(clocks)
+        )
+        request = {
+            "schedule": schedule,
+            "protocol": protocol,
+            "sample_id": source.sample_id,
+            "prompt": prompt,
+            "source_receipt_sha256s": (source.receipt_sha256,),
+            "workload": prompt.workload,
+        }
+        with pytest.raises(ResearchEvidenceError, match="causal cutoff"):
+            await coordinator.observe(
+                **{**request, "source_receipt_sha256s": (source.receipt_sha256, late_source.receipt_sha256)}
+            )
+        with pytest.raises(MessageIdentityConflict):
+            await coordinator.observe(**{**request, "source_receipt_sha256s": ("0" * 64,)})
+        assert budget.reservations == underlying.calls == []
+        observation = await coordinator.observe(**request)
+        assert observation.terminal is not None and observation.terminal.terminal_status == "COMPLETED"
+        assert len(underlying.calls) == len(budget.reservations) == len(budget.commits) == 1
+        assert observation.start.attempt_id == budget.reservations[0]["reservation_id"]
+        assert observation.start.attempt_id == budget.commits[0]["reservation_id"]
+        sample = await coordinator.replay_sample(
+            **request, evaluation_receipt_sha256=evaluation.receipt_sha256
+        )
+        assert sample.strategy_outcome == expected_strategy and sample.llm_outcome == action.value
+        assert sample.arm_protocol_digest == protocol.arm_digest("llm-proposal-research")
+        assert sample.strategy_evaluation_sha256 == evaluation.receipt_sha256
+        assert sample.llm_completion_receipt_id == observation.terminal.completion.completion_receipt_id
+        assert sample.authority == "SIM_RESEARCH_ONLY"
+
+        await database.close()
+        database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+        await connect_verified_database(database, database_name, local_only=True)
+        journal = ResearchEvidenceRepository(database)
+        restart_budget = _LocalResearchBudget()
+        restart_gateway = _LocalResearchGateway(journal, action, forbid_calls=True)
+        restarted = ResearchProposalCoordinator(BudgetedLLMGateway(restart_gateway, restart_budget), journal)
+        assert await restarted.observe(**request) == observation
+        assert (
+            await restarted.replay_sample(**request, evaluation_receipt_sha256=evaluation.receipt_sha256)
+            == sample
+        )
+        assert not await journal.record_verified_sample(sample)
+        assert restart_budget.reservations == restart_budget.commits == restart_gateway.calls == []
+        for arm_id in RESEARCH_ARMS[:2]:
+            uncalled = _uncalled_verified_sample(schedule, protocol, evaluation, arm_id)
+            assert uncalled.llm_outcome == "NOT_CALLED"
+            assert await journal.record_verified_sample(uncalled)
+        qualified = await journal.seal_verified_coverage(campaign_id=schedule.campaign_id)
+        assert await journal.seal_verified_coverage(campaign_id=schedule.campaign_id) == qualified
+        assert qualified.qualification == "INDEPENDENT_SOURCE_REPLAY_ONLY"
+        assert not qualified.economic_qualification and not qualified.paper_qualification
+        assert not qualified.live_orders_allowed
+        assert qualified.coverage.expected_result_count == 3
+        assert qualified.source_ids_sha256 == canonical_sha256(
+            {"receipt_ids": sorted((source.receipt_sha256, late_source.receipt_sha256))}
+        )
+        assert qualified.evaluation_ids_sha256 == canonical_sha256(
+            {"receipt_ids": [evaluation.receipt_sha256]}
+        )
+        assert qualified.attempt_start_ids_sha256 == canonical_sha256(
+            {"receipt_ids": [observation.start.receipt_sha256]}
+        )
+        assert qualified.attempt_terminal_ids_sha256 == canonical_sha256(
+            {"receipt_ids": [observation.terminal.receipt_sha256]}
+        )
+        counts_after = {
+            table: await database.pool.fetchval(f"SELECT count(*) FROM {table}") for table in execution_tables
+        }
+        assert counts_after == counts_before
+    finally:
+        await database.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exit_kind", "include_exit_book"),
+    [("TARGET_EXIT_IOC", True), ("TIMEOUT_EXIT_IOC", True), ("TARGET_EXIT_IOC", False)],
+)
+async def test_durable_target_timeout_and_missing_fresh_book_survive_restart_without_duplicate_fill(
+    exit_kind, include_exit_book
+) -> None:
+    policy.validate_environment()
+    policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
+    policy.validate_installed_sources()
+    settings, database_name = _settings()
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+    await connect_verified_database(database, database_name, local_only=True)
+    try:
+        await database.migrate()
+        repository = SimulationRepository(database.pool)
+        intent, session, entry_frame, exit_bar = await _seed_sealed_session(
+            repository,
+            tape_id=f"full-path-{exit_kind.lower()}-{int(include_exit_book)}-tape",
+            exit_kind=exit_kind,
+            include_exit_book=include_exit_book,
+        )
+        await _assert_strategy_replays_from_sealed_tape(repository, session.tape_id, intent)
+        review = await _review(intent, ReviewDecision.ALLOW)
+        decided_at_ms = intent.entry_eligible_ts_ms + 10
+        decision = SimulationRiskPolicy(source="sim-full-path-exit-risk").evaluate(
+            session=session,
+            review=review,
+            selected_book_frame=entry_frame,
+            decided_at_ms=decided_at_ms,
+            requested_quantity=0.01,
+        )
+        assert decision.approved and not decision.alpha_claim
+        assert await repository.record_risk_decision(decision)
+        admission = SimulationAdmissionV2(
+            source="sim-full-path-exits", decision=decision, admitted_at_ms=decided_at_ms
+        )
+        controller = SimulationExecutionController(repository, source="sim-full-path-exits")
+        trade = await controller.start_trade(admission, created_at_ms=decided_at_ms)
+        entry = await controller.submit_entry(trade, as_of_ms=intent.entry_eligible_ts_ms + 35)
+        assert entry.receipt is not None and entry.receipt.status == "FILLED"
+        # Persist the exit before logical arrival, then restart with PREPARED
+        # evidence rather than fabricating a successful terminal receipt.
+        pending = await controller.process_closed_bar(trade, exit_bar, as_of_ms=exit_bar.close_time_ms + 1)
+        assert pending is not None and pending.receipt is None and pending.lifecycle_state == "ACTIVE"
+        assert pending.command.command_kind == exit_kind
+        await database.close()
+        database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+        await connect_verified_database(database, database_name, local_only=True)
+        repository = SimulationRepository(database.pool)
+        restarted = SimulationExecutionController(repository, source="sim-full-path-exits")
+        outcomes = await restarted.recover_prepared(session.session_id, as_of_ms=exit_bar.close_time_ms + 30)
+        assert len(outcomes) == 1 and outcomes[0].command == pending.command
+        outcome = outcomes[0]
+        assert outcome.receipt is not None
+        if include_exit_book:
+            assert outcome.receipt.status == "FILLED" and outcome.lifecycle_state == "FLAT"
+            assert outcome.receipt.filled_quantity == pytest.approx(entry.receipt.filled_quantity)
+        else:
+            assert outcome.receipt.status == "BLOCKED" and outcome.lifecycle_state == "UNRESOLVED"
+            assert "STALE_BOOK" in outcome.receipt.reason_codes
+            assert outcome.receipt.filled_quantity == 0 and outcome.receipt.average_price is None
+            assert outcome.receipt.model_frame_sha256 is None
+        assert (
+            await restarted.process_closed_bar(trade, exit_bar, as_of_ms=exit_bar.close_time_ms + 100) is None
+        )
+        assert (
+            await restarted.recover_prepared(session.session_id, as_of_ms=exit_bar.close_time_ms + 100) == ()
+        )
+        receipt = await repository.load_command_receipt(pending.command.command_id)
+        assert receipt == outcome.receipt
+        journal = await repository.load_trade_journal(trade.trade_id)
+        assert journal is not None and len(journal.events) == 3 and journal.state == outcome.lifecycle_state
+        assert await repository.verify_trade_chain(trade.trade_id)
         assert await repository.list_prepared_commands(session.session_id) == ()
         assert await repository.list_terminal_trades_without_result(session.session_id) == ()
         assert (
@@ -990,9 +1512,12 @@ async def test_strategy_wait_and_independent_llm_proposal_are_only_sim_research_
             limit=10,
         )
         for table in ("sim_risk_decisions", "sim_admissions", "sim_trades", "sim_commands"):
-            assert await database.pool.fetchval(
-                f"SELECT count(*) FROM {table} WHERE session_id=$1", session.session_id
-            ) == 0
+            assert (
+                await database.pool.fetchval(
+                    f"SELECT count(*) FROM {table} WHERE session_id=$1", session.session_id
+                )
+                == 0
+            )
     finally:
         await database.close()
 
