@@ -652,13 +652,20 @@ def volume() -> dict:
     return {"type": "volume", "destination": "/alertmanager", "rw": True}
 
 
-def execute() -> dict:
+def execute(*, invocation_owner: str | None = None) -> dict:
     if os.name != "nt":
         raise StateGateError("REVIEWED_WINDOWS_PROCESS_JOB_REQUIRED")
+    if invocation_owner is not None:
+        try:
+            identity = uuid.UUID(hex=invocation_owner)
+        except (ValueError, AttributeError):
+            raise StateGateError("EXACT_INVOCATION_UUID4_REQUIRED") from None
+        if identity.version != 4 or identity.hex != invocation_owner:
+            raise StateGateError("EXACT_INVOCATION_UUID4_REQUIRED")
     safe_path(PROOF_ROOT.parent)
     PROOF_ROOT.mkdir(parents=False, exist_ok=True)
     safe_path(PROOF_ROOT)
-    owner = uuid.uuid4().hex
+    owner = invocation_owner or uuid.uuid4().hex
     started = time.monotonic()
     result = spec()
     result["created_at_utc"] = datetime.now(UTC).isoformat()
@@ -716,6 +723,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-synthetic-only", action="store_true")
     parser.add_argument("--confirmation")
+    parser.add_argument("--invocation-owner")
     args = parser.parse_args(argv)
     if not args.native_synthetic_only:
         print(json.dumps(spec(), sort_keys=True))
@@ -728,7 +736,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        result = execute()
+        result = execute(invocation_owner=args.invocation_owner)
     except Exception as error:  # noqa: BLE001 - sanitized fail-closed CLI boundary.
         result = {"result": "BLOCKED", "category": type(error).__name__}
     print(json.dumps(result, sort_keys=True))

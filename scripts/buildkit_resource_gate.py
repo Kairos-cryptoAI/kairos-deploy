@@ -987,8 +987,19 @@ class Controller:
 
 
 def execute(
-    image: str, image_id: str, expected_source_sha: str, expected_deploy_sha: str
+    image: str,
+    image_id: str,
+    expected_source_sha: str,
+    expected_deploy_sha: str,
+    *,
+    invocation_owner: str | None = None,
 ) -> Path:
+    owner = uuid.uuid4().hex if invocation_owner is None else invocation_owner
+    if (
+        not isinstance(owner, str)
+        or re.fullmatch(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}", owner) is None
+    ):
+        raise GateError("EXACT_UUID4_INVOCATION_OWNER_REQUIRED")
     digest(expected_source_sha)
     if (
         not re.fullmatch(r"[0-9a-f]{40}", expected_deploy_sha)
@@ -998,7 +1009,6 @@ def execute(
     image_reference(image)
     digest(image_id, image=True)
     strict_path(OPS)
-    owner = uuid.uuid4().hex
     lease = OPS / "execution.lease"
     # An existing/stale lease is never deleted, adopted, or automatically retried.
     with lease.open("xb") as stream:
@@ -1073,6 +1083,7 @@ def execute(
                     "lease_retained": not cleanup,
                     "source_sha256": expected_source_sha,
                     "deploy_sha": expected_deploy_sha,
+                    "invocation_owner": owner,
                     "image": image,
                     "image_id": image_id,
                     "proofs": controller.proofs if controller else {},
@@ -1113,6 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-source-sha")
     parser.add_argument("--expected-deploy-sha")
     parser.add_argument("--confirm")
+    parser.add_argument("--invocation-owner")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -1133,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
             args.image_id,
             args.expected_source_sha,
             args.expected_deploy_sha,
+            invocation_owner=args.invocation_owner,
         )
         print(json.dumps({"receipt": str(result), "result": "PASS_SYNTHETIC_ONLY"}))
         return 0

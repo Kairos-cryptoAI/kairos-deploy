@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from scripts import buildkit_resource_gate as gate
 
-OWNER = "a" * 32
+OWNER = "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
 IMAGE_ID = "sha256:" + "b" * 64
 CID = "c" * 64
 
@@ -268,6 +268,83 @@ class ContractTests(unittest.TestCase):
         ):
             gate.execute(gate.BUILDKIT_IMAGE, IMAGE_ID, "e" * 64, "a" * 40)
         native.assert_not_called()
+
+    def test_invalid_invocation_owner_is_rejected_before_path_lease_or_native(self):
+        for owner in ("a" * 32, OWNER.upper(), OWNER + " ", "../old", "", 1, True):
+            with (
+                self.subTest(owner=owner),
+                patch.object(gate, "strict_path") as path,
+                patch.object(gate, "Native") as native,
+                patch.object(gate.uuid, "uuid4") as fresh,
+                self.assertRaisesRegex(
+                    gate.GateError, "EXACT_UUID4_INVOCATION_OWNER_REQUIRED"
+                ),
+            ):
+                gate.execute(
+                    gate.BUILDKIT_IMAGE,
+                    IMAGE_ID,
+                    "e" * 64,
+                    "a" * 40,
+                    invocation_owner=owner,
+                )
+            path.assert_not_called()
+            native.assert_not_called()
+            fresh.assert_not_called()
+
+    def test_explicit_watchdog_owner_binds_only_fresh_exclusive_lease(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(gate, "OPS", Path(folder)),
+            patch.object(gate, "sha", return_value="e" * 64),
+            patch.object(gate.uuid, "uuid4") as fresh,
+            patch.object(gate, "Native") as native,
+        ):
+            old = Path(folder) / ("run-" + OWNER)
+            old.mkdir()
+            marker = old / "old-evidence"
+            marker.write_bytes(b"immutable")
+            with self.assertRaises(gate.GateError):
+                gate.execute(
+                    gate.BUILDKIT_IMAGE,
+                    IMAGE_ID,
+                    "e" * 64,
+                    "a" * 40,
+                    invocation_owner=OWNER,
+                )
+            self.assertEqual(
+                (Path(folder) / "execution.lease").read_bytes(), OWNER.encode()
+            )
+            self.assertEqual(list(old.iterdir()), [marker])
+            self.assertEqual(marker.read_bytes(), b"immutable")
+            native.assert_not_called()
+            fresh.assert_not_called()
+
+    def test_cli_forwards_explicit_invocation_owner_without_adoption(self):
+        with (
+            patch.object(gate, "execute", return_value=Path("receipt.json")) as execute,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            self.assertEqual(
+                gate.main(
+                    [
+                        "--execute",
+                        "--confirm",
+                        gate.CONFIRM,
+                        "--buildkit-image",
+                        gate.BUILDKIT_IMAGE,
+                        "--image-id",
+                        IMAGE_ID,
+                        "--expected-source-sha",
+                        "e" * 64,
+                        "--expected-deploy-sha",
+                        "a" * 40,
+                        "--invocation-owner",
+                        OWNER,
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(execute.call_args.kwargs, {"invocation_owner": OWNER})
 
     def test_existing_lease_cannot_be_adopted_or_removed(self):
         with (

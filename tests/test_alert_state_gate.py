@@ -12,6 +12,14 @@ from scripts import alert_state_gate as gate
 
 
 class StateGateTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows-only native launcher contract")
+    def test_invalid_invocation_owner_never_creates_a_lease(self) -> None:
+        with patch.object(gate, "save_new") as save:
+            for owner in ("short", "a" * 32, "00000000-0000-4000-8000-000000000000"):
+                with self.assertRaises(gate.StateGateError):
+                    gate.execute(invocation_owner=owner)
+            save.assert_not_called()
+
     def test_cleanup_has_own_ten_second_cap_and_absolute_window(self) -> None:
         controller = self.controller()
         controller.owned = {}

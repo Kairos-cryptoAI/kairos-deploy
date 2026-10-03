@@ -38,7 +38,10 @@ is periodically checkpointed; those distinct windows must not be conflated.
 Work is bounded to 120 seconds, cleanup to ten seconds inside the 130-second
 window. A separately reviewed outer Windows JobObject launcher must bound the
 entire controller, including file operations, and provide independent exact-owned
-cleanup. CLI-only timeouts are not accepted as a whole-controller proof. Unknown
+cleanup. CLI-only timeouts are not accepted as a whole-controller proof.
+The outer launcher supplies its fresh UUID4 before the child can create anything;
+cleanup is bound to that invocation, never an arbitrary currently observed lease.
+An owner mismatch preserves both runs and blocks removal or adoption. Unknown
 creation or cleanup retains evidence and the exclusive lease; nothing is
 automatically retried, adopted or pruned. Resources with changed identity are
 never removed. Historical failure receipts are immutable.
