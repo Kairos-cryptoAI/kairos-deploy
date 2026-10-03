@@ -1,0 +1,81 @@
+name: Installed Text Macro Router Review Risk composition
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: composition-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-native-composition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+        env:
+          POSTGRES_USER: kairos
+          POSTGRES_PASSWORD: synthetic_composition_ci_only
+          POSTGRES_DB: kairos_composition_bootstrap
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --cpus 1 --memory 1g --memory-swap 1g --pids-limit 128
+          --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=512m
+          --health-cmd "pg_isready -U kairos -d kairos_composition_bootstrap"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+      redis:
+        image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --cpus 0.25 --memory 256m --memory-swap 256m --pids-limit 64
+          --read-only --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges:true
+          --tmpfs /data:rw,noexec,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=700
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    defaults:
+      run:
+        working-directory: tests/text_macro_router_gate
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.3"
+      - name: Install exact current-source non-editable packages
+        timeout-minutes: 3
+        run: uv sync --locked --no-editable
+      - name: Generate fresh disposable fixture namespace
+        run: |
+          python -c "import os,uuid; name='kairos_composition_test_'+uuid.uuid4().hex; f=open(os.environ['GITHUB_ENV'],'a',encoding='utf-8'); f.write('KAIROS_COMPOSITION_TEST_DATABASE_URL=postgresql://kairos:synthetic_composition_ci_only@127.0.0.1:5432/'+name+'\nKAIROS_COMPOSITION_TEST_REDIS_URL=redis://127.0.0.1:6379/0\n'); f.close()"
+      - name: Prepare only verified fresh CONTROLLED_RUNTIME fixture schema
+        timeout-minutes: 2
+        run: timeout --signal=TERM --kill-after=5s 100s .venv/bin/python ../../scripts/composition_native_ci.py prepare
+      - name: Run one actual PG Redis service-handler composition target
+        timeout-minutes: 2
+        run: >-
+          timeout --signal=TERM --kill-after=5s 85s .venv/bin/python -m pytest -q -p no:cacheprovider
+          test_native_composition.py::test_real_producers_router_review_risk_durable_replay_on_disposable_pg_redis
+          --native-composition --junitxml=composition-native.xml --tb=no --show-capture=no
+      - name: Require exact one native PASS and zero skips
+        run: .venv/bin/python ../../scripts/composition_native_ci.py check-result
+      - name: Retain sanitized source-bound native engineering receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: composition-native-engineering-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tests/text_macro_router_gate/composition-native.xml
+            tests/text_macro_router_gate/source-lock.json
+          if-no-files-found: error
+          retention-days: 30

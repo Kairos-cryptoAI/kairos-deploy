@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from native_policy import CLASSIFICATION, DATABASE_ENV, REDIS_ENV, TARGET, allowed_address, require_targets
+
 ROOT = Path(__file__).resolve().parent
 MODULES = {
     "kairos-core": "kairos_core",
@@ -23,10 +25,16 @@ MODULES = {
     "kairos-router": "kairos_router",
     "kairos-aggregator": "kairos_aggregator",
     "kairos-risk-manager": "kairos_risk",
+    "kairos-strategy-engine": "kairos_strategy",
 }
 
 
 def pytest_addoption(parser):
+    parser.addoption(
+        "--native-composition",
+        action="store_true",
+        help="Only the fixed target may contact explicitly named disposable PG/Redis",
+    )
     parser.addoption(
         "--source-checkout-preliminary",
         action="store_true",
@@ -36,7 +44,10 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "asyncio: local asynchronous contract composition")
+    config.addinivalue_line("markers", "native_composition: explicit disposable PG/Redis engineering gate")
     if config.getoption("--source-checkout-preliminary"):
+        if config.getoption("--native-composition"):
+            raise pytest.UsageError("Native composition requires verified non-editable installed packages")
         return
     lock = json.loads((ROOT / "source-lock.json").read_text(encoding="utf-8"))
     readiness = lock.get("readiness", {})
@@ -78,6 +89,8 @@ def pytest_configure(config):
 def pytest_report_header(config):
     if config.getoption("--source-checkout-preliminary"):
         return "PRELIMINARY_SOURCE_ONLY; installed-wheel-qualified=false; trading-authority=false"
+    if config.getoption("--native-composition"):
+        return f"{CLASSIFICATION}; pinned-installed=true; trading-authority=false; REJECT_ALL"
     return "PINNED_INSTALLED_CONTRACT_FIXTURE_ONLY; trading-authority=false; REJECT_ALL"
 
 
@@ -87,10 +100,15 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def no_external_io_or_operator_configuration(monkeypatch):
+async def no_external_io_or_operator_configuration(monkeypatch, request):
     # The Windows event loop creates its own local self-pipe before this async
     # fixture starts. No general loopback exception is granted to test code.
     # Names only: never read operator values or load .env files.
+    native = request.config.getoption("--native-composition") and request.node.name == TARGET
+    targets = None
+    if native:
+        targets = (os.environ.get(DATABASE_ENV), os.environ.get(REDIS_ENV))
+        require_targets(*targets)
     for name in list(os.environ):
         if name.upper().startswith(("KAIROS_", "OPENAI_", "DEEPSEEK_", "TELEGRAM_")):
             monkeypatch.delenv(name, raising=False)
@@ -98,9 +116,33 @@ async def no_external_io_or_operator_configuration(monkeypatch):
     def denied(*_args, **_kwargs):
         raise AssertionError("External transport/provider construction forbidden in contract fixture")
 
-    monkeypatch.setattr(socket.socket, "connect", denied)
-    monkeypatch.setattr(socket.socket, "connect_ex", denied)
-    monkeypatch.setattr(socket, "getaddrinfo", denied)
+    if native:
+        connect, connect_ex, resolve = socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo
+
+        def fixture_connect(sock, address):
+            if not allowed_address(address):
+                denied()
+            return connect(sock, address)
+
+        def fixture_connect_ex(sock, address):
+            if not allowed_address(address):
+                denied()
+            return connect_ex(sock, address)
+
+        def fixture_resolve(host, port, *args, **kwargs):
+            if not allowed_address((host, port)):
+                denied()
+            return resolve(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket.socket, "connect", fixture_connect)
+        monkeypatch.setattr(socket.socket, "connect_ex", fixture_connect_ex)
+        monkeypatch.setattr(socket, "getaddrinfo", fixture_resolve)
+        monkeypatch.setenv(DATABASE_ENV, targets[0])
+        monkeypatch.setenv(REDIS_ENV, targets[1])
+    else:
+        monkeypatch.setattr(socket.socket, "connect", denied)
+        monkeypatch.setattr(socket.socket, "connect_ex", denied)
+        monkeypatch.setattr(socket, "getaddrinfo", denied)
     import kairos_llm.gateway
 
     monkeypatch.setattr(kairos_llm.gateway.LLMGateway, "__init__", denied)
@@ -108,3 +150,58 @@ async def no_external_io_or_operator_configuration(monkeypatch):
         yield
     finally:
         monkeypatch.undo()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    if item.name != TARGET:
+        return
+    report = outcome.get_result()
+    # Credentials are generated in memory in this one target. Never retain a
+    # traceback, exception message, locals or captured service/driver output.
+    report.sections.clear()
+    if report.failed:
+        safe_classes = {
+            "AssertionError",
+            "TimeoutError",
+            "ValueError",
+            "TypeError",
+            "RuntimeError",
+            "ValidationError",
+            "ConnectionRefusedError",
+            "InterfaceError",
+            "DataError",
+            "UndefinedTableError",
+            "InsufficientPrivilegeError",
+            "InvalidPasswordError",
+            "InvalidCatalogNameError",
+            "InvalidAuthorizationSpecificationError",
+            "MessageIdentityConflict",
+            "DatabaseTargetError",
+            "OperatorControlRefused",
+            "OperatorControlUnavailable",
+            "PaperInputDeadlineExceeded",
+            "PaperInputUnavailable",
+            "CommittedAckLoss",
+        }
+        exception = call.excinfo.type.__name__ if call.excinfo else "UnknownFailure"
+        exception = exception if exception in safe_classes else "OtherFailure"
+        phase = getattr(item, "_composition_phase", "admission")
+        phases = {
+            "admission",
+            "clock",
+            "producer",
+            "news",
+            "macro",
+            "risk-inputs",
+            "route",
+            "review",
+            "risk",
+            "replay",
+            "quiet",
+            "drain",
+            "cleanup",
+        }
+        phase = phase if phase in phases else "admission"
+        report.longrepr = f"NATIVE_COMPOSITION_FAILED phase={phase} class={exception}"

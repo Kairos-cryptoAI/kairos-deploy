@@ -1,4 +1,4 @@
-# Text / Macro / Router composed contract proof
+# Text / Macro / Router / Review / Risk engineering composition
 
 This additive package is an opt-in **OFFLINE_ENGINEERING_FIXTURE**. It never
 changes the historical release gate or a strategy/evaluator frozen for research.
@@ -47,7 +47,38 @@ checkout import for development only. Its report says
 `PRELIMINARY_SOURCE_ONLY; installed-wheel-qualified=false`; it does **not** count
 as the final installed proof. Missing packages do not become skips/PASS.
 
-Locked acquisition and a future isolated current-source runner integration are
+The additional `composition-native.yml` hosted CI workflow installs nine exact
+non-editable Kairos packages, including the real Strategy generator. Its explicitly
+selected `--native-composition` target uses fresh isolated PG16/Redis services,
+a UUID4 database and the `CONTROLLED_RUNTIME` profile (not the primary schema).
+Only an unprivileged runtime role may enter the real durable service handlers;
+the synthetic no-login operator placeholder grants no ARM or trading authority.
+It tests actual `TextScoutsService.poll_once`, `MacroService.restore_history/run_once`,
+Router and CandidateReview handlers, and PAPER Risk recovery/input/review handlers.
+Macro reception timestamps are not normalized or overwritten in this native target.
+Router/review logical clocks remain explicitly injected engineering fixture clocks;
+this target is not a production end-to-end latency or causal news-arrival proof.
+
+The native target covers ALLOW/VETO/DEFER, opposing news/conflict guard, stale-news
+filtering, bearish/failure Macro constraints, genuine immutable generator intents
+and natural NO_INTENT. Real PostgreSQL inbox/outbox and Redis transport IDs prove
+committed ACK-loss reclaim, duplicate delivery and fresh-component restart: no
+additional review provider call or duplicate risk output. Macro's own persisted
+allocation is replayed byte-identically after restart. An advisory proposal on the
+research topic cannot create a Risk decision or order. All entries remain refused
+by the actual default empty strategy allowlist and missing operator authority.
+
+External news/model/account/venue inputs are explicitly fixture-only. The model
+double has zero cost and does not qualify real provider budget START/adoption or
+continuous shadow operation. This proof does **not** establish no-resend after an
+uncommitted provider call, persistent Text dedup after restart, real feeds, source
+quality, execution/venue round trips, alpha, PAPER_QUALIFIED or LIVE readiness.
+Native output contains only fixed failure class/phase; tracebacks, locals, raw
+driver/provider errors and captured logs are withheld. Native cannot be combined
+with `--source-checkout-preliminary`; default tests still deny all network access.
+An exact one-test, zero-skip XML validator must pass after the native target.
+
+Locked acquisition and isolated current-source runner integration are
 reviewed/publication steps owned by the parent workflow. Do not add this proof
 to the historical `release_gate`, change its old pins, or launch a new default
 BuildKit builder to qualify it.
