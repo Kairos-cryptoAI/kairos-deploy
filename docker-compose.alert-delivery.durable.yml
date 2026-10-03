@@ -1,0 +1,61 @@
+# Separate opt-in topology. No automatic provisioning, business services or ports.
+name: kairos-ops-alerts
+services:
+  alertmanager:
+    image: prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
+    platform: linux/amd64
+    profiles: [alert-delivery-durable]
+    user: "65534:65534"
+    read_only: true
+    init: true
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.listen-address=:9093
+      - --cluster.listen-address=
+      - --data.retention=24h
+      - --data.maintenance-interval=5s
+      - --silences.max-silences=100
+      - --silences.max-silence-size-bytes=4096
+      - --alerts.per-alertname-limit=100
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ${KAIROS_ALERT_CONFIG:?explicit rendered config required}
+        target: /etc/alertmanager/alertmanager.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${KAIROS_ALERT_TOKEN_FILE:?dedicated operator imported token FILE required}
+        target: /run/secrets/telegram_bot_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: alert-state
+        target: /alertmanager
+        read_only: false
+        volume:
+          nocopy: true
+    networks:
+      alert-input:
+        aliases: [kairos-ops-alertmanager]
+      alert-egress: {}
+networks:
+  alert-input:
+    external: true
+    name: kairos_observability
+  alert-egress:
+    driver: bridge
+volumes:
+  alert-state:
+    external: true
+    name: ${KAIROS_ALERT_STATE_VOLUME:?explicit reviewed persistent state volume required}
