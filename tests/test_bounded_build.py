@@ -423,6 +423,19 @@ class ContractTests(unittest.TestCase):
             controller.owned_images()
         self.assertEqual(controller.proofs, prior)
 
+    def test_owned_image_inventory_includes_untagged_build_output(self):
+        controller = bounded.Controller(
+            Path("D:/public"), OWNER, gate.BUILDKIT_IMAGE, IMAGE_ID, Mock(), 100
+        )
+        controller.compose_version = "2.40.1"
+        value = image_view()
+        value["RepoTags"] = []
+        with patch.object(
+            controller, "call", side_effect=[(0, IMAGE_ID), (0, json.dumps(value))]
+        ) as call:
+            self.assertEqual(controller.owned_images(), [IMAGE_ID])
+        self.assertIn("-a", call.call_args_list[0].args[0])
+
     def test_context_rejects_extra_dotenv_before_build(self):
         with tempfile.TemporaryDirectory() as folder:
             work = Path(folder)

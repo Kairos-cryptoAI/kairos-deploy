@@ -709,6 +709,7 @@ class Controller(gate.Controller):
                 "image",
                 "ls",
                 "-q",
+                "-a",
                 "--no-trunc",
                 "--filter",
                 "label=" + OWNER_LABEL + "=" + self.owner,
