@@ -167,12 +167,22 @@ def pytest_runtest_makereport(item, call):
             "TimeoutError",
             "ValueError",
             "TypeError",
+            "AttributeError",
+            "KeyError",
+            "NameError",
             "RuntimeError",
             "ValidationError",
             "ConnectionRefusedError",
             "InterfaceError",
             "DataError",
             "UndefinedTableError",
+            "UndefinedColumnError",
+            "UniqueViolationError",
+            "NotNullViolationError",
+            "CheckViolationError",
+            "ForeignKeyViolationError",
+            "InvalidTextRepresentationError",
+            "ConnectionDoesNotExistError",
             "InsufficientPrivilegeError",
             "InvalidPasswordError",
             "InvalidCatalogNameError",
@@ -204,4 +214,14 @@ def pytest_runtest_makereport(item, call):
             "cleanup",
         }
         phase = phase if phase in phases else "admission"
-        report.longrepr = f"NATIVE_COMPOSITION_FAILED phase={phase} class={exception}"
+        locations = []
+        trace = call.excinfo.value.__traceback__ if call.excinfo else None
+        # Only public engineering source basenames and line numbers; never
+        # exception text, locals, source lines, paths or provider payloads.
+        while trace is not None:
+            filename = Path(trace.tb_frame.f_code.co_filename).name
+            if filename in {"test_native_composition.py", "native_policy.py", "conftest.py"}:
+                locations.append(f"{filename}:{trace.tb_lineno}")
+            trace = trace.tb_next
+        location = ",".join(locations[-4:]) or "public-location-unavailable"
+        report.longrepr = f"NATIVE_COMPOSITION_FAILED phase={phase} class={exception} location={location}"
