@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "purpose": "real-producer-router-review-macro-risk-composed-contracts",
+  "classification": "OFFLINE_ENGINEERING_FIXTURE",
+  "readiness": {
+    "paper_qualified": false,
+    "alpha_ready": false,
+    "live_ready": false,
+    "strategy_policy": "REJECT_ALL"
+  },
+  "build": { "python": "3.11.15", "uv": "0.12.3" },
+  "dependencies": {
+    "kairos-core": { "repository": "https://github.com/Kairos-cryptoAI/kairos-core", "revision": "56df50787eff83c898aa2aeefb426c6ee8482820" },
+    "kairos-persistence": { "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence", "revision": "7170cd0a7bc388f807e07d696d12ef167b831760" },
+    "kairos-llm": { "repository": "https://github.com/Kairos-cryptoAI/kairos-llm", "revision": "53f63d7f241a247b3cfe98e8b9cdee281d0ed3e0" },
+    "kairos-text-scouts": { "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts", "revision": "0022a2e86112cae4c3e641b5a68eca11648603b6" },
+    "kairos-macro-strategist": { "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist", "revision": "0feecabc6f9d2befeb82e7edc70305efbaf9c2bd" },
+    "kairos-router": { "repository": "https://github.com/Kairos-cryptoAI/kairos-router", "revision": "5c84900c42ce8558362b42537e1a9f22d5517e9c" },
+    "kairos-aggregator": { "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator", "revision": "e3da76b723435520a5a0198057ca7c1b72cedfb7" },
+    "kairos-risk-manager": { "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager", "revision": "402d377ab0604cc05ea648830d687e2ce73578e2" }
+  }
+}

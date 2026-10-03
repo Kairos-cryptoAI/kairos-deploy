@@ -1,0 +1,46 @@
+[project]
+name = "kairos-text-macro-router-gate-tests"
+version = "0.1.0"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "kairos-core==0.3.0",
+  "kairos-persistence==0.1.0",
+  "kairos-llm==0.1.0",
+  "kairos-text-scouts==0.2.0",
+  "kairos-macro-strategist==0.2.0",
+  "kairos-router==0.2.0",
+  "kairos-aggregator==0.2.0",
+  "kairos-risk-manager==0.2.0",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.12.3"
+override-dependencies = [
+  "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@56df50787eff83c898aa2aeefb426c6ee8482820",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@53f63d7f241a247b3cfe98e8b9cdee281d0ed3e0",
+  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@7170cd0a7bc388f807e07d696d12ef167b831760",
+]
+
+[tool.uv.sources]
+kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "56df50787eff83c898aa2aeefb426c6ee8482820" }
+kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "7170cd0a7bc388f807e07d696d12ef167b831760" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "53f63d7f241a247b3cfe98e8b9cdee281d0ed3e0" }
+kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "0022a2e86112cae4c3e641b5a68eca11648603b6" }
+kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "0feecabc6f9d2befeb82e7edc70305efbaf9c2bd" }
+kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "5c84900c42ce8558362b42537e1a9f22d5517e9c" }
+kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "e3da76b723435520a5a0198057ca7c1b72cedfb7" }
+kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "402d377ab0604cc05ea648830d687e2ce73578e2" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["test_composed_contract.py"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
