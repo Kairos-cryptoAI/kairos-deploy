@@ -181,6 +181,9 @@ class CompositionNativeBoundaryTests(unittest.TestCase):
         )
         self.assertNotIn("timeout_placeholder", source)
         self.assertIn("delivered_and_acked", source)
+        self.assertIn("case_resource_start = len(resources)", source)
+        self.assertIn("await resource.close()", source)
+        self.assertIn('SHOW max_connections', source)
         self.assertIn("reclaim_idle_ms=0", source)
         self.assertIn("operator_control_admissions", source)
         self.assertIn("strategy_not_paper_approved", source)
@@ -199,6 +202,7 @@ class CompositionNativeBoundaryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("uv sync --locked --no-editable", workflow)
+        self.assertIn('TS_TUNE_MAX_CONNS: "32"', workflow)
         self.assertIn(
             "--native-composition --junitxml=composition-native.xml --tb=no --show-capture=no",
             workflow,

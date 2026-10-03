@@ -24,6 +24,8 @@ jobs:
           POSTGRES_USER: kairos
           POSTGRES_PASSWORD: synthetic_composition_ci_only
           POSTGRES_DB: kairos_composition_bootstrap
+          # Fixed fixture-only connection ceiling; container budgets stay 1GiB/1CPU.
+          TS_TUNE_MAX_CONNS: "32"
         ports:
           - 127.0.0.1:5432:5432
         options: >-

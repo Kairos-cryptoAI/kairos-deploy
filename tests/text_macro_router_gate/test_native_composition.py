@@ -406,6 +406,8 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
         async with asyncio.timeout(60.0):
             await connect_verified_database(owner, name, local_only=True)
             await owner.verify_schema()
+            assert int(await owner.pool.fetchval("SHOW max_connections")) == 32
+            request.node.user_properties.append(("fixture_max_connections", "32"))
             assert await owner.pool.fetchval("SELECT count(*) FROM event_audit") == 0
             assert await raw_redis._redis.dbsize() == 0
             runtime_url = await runtime_url_fixture(owner, database_url)
@@ -461,6 +463,7 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
 
             for case in ("allow", "veto", "defer", "conflict", "stale", "bear", "macro-failure"):
                 case_tasks = []
+                case_resource_start = len(resources)
                 request.node._composition_phase = "producer"
                 gateway = FixtureOnlyGateway(case)
 
@@ -783,6 +786,17 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
                         len(await audited(owner.pool, Topics.RISK_TRADE_DECISION, decision.message_id)) == 1
                     )
                     assert not fresh_risk.paper.reservations.symbols
+
+                # Each scenario owns its pools and consumers. Retain only the
+                # recovered risk boundary needed by the final advisory-refusal
+                # check; do not accumulate seven scenarios' PostgreSQL pools.
+                await stop(tasks)
+                tasks.clear()
+                for resource in tuple(resources[case_resource_start:]):
+                    if case == "allow" and resource is fresh_risk_bus:
+                        continue
+                    await resource.close()
+                    resources.remove(resource)
 
             request.node._composition_phase = "quiet"
             quiet, quiet_bars = candidate_fixture(anchor, quiet=True)
