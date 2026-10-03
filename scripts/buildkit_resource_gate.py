@@ -365,7 +365,12 @@ done
 
 def fixture_script(owner: str) -> str:
     owner_name(owner)
-    rootfs = "FROM scratch\nCOPY bin/busybox /bin/busybox\nCOPY lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1\nCOPY payload /result\n"
+    rootfs = (
+        "FROM scratch\n"
+        "COPY --chmod=0555 bin/busybox /bin/busybox\n"
+        "COPY --chmod=0555 lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1\n"
+        "COPY --chmod=0444 payload /result\n"
+    )
     cases = {
         "success": rootfs + 'RUN ["/bin/busybox", "sh", "-c", "test -s /result"]\n',
         "fault": rootfs

@@ -45,6 +45,12 @@ descendants may not terminate; that shortcut is intentionally excluded here.
 All inputs are synthetic and generated inside the owned server. Its own public
 BusyBox/musl files are copied into a tiny scratch context; no registry/base image,
 Dockerfile frontend, provider, credentials or host project data is fetched. A
+fixed Dockerfile `COPY --chmod=0555` gives the public BusyBox executable and musl
+loader read/execute permission; `COPY --chmod=0444` keeps the synthetic payload
+read-only. These modes do not depend on the context's restrictive umask, and do
+not relax the server's caps, rootless identity or process sandbox. Earlier
+permission-denied receipts remain failed evidence; only a new reviewed native
+attempt can qualify this corrected synthetic fixture. A
 deterministic tiny build must match the fixed payload hash. A separate exit37
 fault must produce its specific marker and exit37 failure, not merely any CLI
 error. A real two-process spin ExecOp is then observed by PID+start ticks,

@@ -231,6 +231,16 @@ class ContractTests(unittest.TestCase):
         self.assertIn("/bin/busybox", script)
         self.assertIn("/lib/ld-musl-x86_64.so.1", script)
         self.assertIn("FROM scratch", script)
+        self.assertEqual(script.count("COPY --chmod=0555 bin/busybox /bin/busybox"), 3)
+        self.assertEqual(
+            script.count(
+                "COPY --chmod=0555 lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1"
+            ),
+            3,
+        )
+        self.assertEqual(script.count("COPY --chmod=0444 payload /result"), 3)
+        self.assertNotIn("COPY bin/busybox", script)
+        self.assertNotIn("--chmod=0777", script)
         self.assertIn("exit 37", script)
         self.assertIn(gate.TOKEN_PREFIX + OWNER, script)
         self.assertNotIn("FROM alpine", script)
