@@ -367,6 +367,7 @@ def fixture_script(owner: str) -> str:
     owner_name(owner)
     rootfs = (
         "FROM scratch\n"
+        "COPY --chmod=0755 skeleton/ /\n"
         "COPY --chmod=0555 bin/busybox /bin/busybox\n"
         "COPY --chmod=0555 lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1\n"
         "COPY --chmod=0444 payload /result\n"
@@ -400,7 +401,24 @@ def fixture_script(owner: str) -> str:
         + ROOT
         + "/context/lib "
         + ROOT
+        + "/context/skeleton "
+        + ROOT
+        + "/context/skeleton/bin "
+        + ROOT
+        + "/context/skeleton/lib "
+        + ROOT
         + "/empty-config; "
+    )
+    # Empty public directories only. File COPY chmod must not autovivify
+    # read-only parents in the scratch rootfs or local export receiver.
+    shell += (
+        "chmod 0755 "
+        + ROOT
+        + "/context/skeleton "
+        + ROOT
+        + "/context/skeleton/bin "
+        + ROOT
+        + "/context/skeleton/lib; "
     )
     shell += (
         "test -f /bin/busybox; test -f /lib/ld-musl-x86_64.so.1; cp /bin/busybox "
@@ -496,7 +514,7 @@ def parse_rootfs_modes(value: str, *, corrected: bool) -> dict:
         ):
             raise GateError("SYNTHETIC_ROOTFS_MODE_PROOF_REQUIRED")
         mode, uid, gid = line.split("|")
-        allowed = {"755"} if corrected else {"700", "755"}
+        allowed = {"755"}
         if index >= 2:
             allowed = {"444"} if index == 4 else {"555"}
         if mode not in allowed or int(uid) > 2**32 - 1 or int(gid) > 2**32 - 1:
@@ -865,8 +883,9 @@ class Controller:
         self.proofs["synthetic_binary_hashes"] = [
             line.split()[0] for line in binary_lines
         ]
-        # Inspect an exported COPY-only rootfs before any ExecOp. A file chmod
-        # does not prove that its parent directories are traversable.
+        # Both actual COPY-only exports must measure the seeded rootfs parents
+        # before any ExecOp. Their public source-bin/lib context modes differ;
+        # this comparison does not recover any old failed attempt's stat data.
         for case in ("inspect-before", "inspect-after"):
             if case == "inspect-after":
                 # Public synthetic context only; never the server's private

@@ -231,6 +231,21 @@ class ContractTests(unittest.TestCase):
         self.assertIn("/bin/busybox", script)
         self.assertIn("/lib/ld-musl-x86_64.so.1", script)
         self.assertIn("FROM scratch", script)
+        self.assertEqual(script.count("COPY --chmod=0755 skeleton/ /"), 4)
+        for rootfs in script.split("FROM scratch\n")[1:]:
+            self.assertTrue(rootfs.startswith("COPY --chmod=0755 skeleton/ /\n"))
+        self.assertIn(
+            "chmod 0755 "
+            + gate.ROOT
+            + "/context/skeleton "
+            + gate.ROOT
+            + "/context/skeleton/bin "
+            + gate.ROOT
+            + "/context/skeleton/lib; ",
+            script,
+        )
+        self.assertNotIn("cp /bin/busybox " + gate.ROOT + "/context/skeleton", script)
+        self.assertNotIn("chmod 0755 /home/user", script)
         self.assertEqual(script.count("COPY --chmod=0555 bin/busybox /bin/busybox"), 4)
         self.assertEqual(
             script.count(
@@ -666,8 +681,10 @@ class FakeNative:
                 gate.PAYLOAD
             ).hexdigest() + "  " + gate.ROOT + "/result-success/result"
         if script.startswith("set -eu; test ! -L " + gate.ROOT + "/result-inspect-"):
-            parent = "700" if "inspect-before" in script else "755"
-            if self.bad == "parent" and "inspect-after" in script:
+            parent = "755"
+            if (self.bad == "parent" and "inspect-after" in script) or (
+                self.bad == "parent-before" and "inspect-before" in script
+            ):
                 parent = "700"
             return 0, "\n".join(
                 [parent + "|1000|1000"] * 2 + ["555|1000|1000"] * 2 + ["444|1000|1000"]
@@ -810,6 +827,26 @@ class LifecycleTests(unittest.TestCase):
     def test_untraversable_corrected_parent_is_rejected_before_exec(self):
         self.assert_stage_rejected("parent", "SYNTHETIC_ROOTFS_PERMISSION_CHANGED")
 
+    def test_untraversable_seeded_before_parent_is_rejected_before_exec(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.object(gate.time, "monotonic", side_effect=self.fake_clock()),
+            patch.object(gate.time, "sleep"),
+        ):
+            controller = self.setup_controller(folder, "parent-before")
+            with self.assertRaisesRegex(
+                gate.GateError, "SYNTHETIC_ROOTFS_PERMISSION_CHANGED"
+            ):
+                controller.run()
+            self.assertNotIn("rootfs_modes_before", controller.proofs)
+            self.assertFalse(
+                any(
+                    "filename=Dockerfile.success" in args
+                    for args in controller.native.calls
+                )
+            )
+            self.assertTrue(controller.cleanup())
+
     def test_rootfs_mode_proof_is_exact_typed_and_does_not_allow_world_writable(self):
         good = (
             "755|1000|1000\n755|1000|1000\n555|1000|1000\n555|1000|1000\n444|1000|1000"
@@ -817,6 +854,11 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(
             gate.parse_rootfs_modes(good, corrected=True)["bin"]["mode"], "755"
         )
+        self.assertEqual(
+            gate.parse_rootfs_modes(good, corrected=False)["lib"]["mode"], "755"
+        )
+        with self.assertRaises(gate.GateError):
+            gate.parse_rootfs_modes(good.replace("755", "700", 1), corrected=False)
         for bad in (
             good + "\n755|0|0",
             good.replace("755", "777", 1),

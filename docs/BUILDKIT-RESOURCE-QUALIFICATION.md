@@ -47,17 +47,25 @@ BusyBox/musl files are copied into a tiny scratch context; no registry/base imag
 Dockerfile frontend, provider, credentials or host project data is fetched. A
 fixed Dockerfile `COPY --chmod=0555` gives the public BusyBox executable and musl
 loader read/execute permission; `COPY --chmod=0444` keeps the synthetic payload
-read-only. These modes do not depend on the context's restrictive umask, and do
+read-only. An empty public scratch skeleton is copied first with explicit
+`0755` directory modes. This is required because numeric COPY chmod also sets
+automatically created destination parents in this exact BuildKit release; a
+file-only `0555` COPY must not create read-only `/bin` or `/lib` parents. The
+skeleton contains no binaries, scripts, secrets or private cache data.
+These modes do not depend on the context's restrictive umask, and do
 not relax the server's caps, rootless identity or process sandbox. Earlier
 permission-denied receipts remain failed evidence; only a new reviewed native
 attempt can qualify this corrected synthetic fixture. A
 COPY-only rootfs is exported before any ExecOp and its five fixed public paths
 are inspected numerically (modes and UID/GID, rejecting symlinks and extra
-output). Only the synthetic context's `bin` and `lib` directories are changed
-to `0755`; a second COPY-only export must prove traversable parents and the
-fixed read-only file modes. The server's private roots retain `0700`. This
-records before/after facts instead of assuming that file-only chmod fixed the
-earlier permission error; an unsuccessful ExecOp still fails the gate.
+output). Both exports must prove `0755` parents and the fixed read-only file
+modes. Between these real measurements only the public binary-source context's
+`bin` and `lib` directories are changed from the restrictive creation mode to
+`0755`; the explicit destination skeleton is unchanged. The server's private
+roots retain `0700`. This records new before/after facts, not reconstructed
+permissions for any old failed local export. The 96e5/v4 attempt failed at the
+local receiver before either numeric probe; it remains failed with no recorded
+rootfs modes. An unsuccessful ExecOp still fails the gate.
 A deterministic tiny build must match the fixed payload hash. A separate exit37
 fault must produce its specific marker and exit37 failure, not merely any CLI
 error. A real two-process spin ExecOp is then observed by PID+start ticks,
