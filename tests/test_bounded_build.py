@@ -369,6 +369,56 @@ class ContractTests(unittest.TestCase):
                 with self.assertRaises(gate.GateError):
                     bounded.verify_image(value, OWNER, "2.40.1")
 
+    def test_containerd_single_self_repository_digest_must_equal_image_id(self):
+        own = bounded.image_tag(OWNER).split(":", 1)[0] + "@" + IMAGE_ID
+        value = image_view()
+        value["RepoDigests"] = [own]
+        self.assertEqual(bounded.verify_image(value, OWNER, "2.40.1"), IMAGE_ID)
+        for digests in (
+            [own, own],
+            [own, "foreign@" + IMAGE_ID],
+            ["foreign@" + IMAGE_ID],
+            [bounded.image_tag(OWNER).split(":", 1)[0] + "@sha256:" + "c" * 64],
+            [bounded.image_tag(OWNER) + "@" + IMAGE_ID],
+            (own,),
+            own,
+        ):
+            with self.subTest(digests=digests), self.assertRaises(gate.GateError):
+                bounded.verify_image(value | {"RepoDigests": digests}, OWNER, "2.40.1")
+
+    def test_owned_image_inspector_branch_is_recorded_only_after_full_verification(
+        self,
+    ):
+        controller = bounded.Controller(
+            Path("D:/public"), OWNER, gate.BUILDKIT_IMAGE, IMAGE_ID, Mock(), 100
+        )
+        controller.compose_version = "2.40.1"
+        value = image_view()
+        own = bounded.image_tag(OWNER).split(":", 1)[0] + "@" + IMAGE_ID
+        value["RepoDigests"] = [own]
+        with patch.object(
+            controller, "call", side_effect=[(0, IMAGE_ID), (0, json.dumps(value))]
+        ):
+            self.assertEqual(controller.owned_images(), [IMAGE_ID])
+        self.assertEqual(
+            controller.proofs["owned_image_identity"][IMAGE_ID],
+            {
+                "inspector_form": "OCI_SELF_REPOSITORY_DIGEST",
+                "repo_digests": [own],
+                "repo_tags": [bounded.image_tag(OWNER)],
+            },
+        )
+        prior = copy.deepcopy(controller.proofs)
+        value["RepoDigests"] = ["foreign@" + IMAGE_ID]
+        with (
+            patch.object(
+                controller, "call", side_effect=[(0, IMAGE_ID), (0, json.dumps(value))]
+            ),
+            self.assertRaises(gate.GateError),
+        ):
+            controller.owned_images()
+        self.assertEqual(controller.proofs, prior)
+
     def test_context_rejects_extra_dotenv_before_build(self):
         with tempfile.TemporaryDirectory() as folder:
             work = Path(folder)

@@ -393,7 +393,11 @@ def verify_image(value: dict, invocation: str, compose_version: str) -> str:
         or not 0 < value["Size"] <= MAX_IMAGE
         or value.get("Config", {}).get("Labels") != expected_labels
         or value.get("Config", {}).get("Volumes") not in (None, {})
-        or value.get("RepoDigests") not in (None, [])
+        # Docker's containerd image store can use the OCI manifest digest as Id
+        # and attach that SAME digest to the fixed self-owned repository. No
+        # foreign repository, different digest, second entry, or tuple is allowed.
+        or value.get("RepoDigests")
+        not in (None, [], [image_tag(invocation).split(":", 1)[0] + "@" + iid])
         or value.get("RepoTags") not in (None, [], [image_tag(invocation)])
     ):
         raise gate.GateError("OWNED_SYNTHETIC_IMAGE_BOUNDARY_CHANGED")
@@ -687,8 +691,16 @@ class Controller(gate.Controller):
         for iid in ids:
             gate.digest(iid, image=True)
             _, raw = self.call(["image", "inspect", "--format", gate.VIEW, iid])
-            if verify_image(json.loads(raw), self.owner, self.compose_version) != iid:
+            value = json.loads(raw)
+            if verify_image(value, self.owner, self.compose_version) != iid:
                 raise gate.GateError("OWNED_IMAGE_IDENTITY_CHANGED")
+            self.proofs.setdefault("owned_image_identity", {})[iid] = {
+                "inspector_form": "OCI_SELF_REPOSITORY_DIGEST"
+                if value.get("RepoDigests")
+                else "NO_REPOSITORY_DIGEST",
+                "repo_digests": value.get("RepoDigests") or [],
+                "repo_tags": value.get("RepoTags") or [],
+            }
         return ids
 
     def build(self, case: str, seconds: float) -> None:

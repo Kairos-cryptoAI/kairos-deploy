@@ -93,6 +93,16 @@ Public-only baseline resource IDs and the exact Compose version are persisted
 before the server-create request, for independent launcher verification rather
 than retrospective interpretation of a text log.
 
+The output-image inspector accepts either no repository digest or exactly one
+`kairos-bounded-synthetic@<exact inspected Id>` digest. Docker's containerd store
+was observed to attach this self-repository digest to its OCI-manifest image Id.
+Foreign repositories, different digests, duplicate/additional entries and tags
+remain forbidden; the full owner/scope/Compose labels, bounded size and platform
+checks are unchanged. The receipt records the observed inspector branch and exact
+owned tags/digests only after complete validation. The first actual Compose attempt
+failed closed on the earlier empty-digest-only guard; that failed receipt and its
+unknown image-cleanup outcome are retained, not reclassified as acceptance.
+
 ## Reviewed invocation and follow-on work
 
 Prepare a private `D:/Kairos/runtime/bounded-build-20261003` directory. Root must
