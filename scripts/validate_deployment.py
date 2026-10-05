@@ -72,13 +72,14 @@ COMMON_BINDINGS = {
     "KAIROS_REDIS_URL": "/run/secrets/redis_url",
     "KAIROS_PERSISTENCE_DATABASE_URL": "/run/secrets/persistence_database_url",
 }
+# Exact active secrets in rendered base/LIVE models. Compose omits the dormant
+# raw DeepSeek definition; legacy provisioning inventory is a separate contract.
 BASE_SECRET_FILES = {
     "redis_password": "redis_password",
     "redis_url": "redis_url",
     "postgres_password": "postgres_password",
     "persistence_database_url": "persistence_database_url",
     "grafana_admin_password": "grafana_admin_password",
-    "deepseek_api_key": "deepseek_api_key",
     "openai_api_key": "openai_api_key",
     "x_bearer_token": "x_bearer_token",
 }
@@ -450,9 +451,9 @@ def validate_compose(
 
     expected_provider_secrets = {
         "text-scouts": {
-            "KAIROS_DEEPSEEK_API_KEY": (
-                "deepseek_api_key",
-                "/run/secrets/deepseek_api_key",
+            "KAIROS_OPENAI_API_KEY": (
+                "openai_api_key",
+                "/run/secrets/openai_api_key",
             ),
             "KAIROS_X_BEARER_TOKEN": ("x_bearer_token", "/run/secrets/x_bearer_token"),
         },
@@ -498,7 +499,7 @@ def validate_compose(
     secret_definitions = config.get("secrets", {}) or {}
     if set(secret_definitions) != set(BASE_SECRET_FILES):
         errors.append(
-            "top-level secret definitions must match the exact base allow-list"
+            "top-level secret definitions must match the exact active base allow-list"
         )
     resolved_paths: list[str] = []
     for name, basename in BASE_SECRET_FILES.items():

@@ -26,6 +26,7 @@ from kairos_core.contracts import (
     AccountSnapshotV2,
     CandidateReviewV1,
     CandidateRouteV1,
+    DecisionContextV1,
     EvidenceReferenceV1,
     LLMProposalModelProvenanceV1,
     LLMTradeProposalV1,
@@ -308,6 +309,23 @@ async def consume_target(bus, topic, group, target, handler):
         await bus.ack(topic, envelope, group=group)
 
 
+async def consume_targets(bus, topic, group, targets, handler):
+    selected = set(targets)
+    async for envelope in bus.subscribe(topic, group=group, consumer="fixed-context-target"):
+        if envelope.payload["message_id"] in selected:
+            await handler(envelope)
+        await bus.ack(topic, envelope, group=group)
+
+
+async def completed_targets(pool, bus, group, message_ids):
+    return await pool.fetchval(
+        "SELECT count(*) FROM message_inbox WHERE consumer=$1 AND message_id=ANY($2::text[]) "
+        "AND status='COMPLETED'",
+        f"{bus.service_name}:{group}",
+        list(message_ids),
+    ) == len(message_ids)
+
+
 async def completed(pool, bus, group, message_id):
     return (
         await pool.fetchval(
@@ -460,6 +478,14 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
             intents, bars = candidate_fixture(anchor)
             intent = intents[0]
             initial_intent_bytes = canonical_intent_batch_bytes(intents)
+            # Exact generator provenance, not a synthetic hash or a claimed full warmup window.
+            required_tail = intent.provenance.input_bar_sha256s[-60:]
+            by_hash = {bar.bar_sha256: bar for bar in bars}
+            context_bars = tuple(by_hash[digest] for digest in required_tail)
+            context_market = market_fixture(intent.decision_ts_ms, intent.reference_price)
+            for bar in context_bars:
+                await publisher.publish(Topics.CLOSED_BAR, bar)
+            await publisher.publish(Topics.MARKET_SNAPSHOT, context_market)
 
             for case in ("allow", "veto", "defer", "conflict", "stale", "bear", "macro-failure"):
                 case_tasks = []
@@ -523,6 +549,23 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
                     gateway=gateway,
                     clock_ms=lambda: intent.decision_ts_ms + 300,
                 )
+                request.node._composition_phase = "review-context"
+                for topic, messages, handler, label in (
+                    (Topics.CLOSED_BAR, context_bars, review._handle_closed_bar, "bars"),
+                    (Topics.MARKET_SNAPSHOT, (context_market,), review._handle_market, "market"),
+                ):
+                    identities = tuple(message.message_id for message in messages)
+                    context_group = f"review-context-{label}-{case}"
+                    context_task = asyncio.create_task(
+                        consume_targets(review_bus, topic, context_group, identities, handler)
+                    )
+                    case_tasks.append(context_task)
+                    await wait_until(
+                        lambda review_bus=review_bus, context_group=context_group, identities=identities: (
+                            completed_targets(owner.pool, review_bus, context_group, identities)
+                        ),
+                        [context_task],
+                    )
                 if selected is not None:
                     request.node._composition_phase = "news"
                     for receiver, handler, label in (
@@ -661,6 +704,23 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
                 reviewed = CandidateReviewV1.model_validate(
                     next(item for item in payloads if item["route"]["route_id"] == route.route_id)
                 )
+                contexts = await audited(owner.pool, Topics.DECISION_CONTEXT)
+                context = DecisionContextV1.model_validate(
+                    next(item for item in contexts if item["route_id"] == route.route_id)
+                )
+                context.validate_for_route(route)
+                assert not context.missing_required_sources()
+                assert context.closed_bar_scope == "DECLARED_INPUT_TAIL"
+                # Real Macro output is later than this fixture's strategy event.
+                # It constrains Risk separately; it is not backdated into review.
+                assert (
+                    next(source for source in context.sources if source.kind == "macro").availability
+                    == "UNAVAILABLE"
+                )
+                assert any(
+                    item.kind == "decision_context" and item.reference == context.context_id
+                    for item in reviewed.evidence
+                )
                 assert reviewed.intent.to_payload() == intent.to_payload()
                 expected = {"veto": "VETO", "defer": "DEFER", "conflict": "DEFER"}.get(case, "ALLOW")
                 assert reviewed.decision.value == expected
@@ -750,6 +810,7 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
                     assert (await raw_redis._redis.xpending(Topics.STRATEGY_ROUTE, group))["pending"] == 0
                     assert gateway.calls == calls_before
                     assert len(await audited(owner.pool, Topics.CANDIDATE_REVIEW, reviewed.message_id)) == 1
+                    assert len(await audited(owner.pool, Topics.DECISION_CONTEXT, context.message_id)) == 1
                     fresh_macro = MacroService(
                         macro.settings, bus=bus("composition-macro-allow"), gateway=gateway
                     )

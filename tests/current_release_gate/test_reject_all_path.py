@@ -133,7 +133,7 @@ async def test_current_reject_all_path_is_deterministic_and_has_no_effect(tmp_pa
         gateway,
         source="current-release-gate-aggregator",
         clock_ms=lambda: reviewed_at_ms,
-    ).review(route, ())
+    ).review_legacy_engineering(route, ())
     assert len(gateway.workloads) == 1
     assert review.decision is ReviewDecision.DEFER
     assert review.reason_codes == ("LLM_FAILURE",)

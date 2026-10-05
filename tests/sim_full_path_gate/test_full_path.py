@@ -940,7 +940,7 @@ async def _review(intent, decision: ReviewDecision):
         gateway,
         source="sim-full-path-gate-aggregator",
         clock_ms=lambda: intent.decision_ts_ms + 1,
-    ).review(route, ())
+    ).review_legacy_engineering(route, ())
     assert len(gateway.calls) == 1
     assert review.decision is decision
     assert review.intent.model_dump(mode="json") == intent.model_dump(mode="json")

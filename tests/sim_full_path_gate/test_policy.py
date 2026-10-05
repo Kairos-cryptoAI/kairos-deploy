@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
 from pathlib import Path
 
-import policy
 import pytest
+
+import policy
 
 
 def _root() -> Path | None:
@@ -52,6 +54,32 @@ def test_exact_isolated_model_is_accepted() -> None:
     policy.validate_database_url(policy.DATABASE_URL)
 
 
+def test_r5_is_a_new_engineering_identity_and_rejects_the_old_target() -> None:
+    assert policy.PROJECT == "kairos-sim-full-path-gate-20261006-r5"
+    assert policy.DATABASE == "kairos_sim_full_path_gate_202610060005"
+    historical = copy.deepcopy(_lock())
+    historical["gate"]["project"] = "kairos-sim-full-path-gate-20260928-r4"
+    historical["gate"]["database"] = "kairos_sim_full_path_gate_202609280004"
+    assert any("exact isolated project" in error for error in policy.validate_source_lock(historical))
+    with pytest.raises(ValueError, match="exact isolated database"):
+        policy.validate_database_url(policy.DATABASE_URL.replace("202610060005", "202609280004"))
+
+
+def test_sealed_review_fixture_explicitly_uses_the_legacy_engineering_boundary() -> None:
+    source = Path(__file__).with_name("test_full_path.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper = next(
+        value for value in tree.body if isinstance(value, ast.AsyncFunctionDef) and value.name == "_review"
+    )
+    calls = [
+        value.func.attr
+        for value in ast.walk(helper)
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+    ]
+    assert "review_legacy_engineering" in calls
+    assert "review" not in calls
+
+
 def test_dockerfile_and_ignore_allow_only_narrow_test_inputs() -> None:
     root = _root()
     if root is None:
@@ -76,7 +104,10 @@ def test_sealed_dockerfile_command_and_build_inputs_reject_bypasses() -> None:
     root = _root()
     if root is None:
         dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
-        dockerignore = "*\n!Dockerfile\n!compose.fixture.json\n!policy.py\n!pyproject.toml\n!pytest.ini\n!source-lock.json\n!test_full_path.py\n!test_policy.py\n!uv.lock\n"
+        dockerignore = (
+            "*\n!Dockerfile\n!compose.fixture.json\n!policy.py\n!pyproject.toml\n!pytest.ini\n"
+            "!source-lock.json\n!test_full_path.py\n!test_policy.py\n!uv.lock\n"
+        )
     else:
         gate = root / "tests" / "sim_full_path_gate"
         dockerfile = (gate / "Dockerfile").read_text(encoding="utf-8")

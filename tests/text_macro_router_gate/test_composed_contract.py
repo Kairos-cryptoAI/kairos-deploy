@@ -18,13 +18,17 @@ from kairos_aggregator.candidate_review import (
     CandidateReviewBrain,
     CandidateReviewOutput,
 )
+from kairos_aggregator.config import AggregatorSettings
+from kairos_aggregator.decision_context import CandidateContextStore
 from kairos_core import canonical_sha256
 from kairos_core.bus import BusEnvelope, InMemoryBus
 from kairos_core.contracts import (
     AccountSnapshotV2,
     CandidateReviewV1,
     CandidateRouteV1,
+    ClosedBarEventV1,
     ExitPlanV1,
+    MarketSnapshot,
     StrategicAllocation,
     StrategyIntentV1,
     StrategyProvenanceV1,
@@ -95,6 +99,42 @@ class SchemaGateway:
         )
 
 
+def fixture_bar():
+    return ClosedBarEventV1(
+        source="fixture-closed-bar-NOT_MARKET_EVIDENCE",
+        symbol="BTCUSDT",
+        open_time_ms=T0,
+        close_time_ms=DECISION,
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        base_volume=10.0,
+        quote_volume=1_000.0,
+        taker_buy_base_volume=5.0,
+        taker_buy_quote_volume=500.0,
+    )
+
+
+def fixture_market():
+    return MarketSnapshot(
+        source="fixture-compact-market-NOT_FULL_HISTORY",
+        produced_at=NOW,
+        symbol="BTCUSDT",
+        mid_price=100.0,
+        volume_usd=1_000.0,
+        order_book={
+            "best_bid": 99.99,
+            "best_ask": 100.01,
+            "spread_bps": 2.0,
+            "imbalance": 0.0,
+            "depth_usd": 5_000.0,
+        },
+        derivatives={"funding_rate": 0.0, "open_interest": 1_000.0},
+        indicators={"rsi_14": 50.0, "macd": 0.0, "macd_signal": 0.0, "macd_hist": 0.0},
+    )
+
+
 def intent(side=Side.LONG):
     stop, target = (95.0, 105.0) if side is Side.LONG else (105.0, 95.0)
     return StrategyIntentV1(
@@ -115,7 +155,7 @@ def intent(side=Side.LONG):
             config_sha256="b" * 64,
             input_window_sha256="c" * 64,
             features_sha256="d" * 64,
-            input_bar_sha256s=("e" * 64,),
+            input_bar_sha256s=(fixture_bar().bar_sha256,),
         ),
     )
 
@@ -193,19 +233,46 @@ async def route_candidate(candidate, signals, *, mode=SystemMode.NORMAL, trading
         await stream.aclose()
 
 
-async def review_candidate(route, signals, decision="ALLOW", *, priority=100, fail=False, at=REVIEW_TIME):
+async def review_candidate(
+    route, signals, decision="ALLOW", *, allocation=None, priority=100, fail=False, at=REVIEW_TIME
+):
     gateway = SchemaGateway(
         CandidateReviewOutput(decision=decision, priority=priority, reason_codes=("SYNTHETIC_FIXTURE",)),
         fail=fail,
     )
-    review = await CandidateReviewBrain(gateway, clock_ms=lambda: at).review(route, signals)
+    # This is a declared synthetic clock/input cut, not an archive availability claim.
+    settings = AggregatorSettings(_env_file=None, bus_backend="memory", candidate_require_macro_context=True)
+    store = CandidateContextStore(settings)
+    if allocation is None:
+        allocation, _ = await macro_allocation()
+    for kind, message in (
+        ("market", fixture_market()),
+        ("closed_bars", fixture_bar()),
+        ("macro", allocation),
+        *(("text", signal) for signal in signals),
+    ):
+        store.ingest(kind, message.to_payload(), received_at_ms=REVIEW_TIME)
+    context = store.build(route, cutoff_ms=REVIEW_TIME, captured_at_ms=REVIEW_TIME)
+    review = await CandidateReviewBrain(gateway, clock_ms=lambda: at).review_with_context(route, context)
     assert review.intent.to_payload() == route.intent.to_payload()
     assert isinstance(review, CandidateReviewV1)
     if gateway.calls:
-        context = json.loads(gateway.calls[0]["user"])
-        assert context["authority"] == "review_only"
-        assert context["immutable_intent"] == json.loads(json.dumps(route.intent.identity_payload()))
-        assert {item["message_id"] for item in context["evidence"]} == set(route.evidence_ids)
+        prompt = json.loads(gateway.calls[0]["user"])
+        assert prompt["authority"] == "review_only"
+        supplied = prompt["decision_context"]
+        assert supplied["context_id"] == context.context_id
+        macro = next(source for source in supplied["sources"] if source["kind"] == "macro")
+        assert macro["payloads"][0]["message_id"] == allocation.message_id
+        assert macro["payloads"][0] == allocation.to_payload()
+        assert json.loads(supplied["intent_identity_json"]) == json.loads(
+            route.intent.canonical_intent_bytes()
+        )
+        text = next(source for source in supplied["sources"] if source["kind"] == "text")
+        assert {item["message_id"] for item in text["payloads"]} == set(route.evidence_ids)
+        assert any(
+            item.kind == "decision_context" and item.reference == context.context_id
+            for item in review.evidence
+        )
     return review, gateway
 
 
@@ -235,7 +302,8 @@ async def macro_allocation(regime=MarketRegime.BULL, *, pct_1h=2.0, fail=False, 
     allocation = await MacroStrategist(gateway, allowed_strategy_ids=(STRATEGY,)).allocate(
         context,
         trigger=trigger,
-        message_id="fixture-macro",
+        message_id="fixture-macro-"
+        + canonical_sha256({"context": context, "fail": fail, "strategy": strategy}),
         correlation_id="fixture-sample",
     )
     assert gateway.calls[0]["workload"] is LLMWorkload.MACRO_STRATEGIST
@@ -329,8 +397,8 @@ async def test_bull_range_crash_and_macro_conflicts(regime, side, score, pct_1h,
     signals, _ = await text_signals(score=score)
     route, _ = await route_candidate(candidate, signals)
     assert route is not None
-    review, _ = await review_candidate(route, signals)
     allocation, _ = await macro_allocation(regime, pct_1h=pct_1h)
+    review, _ = await review_candidate(route, signals, allocation=allocation)
     decision = risk_decision(review, allocation)
     if expected_macro_rejection:
         assert expected_macro_rejection in decision.rejection_reasons
@@ -343,10 +411,10 @@ async def test_bull_range_crash_and_macro_conflicts(regime, side, score, pct_1h,
 async def test_review_outputs_have_no_execution_authority(decision):
     signals, _ = await text_signals()
     route, _ = await route_candidate(intent(), signals)
-    review, gateway = await review_candidate(route, signals, decision)
+    allocation, _ = await macro_allocation()
+    review, gateway = await review_candidate(route, signals, decision, allocation=allocation)
     assert review.decision.value == decision
     assert gateway.calls[0]["workload"] is LLMWorkload.AGGREGATOR_NORMAL
-    allocation, _ = await macro_allocation()
     result = risk_decision(review, allocation)
     if decision != "ALLOW":
         assert f"review_{decision.lower()}" in result.rejection_reasons
@@ -456,11 +524,11 @@ async def test_review_failure_or_deadline_defers_without_altering_candidate(
 async def test_macro_failure_becomes_defensive_separate_constraint(failure_kind):
     signals, _ = await text_signals()
     route, _ = await route_candidate(intent(), signals)
-    review, _ = await review_candidate(route, signals)
     allocation, _ = await macro_allocation(
         fail=failure_kind == "model",
         strategy="invented" if failure_kind == "unconfigured_strategy" else STRATEGY,
     )
+    review, _ = await review_candidate(route, signals, allocation=allocation)
     assert allocation.strategy_weights == {} and allocation.stable_reserve_pct == 1.0
     assert allocation.max_gross_leverage == 1.0
     result = risk_decision(review, allocation)
@@ -468,10 +536,9 @@ async def test_macro_failure_becomes_defensive_separate_constraint(failure_kind)
     assert "macro_regime_chop" in result.rejection_reasons
 
 
-async def test_stale_macro_remains_denied_even_when_review_allows():
+async def test_stale_required_macro_defers_review_and_remains_risk_denied():
     signals, _ = await text_signals()
     route, _ = await route_candidate(intent(), signals)
-    review, _ = await review_candidate(route, signals)
     allocation, _ = await macro_allocation()
     stale = StrategicAllocation.model_validate(
         {
@@ -479,6 +546,9 @@ async def test_stale_macro_remains_denied_even_when_review_allows():
             "produced_at": (NOW - timedelta(hours=27)).isoformat(),
         }
     )
+    review, gateway = await review_candidate(route, signals, allocation=stale)
+    assert review.decision is ReviewDecision.DEFER and gateway.calls == []
+    assert review.reason_codes == ("CONTEXT_REQUIRED_MACRO_UNAVAILABLE",)
     result = risk_decision(review, stale)
     assert "strategic_allocation_stale" in result.rejection_reasons
 
@@ -496,8 +566,8 @@ async def test_priority_macro_leverage_and_reserved_risk_cannot_raise_caps():
     signals, _ = await text_signals()
     route, _ = await route_candidate(intent(), signals)
     allocation, _ = await macro_allocation()
-    low, _ = await review_candidate(route, signals, priority=0)
-    high, _ = await review_candidate(route, signals, priority=100)
+    low, _ = await review_candidate(route, signals, allocation=allocation, priority=0)
+    high, _ = await review_candidate(route, signals, allocation=allocation, priority=100)
     for reserved in (0.0, 90.0, 100.0):
         low_result = risk_decision(low, allocation, open_risk=reserved)
         high_result = risk_decision(high, allocation, open_risk=reserved)

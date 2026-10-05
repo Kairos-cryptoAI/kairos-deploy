@@ -82,7 +82,10 @@ class SourceLockValidationTests(unittest.TestCase):
         source_copy = dockerfile.index("COPY --from=service pyproject.toml")
 
         self.assertLess(identity_write, source_copy)
-        self.assertIn('printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"', dockerfile)
+        self.assertIn(
+            'printf \'%s\\n%s\\n\' "${SOURCE_REPOSITORY}" "${SOURCE_REVISION}"',
+            dockerfile,
+        )
         self.assertIn(
             "COPY --from=builder --chown=kairos:kairos "
             "/tmp/kairos-source-identity /app/.source-identity",
@@ -190,7 +193,7 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
         ]
         providers = {
             "text-scouts": (
-                ("KAIROS_DEEPSEEK_API_KEY", "deepseek_api_key"),
+                ("KAIROS_OPENAI_API_KEY", "openai_api_key"),
                 ("KAIROS_X_BEARER_TOKEN", "x_bearer_token"),
             ),
             "aggregator": (("KAIROS_OPENAI_API_KEY", "openai_api_key"),),
@@ -359,7 +362,6 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                 "postgres_password",
                 "persistence_database_url",
                 "grafana_admin_password",
-                "deepseek_api_key",
                 "openai_api_key",
                 "x_bearer_token",
             )
@@ -385,6 +387,182 @@ class ComposeValidationTests(unittest.TestCase):
     def test_accepts_hardened_model(self) -> None:
         config, lock = rendered_config()
         self.assertEqual(validate_compose(config, lock), [])
+
+    def test_text_scouts_current_openai_and_x_scope_keeps_legacy_definition_dormant(
+        self,
+    ) -> None:
+        config, lock = rendered_config()
+        text = config["services"]["text-scouts"]
+
+        self.assertNotIn("deepseek_api_key", config["secrets"])
+        self.assertEqual(
+            {secret["source"] for secret in text["secrets"]},
+            {
+                "redis_url",
+                "persistence_database_url",
+                "openai_api_key",
+                "x_bearer_token",
+            },
+        )
+        self.assertNotIn(
+            "KAIROS_DEEPSEEK_API_KEY", text["environment"]["KAIROS_SECRET_BINDINGS"]
+        )
+        self.assertEqual(validate_compose(config, lock), [])
+
+    def test_rendered_base_and_live_secret_sets_are_exactly_active(self) -> None:
+        for live in (False, True):
+            with self.subTest(live=live):
+                config, lock = rendered_config()
+                if live:
+                    config["services"]["execution-engine"]["environment"][
+                        "KAIROS_TRADING_MODE"
+                    ] = "LIVE"
+                referenced_secrets = {
+                    secret["source"]
+                    for service in config["services"].values()
+                    for secret in service.get("secrets", [])
+                }
+
+                self.assertEqual(set(config["secrets"]), referenced_secrets)
+                self.assertNotIn("deepseek_api_key", referenced_secrets)
+                self.assertEqual(validate_compose(config, lock, live=live), [])
+
+    def test_rejects_dormant_legacy_secret_in_rendered_active_inventory(self) -> None:
+        config, lock = rendered_config()
+        config["secrets"]["deepseek_api_key"] = {"file": "/secrets/deepseek_api_key"}
+
+        errors = validate_compose(config, lock)
+
+        self.assertIn(
+            "top-level secret definitions must match the exact active base allow-list",
+            errors,
+        )
+        self.assertFalse(any(error.startswith("deepseek_api_key:") for error in errors))
+
+    def test_repository_text_scouts_secret_scope_matches_current_gateway_default(
+        self,
+    ) -> None:
+        # The central gateway's TEXT_SCOUTS default is OpenAI gpt-6-luna/low.
+        # Verify the actual Compose source, not just a synthetic rendered fixture,
+        # without importing the LLM package or loading local environment files.
+        root = Path(__file__).resolve().parents[1]
+        compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "\n  deepseek_api_key:\n"
+            "    file: ${KAIROS_SECRETS_DIR:-./secrets}/deepseek_api_key\n",
+            compose,
+        )
+        text = compose.split("\n  text-scouts:\n", 1)[1].split("\n  router:\n", 1)[0]
+        bindings = next(
+            line.strip().partition(": ")[2]
+            for line in text.splitlines()
+            if line.strip().startswith("KAIROS_SECRET_BINDINGS:")
+        )
+        self.assertEqual(
+            bindings,
+            "KAIROS_REDIS_URL=/run/secrets/redis_url,"
+            "KAIROS_PERSISTENCE_DATABASE_URL=/run/secrets/persistence_database_url,"
+            "KAIROS_OPENAI_API_KEY=/run/secrets/openai_api_key,"
+            "KAIROS_X_BEARER_TOKEN=/run/secrets/x_bearer_token",
+        )
+        mounts = text.split("\n    secrets:\n", 1)[1].split("\n    networks:\n", 1)[0]
+        self.assertEqual(
+            [line.strip() for line in mounts.splitlines() if line.strip()],
+            [
+                "- *redis-url-secret",
+                "- *persistence-url-secret",
+                "- *openai-secret",
+                "- *x-bearer-secret",
+            ],
+        )
+
+    def test_text_scouts_rejects_missing_openai_mount_or_binding(self) -> None:
+        for missing_mount, missing_binding in (
+            (True, False),
+            (False, True),
+            (True, True),
+        ):
+            with self.subTest(
+                missing_mount=missing_mount, missing_binding=missing_binding
+            ):
+                config, lock = rendered_config()
+                text = config["services"]["text-scouts"]
+                if missing_mount:
+                    text["secrets"] = [
+                        secret
+                        for secret in text["secrets"]
+                        if secret["source"] != "openai_api_key"
+                    ]
+                if missing_binding:
+                    text["environment"]["KAIROS_SECRET_BINDINGS"] = ",".join(
+                        binding
+                        for binding in text["environment"][
+                            "KAIROS_SECRET_BINDINGS"
+                        ].split(",")
+                        if not binding.startswith("KAIROS_OPENAI_API_KEY=")
+                    )
+
+                errors = validate_compose(config, lock)
+
+                if missing_mount:
+                    self.assertIn(
+                        "text-scouts: expected provider secret file openai_api_key is missing",
+                        errors,
+                    )
+                if missing_binding:
+                    self.assertIn(
+                        "text-scouts: expected provider binding KAIROS_OPENAI_API_KEY is missing",
+                        errors,
+                    )
+
+    def test_text_scouts_rejects_legacy_only_deepseek_runtime_scope(self) -> None:
+        config, lock = rendered_config()
+        text = config["services"]["text-scouts"]
+        for secret in text["secrets"]:
+            if secret["source"] == "openai_api_key":
+                secret.update(source="deepseek_api_key", target="deepseek_api_key")
+        text["environment"]["KAIROS_SECRET_BINDINGS"] = text["environment"][
+            "KAIROS_SECRET_BINDINGS"
+        ].replace(
+            "KAIROS_OPENAI_API_KEY=/run/secrets/openai_api_key",
+            "KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key",
+        )
+
+        errors = validate_compose(config, lock)
+
+        self.assertIn(
+            "text-scouts: expected provider secret file openai_api_key is missing",
+            errors,
+        )
+        self.assertIn(
+            "text-scouts: expected provider binding KAIROS_OPENAI_API_KEY is missing",
+            errors,
+        )
+        self.assertIn(
+            "text-scouts: secret source set must match the exact allow-list", errors
+        )
+        self.assertIn(
+            "text-scouts: secret bindings must match the exact allow-list", errors
+        )
+
+    def test_text_scouts_rejects_extra_legacy_deepseek_runtime_scope(self) -> None:
+        config, lock = rendered_config()
+        text = config["services"]["text-scouts"]
+        text["secrets"].append(
+            {"source": "deepseek_api_key", "target": "deepseek_api_key"}
+        )
+        text["environment"]["KAIROS_SECRET_BINDINGS"] += (
+            ",KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key"
+        )
+
+        errors = validate_compose(config, lock)
+
+        self.assertIn(
+            "text-scouts: secret source set must match the exact allow-list", errors
+        )
+        self.assertIn(
+            "text-scouts: secret bindings must match the exact allow-list", errors
+        )
 
     def test_rejects_secret_env_host_redis_and_live_base_execution(self) -> None:
         config, lock = rendered_config()

@@ -89,15 +89,21 @@ Every outcome is `SIMULATED`. This gate has no credentials, external endpoints,
 or durable host storage. It cannot change readiness flags, qualify a strategy,
 or authorize a venue action.
 
-The `20260928-r4` project identity is this current-source snapshot;
-artifacts from earlier `r1` and `r2` identities remain historical evidence
+The `20261006-r5` project identity is this current-source snapshot;
+artifacts from earlier `r1`, `r2`, and `r4` identities remain historical evidence
 and are not rewritten.
+
+The ordinary review fixture explicitly calls `review_legacy_engineering`. It
+still proves the sealed legacy engineering path; it does not substitute an
+absent current decision context, qualify a new strategy, or attest a new
+runtime evaluation receipt. All current readiness flags remain false and the
+strategy policy remains `REJECT_ALL`.
 
 Before a local run, validate the manifest and rendered Compose model:
 
 ```powershell
 python scripts/validate_sim_full_path_deployment.py
-docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20260928-r4 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
+docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-sim-full-path-gate-20261006-r5 -f docker-compose.sim-full-path.yml config --format json > compose-sim-full-path.json
 python scripts/validate_sim_full_path_deployment.py --compose-json compose-sim-full-path.json --dockerfile tests/sim_full_path_gate/Dockerfile
 ```
 

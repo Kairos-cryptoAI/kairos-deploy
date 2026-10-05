@@ -15,8 +15,20 @@ The underlying rootless resource controller at Deploy
 `D:/Kairos/runtime/buildkit-resource-20261003/run-b0feb0e12b3d4d0abcbecc2bf2055c03/receipt.json`.
 That observed CPU throttling, two real ExecOp processes disappearing after
 client cancellation, a fresh successful build, and owned cleanup. It is **not
-a Compose adapter run**. This new adapter remains unqualified until its own
-reviewed native fixture produces a receipt; offline tests cannot change that.
+a Compose adapter run**.
+
+The subsequent Compose fixture at Deploy
+`8f05d476099f062879b2596593454cc29a093a8b` completed on 2026-10-03 with
+`PASS_SYNTHETIC_COMPOSE_ONLY` at
+`D:/Kairos/runtime/bounded-build-20261003/run-a50bc9589fca4edaa908bded80729948/receipt.json`.
+Receipt SHA-256:
+`2a76bc851f1ad4a5da6495f59beed2e849311f3d2b94230bf8f9ca85f388118f`.
+It records owned cleanup, fresh Compose success after cancellation and zero
+provider/trading calls. Cancellation used `TERM_THEN_FORCED_DISCONNECT`;
+`graceful_compose_context_proven=false` and `production_build_qualified=false`.
+This accepts only that immutable synthetic host/tool/source attempt, not later
+code or ordinary release builds. Do not repeat it merely to close an obsolete
+status. The exact failed attempts below remain preserved historical evidence.
 
 ## Boundary
 
@@ -95,8 +107,9 @@ the same two token-bearing ExecOp identities; Compose did not exit until Job
 cleanup. Owned cleanup succeeded, but that is not cancellation acceptance.
 BuildKit v0.32.2 installs TERM/INT app-context handlers; its `dial-stdio`
 proxy action blocks on stream copies without observing that context. Therefore
-the old TERM-only stimulus does not establish a closed stream. This reviewed
-candidate is still unqualified until one separately authorized native run.
+the old TERM-only stimulus does not establish a closed stream. The later accepted
+synthetic run used the controlled forced-disconnect fallback described above;
+it does not retroactively turn this failed TERM-only attempt into a pass.
 
 The direct qualifier and adapter share an exclusive create-only lease. Old,
 stale or foreign leases are never adopted/deleted automatically. Fresh UUID4
@@ -138,8 +151,10 @@ path on that host/tool/source set. Integration of actual current-source image
 builds needs a separately reviewed context/network/dependency allowlist and
 proportional resource profile plus its own builds and cancellation evidence;
 there is no automatic increase of caps or default-builder fallback. Until then
-`production_build_qualified=false`, `PAPER_QUALIFIED=false`, `ALPHA_READY=false`,
-`LIVE_READY=false`, and `STRATEGY_POLICY=REJECT_ALL`.
+this adapter's `production_build_qualified=false`. Independently, trading
+readiness remains `PAPER_QUALIFIED=false`, `ALPHA_READY=false`, `LIVE_READY=false`
+and `STRATEGY_POLICY=REJECT_ALL`; a bespoke BuildKit adapter is not itself an
+intrinsic alpha or LIVE requirement.
 
 Official references: [remote driver](https://docs.docker.com/build/builders/drivers/remote/),
 [Compose explicit builder](https://docs.docker.com/reference/cli/docker/compose/build/),

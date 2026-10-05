@@ -227,6 +227,7 @@ def pytest_runtest_makereport(item, call):
             "review",
             "risk",
             "replay",
+            "review-context",
             "quiet",
             "drain",
             "cleanup",

@@ -151,11 +151,28 @@ entry point before building each image.
 under the ignored `secrets/` directory and are loaded by the container entrypoint without
 appearing in `docker inspect` environment metadata.
 
+The current base LLM routes are OpenAI-only. Text Scouts constructs the central
+gateway with default settings and requests `LLMWorkload.TEXT_SCOUTS`; the fixed
+`kairos_llm.models.DEFAULT_WORKLOAD_ROUTES` selects `gpt-6-luna` with `low` effort.
+Its container therefore mounts and binds OpenAI + X, not DeepSeek. Aggregator
+and Macro also mount OpenAI; model routing does not grant trading readiness.
+
+The dormant top-level `deepseek_api_key` definition, labelled import support, and
+provisioning inventory are retained solely for legacy compatibility. The existing
+provisioning validator still checks that inventory, so the examples below include
+its legacy file; no current base service mounts it and it cannot substitute for
+the required OpenAI binding. Compose omits that unused definition from the rendered
+model; deployment validation requires only the exact active secret inventory, not
+the separate legacy provisioning inventory. Preserve existing keyfiles. A future
+provider override requires separately reviewed routing and exact secret-scope changes.
+
 ```powershell
 Set-Location D:\Kairos\kairos-deploy
 Copy-Item .env.example .env
 python scripts\provision_secrets.py --initialize-infrastructure
-python scripts\provision_secrets.py --prompt deepseek_api_key --prompt openai_api_key --prompt x_bearer_token
+python scripts\provision_secrets.py --prompt openai_api_key --prompt x_bearer_token
+# Legacy provisioning inventory only; not a current runtime provider.
+python scripts\provision_secrets.py --prompt deepseek_api_key
 python scripts\provision_secrets.py
 ```
 

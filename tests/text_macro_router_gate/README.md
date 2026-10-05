@@ -10,8 +10,11 @@ The real installed producer and domain paths are:
 
 1. `EventFreshnessFilter` → `SentimentExtractor` → `RouterService` event-time
    ingestion and candidate routing through the actual `InMemoryBus`.
-2. `CandidateReviewBrain` preserves immutable intent, chooses the normal/conflict
-   workload, validates ALLOW/VETO/DEFER and applies its material-conflict guard.
+2. `CandidateReviewBrain.review_with_context` validates a content-addressed
+   `DecisionContextV1` before normal/conflict dispatch. The declared synthetic
+   source cut contains exact intent-bar provenance, compact market features,
+   routed text and the explicitly timestamped fixture Macro allocation. It
+   preserves immutable intent and applies the material-conflict guard.
 3. `ShockDetector` → `build_macro_context` → `MacroStrategist` produces a separate
    allocation constraint. Macro is **not** an input invented for Router.
 4. `PaperRiskPipeline` evaluates those same review/allocation objects with
@@ -24,8 +27,10 @@ Only remote model responses are fixed, strict-schema gateway doubles. No provide
 client, external feed, DB, Redis, EVEDEX client, operator configuration or secrets
 are constructed/read. Network calls and real gateway construction are blocked.
 Raw news is synthetic at `fixture.invalid`; fixture timestamps/identities are
-not historical event observations. Macro reception timestamps are explicitly
-normalized in the test, not evidence about the service clock.
+not historical event observations. Offline Macro producer timestamps and local
+receipts are explicitly declared fixture clocks, not evidence about real service
+availability. Each scenario shares its exact Macro payload between review and
+Risk; stale required Macro defers before a provider call.
 
 Scenarios cover bull/range/crash, schedule/shock context, opposing news, separate
 Macro/strategy conflict, stale/future news, stale Macro, refusal/failure/deadline,
@@ -58,6 +63,12 @@ Router and CandidateReview handlers, and PAPER Risk recovery/input/review handle
 Macro reception timestamps are not normalized or overwritten in this native target.
 Router/review logical clocks remain explicitly injected engineering fixture clocks;
 this target is not a production end-to-end latency or causal news-arrival proof.
+Real PG/Redis delivery supplies the exact intent-declared closed-bar tail and a
+compact market fixture to the new context handlers. Context publication is bound
+to the resulting review and deduplicated on committed restart. The real Macro
+allocation is later than the injected strategy event: it constrains Risk but is
+explicitly `UNAVAILABLE` in this review cut, never backdated into the context.
+This target does not qualify mandatory causal Macro review or a full OHLC window.
 
 The native target covers ALLOW/VETO/DEFER, opposing news/conflict guard, stale-news
 filtering, bearish/failure Macro constraints, genuine immutable generator intents

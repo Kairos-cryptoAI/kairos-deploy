@@ -6,8 +6,8 @@
     "node": "22"
   },
   "dependencies": {
-    "kairos-core": "56df50787eff83c898aa2aeefb426c6ee8482820",
-    "kairos-persistence": "695fcc22515bc73d7ac92e6c593ec8f08ceb9605"
+    "kairos-core": "6937eb4773fc00afaf5ba4e020b28b689f48e377",
+    "kairos-persistence": "fd2966761e84b32688c9aee73e00604965f5d7f2"
   },
   "infrastructure": {
     "redis": {
@@ -18,39 +18,39 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "eede231b9b4627faadbd2a5ddb4efee007c883b8",
+      "revision": "927f5730d09383736c1dfc7dc5c400b06851019f",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
     "strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "4b06f78750aacc838a16c96cc6038faf5ba3599b",
+      "revision": "ccf1ff189b3c84e058c617512d92487006a58206",
       "package_dir": "kairos_strategy",
       "command": "kairos-strategy-engine",
       "extra": "runtime"
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "ae9361954d941481370c9567125ba8b5cbe07959",
+      "revision": "94eb2ff5157468714766e6b3c90d2aacfe7511a0",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "canary-controller": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "ae9361954d941481370c9567125ba8b5cbe07959",
+      "revision": "94eb2ff5157468714766e6b3c90d2aacfe7511a0",
       "package_dir": "kairos_risk",
       "command": "kairos-paper-canary"
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "c0bf7d48ada27b45feb12e7e9a0275d486e7d2dd",
+      "revision": "ef91f99c3e1cec6a1e5f825f031c649a79656783",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
     },
     "ops-exporter": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "695fcc22515bc73d7ac92e6c593ec8f08ceb9605",
+      "revision": "fd2966761e84b32688c9aee73e00604965f5d7f2",
       "package_dir": "kairos_persistence",
       "command": "kairos-persistence-exporter"
     }
