@@ -20,5 +20,5 @@ FROM python:3.11.15-slim-bookworm@sha256:d29f48a31a8b408ed19272ca1e7b10ebae13b24
 ENV PATH=/app/.venv/bin:${PATH} PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 COPY --from=builder /app/.venv /app/.venv
 WORKDIR /work/current_release_gate
-COPY Dockerfile policy.py source-lock.json compose.fixture.json test_policy.py test_reject_all_path.py ./
-CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "test_policy.py", "test_reject_all_path.py"]
+COPY Dockerfile policy.py source-lock.json compose.fixture.json test_policy.py test_reject_all_path.py test_adaptive_isolation.py ./
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "test_policy.py", "test_reject_all_path.py", "test_adaptive_isolation.py"]

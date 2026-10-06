@@ -62,6 +62,27 @@ class CurrentReleaseGateValidationTests(unittest.TestCase):
     def test_remote_verifier_is_opt_in_only(self) -> None:
         self.assertTrue(callable(verify_remote_sources))
 
+    def test_adaptive_refusal_test_cannot_be_omitted_from_context_or_command(
+        self,
+    ) -> None:
+        dockerignore = DOCKERIGNORE_PATH.read_text(encoding="utf-8")
+        self.assertTrue(
+            policy.validate_dockerignore(
+                dockerignore.replace("!test_adaptive_isolation.py\n", "")
+            )
+        )
+        dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+        omitted_from_command = dockerfile.replace(
+            ', "test_adaptive_isolation.py"]', "]"
+        )
+        self.assertIn("test_adaptive_isolation.py", omitted_from_command)
+        self.assertTrue(
+            any(
+                "CMD" in error
+                for error in policy.validate_dockerfile(omitted_from_command)
+            )
+        )
+
     def test_ci_workflows_follow_the_exact_source_gate_identity(self) -> None:
         for workflow_path in (CI_WORKFLOW_PATH, GATE_WORKFLOW_PATH):
             workflow = workflow_path.read_text(encoding="utf-8")

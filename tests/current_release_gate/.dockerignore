@@ -7,3 +7,4 @@
 !compose.fixture.json
 !test_policy.py
 !test_reject_all_path.py
+!test_adaptive_isolation.py

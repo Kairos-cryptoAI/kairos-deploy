@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-PROJECT = "kairos-current-release-gate-20261006-r5"
+PROJECT = "kairos-current-release-gate-20261006-r6"
 CONFIRMATION = "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
 SHA256 = re.compile(r"^[0-9a-f]{40}$")
 DEPENDENCIES = {
@@ -175,12 +175,32 @@ def validate_dockerfile(text: str) -> list[str]:
         "COPY --from=builder /app/.venv /app/.venv",
         "test_policy.py",
         "test_reject_all_path.py",
+        "test_adaptive_isolation.py",
         "-p",
         "no:cacheprovider",
     )
     for value in required:
         if value not in text:
             errors.append(f"current-release Dockerfile missing required gate detail: {value}")
+    commands = [line.strip()[4:].strip() for line in text.splitlines() if line.strip().startswith("CMD ")]
+    expected_command = [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "--tb=short",
+        "test_policy.py",
+        "test_reject_all_path.py",
+        "test_adaptive_isolation.py",
+    ]
+    try:
+        command = json.loads(commands[0]) if len(commands) == 1 else None
+    except json.JSONDecodeError:
+        command = None
+    if command != expected_command:
+        errors.append("current-release Docker CMD must run every required refusal test")
     lower = text.casefold()
     for token in ("keys.txt", "evedex", "openai", "deepseek", "brightdata", ".env"):
         if token in lower:
@@ -200,6 +220,7 @@ def validate_dockerignore(text: str) -> list[str]:
             "!compose.fixture.json",
             "!test_policy.py",
             "!test_reject_all_path.py",
+            "!test_adaptive_isolation.py",
             "",
         )
     )
@@ -241,7 +262,7 @@ def validate_compose(config: dict[str, Any]) -> list[str]:
         errors.append("gate must use its dedicated Dockerfile")
     if build.get("additional_contexts"):
         errors.append("gate must not accept an additional build context")
-    if gate.get("image") != "kairos-current-release-gate-tests:20261006-r5":
+    if gate.get("image") != "kairos-current-release-gate-tests:20261006-r6":
         errors.append("current-release gate image identity changed")
     environment = _environment(gate.get("environment"))
     if environment != expected_environment():
