@@ -35,7 +35,7 @@
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "0559a568cbaa422143d07061f75788b3e38f5ce0"
+      "revision": "092161aaaf382802fc139be08c09c65e593b0d97"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
@@ -47,7 +47,7 @@
     }
   },
   "gate": {
-    "project": "kairos-current-release-gate-20261006-r6",
+    "project": "kairos-current-release-gate-20261006-r7",
     "confirmation": "CURRENT_RELEASE_REJECT_ALL_GATE_ONLY"
   }
 }

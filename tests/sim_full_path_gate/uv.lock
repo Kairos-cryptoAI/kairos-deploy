@@ -293,7 +293,7 @@ wheels = [
 [[package]]
 name = "kairos-aggregator"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=0559a568cbaa422143d07061f75788b3e38f5ce0#0559a568cbaa422143d07061f75788b3e38f5ce0" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=092161aaaf382802fc139be08c09c65e593b0d97#092161aaaf382802fc139be08c09c65e593b0d97" }
 dependencies = [
     { name = "kairos-core" },
     { name = "kairos-llm" },
@@ -399,7 +399,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=0559a568cbaa422143d07061f75788b3e38f5ce0" },
+    { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=092161aaaf382802fc139be08c09c65e593b0d97" },
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=6937eb4773fc00afaf5ba4e020b28b689f48e377" },
     { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=ef91f99c3e1cec6a1e5f825f031c649a79656783" },
     { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=f1e25893f9078a467eba584e233ac9129e9ff9b1" },

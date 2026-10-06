@@ -55,7 +55,7 @@ def test_exact_isolated_model_is_accepted() -> None:
 
 
 def test_r5_is_a_new_engineering_identity_and_rejects_the_old_target() -> None:
-    assert policy.PROJECT == "kairos-sim-full-path-gate-20261006-r6"
+    assert policy.PROJECT == "kairos-sim-full-path-gate-20261006-r7"
     assert policy.DATABASE == "kairos_sim_full_path_gate_202610060005"
     historical = copy.deepcopy(_lock())
     historical["gate"]["project"] = "kairos-sim-full-path-gate-20260928-r4"
