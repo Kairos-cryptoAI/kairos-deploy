@@ -4,7 +4,7 @@ name: kairos-sim-full-path-gate-20261006-r7
 # durable host storage, credentials, or external endpoint configuration.
 services:
   timescaledb:
-    image: timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9
+    image: timescale/timescaledb:2.30.2-pg16@sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f
     environment:
       POSTGRES_USER: kairos
       POSTGRES_PASSWORD: synthetic_sim_full_path_gate_only
