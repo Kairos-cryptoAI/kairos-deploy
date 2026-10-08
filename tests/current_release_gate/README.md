@@ -26,23 +26,23 @@ credentials. Docker may fetch immutable public Git revisions only while building
 The bundled `source-lock.json` is verified byte-for-byte against the canonical root
 lock before build and again by the static gate.
 
-The `20261006-r7` project identity is this source snapshot; artifacts from
-earlier `r1`, `r2`, `20260928-r4`, `20261006-r5` and `20261006-r6` identities remain historical evidence and
+The `20261008-r8` project identity is this source snapshot; artifacts from
+earlier `r1`, `r2`, `20260928-r4`, `20261006-r5`, `20261006-r6` and `20261006-r7` identities remain historical evidence and
 are not rewritten.
 
 Run the static checks from `D:\Kairos\kairos-deploy`:
 
 ```powershell
 python scripts/validate_current_release_gate.py
-docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261006-r7 -f docker-compose.current-release-gate.yml config --quiet
+docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261008-r8 -f docker-compose.current-release-gate.yml config --quiet
 ```
 
 The Docker test is a one-shot operation only after confirming the Compose project
 has no existing resources:
 
 ```powershell
-docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261006-r7 -f docker-compose.current-release-gate.yml build gate
-docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261006-r7 -f docker-compose.current-release-gate.yml up --no-deps gate
+docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261008-r8 -f docker-compose.current-release-gate.yml build gate
+docker compose --env-file tests/sim_full_path_gate/empty.env -p kairos-current-release-gate-20261008-r8 -f docker-compose.current-release-gate.yml up --no-deps gate
 ```
 
 Do not reuse this project name for PAPER, research data or a long-running service.
