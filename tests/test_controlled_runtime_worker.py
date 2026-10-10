@@ -347,6 +347,7 @@ class RestoredPrimaryVerificationTests(unittest.IsolatedAsyncioTestCase):
         result = await worker._table_digest(connection, "message_outbox", budget)
         self.assertEqual(result, {"count": 3, "sha256": "a" * 64})
         self.assertIn("sha256(convert_to(to_jsonb(t)::text,'UTF8'))", connection.query)
+        self.assertIn("json_build_object('table',$1::text", connection.query)
         self.assertIn("string_agg(row_sha,'' ORDER BY row_sha)", connection.query)
         self.assertEqual((budget.rows, budget.bytes), (3, 30))
 

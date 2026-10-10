@@ -394,7 +394,7 @@ async def _table_digest(connection: Any, table: str, budget: Budget) -> dict[str
     if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", table):
         raise WorkerError("invalid table identifier")
     query = (
-        "SELECT json_build_object('table',$1,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
+        "SELECT json_build_object('table',$1::text,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
         "encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex'))::text AS result "
         "FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha, octet_length(to_jsonb(t)::text) AS row_bytes "
         'FROM public."' + table + '" t) SELECT row_sha,row_bytes FROM row_hashes) r'
@@ -746,7 +746,7 @@ async def _grant_roles(
         if primary:
             auth = _runtime_auth(directory)
             password_literal = await connection.fetchval(
-                "SELECT quote_literal($1)", auth["password"]
+                "SELECT quote_literal($1::text)", auth["password"]
             )
             await connection.execute(
                 "CREATE ROLE kairos_runtime LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD "
@@ -1265,7 +1265,7 @@ async def _projected_history(
     for table in plan["expected_legacy_tables"]:
         if table == "schema_migrations":
             query = (
-                "SELECT json_build_object('table',$2,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
+                "SELECT json_build_object('table',$2::text,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
                 "encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex'))::text AS result "
                 "FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha, "
                 "octet_length(to_jsonb(t)::text) AS row_bytes FROM public.schema_migrations t WHERE version=ANY($1::text[])) SELECT row_sha,row_bytes FROM row_hashes) r"
@@ -1280,7 +1280,7 @@ async def _projected_history(
             }
             expr = "(to_jsonb(t) - ARRAY['reconciliation_state','reconciliation_id','reconciliation_started_at','reconciliation_outcome_at']) || CASE WHEN t.id=$1 THEN $2::jsonb ELSE '{}'::jsonb END"
             query = (
-                "SELECT json_build_object('table',$3,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
+                "SELECT json_build_object('table',$3::text,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
                 "encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex'))::text AS result "
                 "FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(("
                 + expr
@@ -1294,7 +1294,7 @@ async def _projected_history(
             if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", table):
                 raise WorkerError("invalid projected table identifier")
             query = (
-                "SELECT json_build_object('table',$1,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
+                "SELECT json_build_object('table',$1::text,'count',count(*),'bytes',COALESCE(sum(row_bytes),0),'sha256',"
                 "encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex'))::text AS result "
                 "FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha, "
                 'octet_length(to_jsonb(t)::text) AS row_bytes FROM public."'
