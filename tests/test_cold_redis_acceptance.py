@@ -445,7 +445,8 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
         plan = cold.plan()
         self.assertEqual(plan["result"], "PLAN_ONLY_NO_NATIVE_CALLS")
         self.assertEqual(plan["clone"]["total_seconds"], 240)
-        self.assertEqual(plan["clone"]["xrange_entries_max"], 20_000)
+        self.assertEqual(plan["clone"]["xrange_entries_max"], 120_000)
+        self.assertEqual(plan["clone"]["xrange_response_bytes_max"], 128 * 1024**2)
         self.assertEqual(
             plan["result_policy"]["zero_matches"], "INCONCLUSIVE_NO_REPLAY"
         )
@@ -888,6 +889,9 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["state"], "POSITIVE_ACCEPTED")
         self.assertEqual(result["stream_ids"], ["1700000000000-0"])
         self.assertEqual(result["evidence"]["match_count"], 1)
+        self.assertEqual(result["xrange_limit"], cold.MAX_XRANGE_ENTRIES)
+        self.assertEqual(result["xrange_response_bytes_limit"], cold.MAX_XRANGE_BYTES)
+        self.assertGreater(result["response_bytes"], 0)
         self.assertNotIn("must-not-leak", json.dumps(result))
         self.assertEqual(len(connection.commands), 2)
 
@@ -946,7 +950,12 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
             )
         self.assertEqual(result["state"], "INCONCLUSIVE_SCAN_LIMIT")
         self.assertIsNone(result["match_count"])
+        self.assertEqual(result["entries_scanned"], 1)
+        self.assertEqual(result["xrange_limit"], 1)
+        self.assertEqual(result["xrange_response_bytes_limit"], cold.MAX_XRANGE_BYTES)
+        self.assertFalse(result["scan_complete"])
         self.assertNotIn("evidence", result)
+        self.assertNotIn("must-not-leak", json.dumps(result))
 
 
 if __name__ == "__main__":

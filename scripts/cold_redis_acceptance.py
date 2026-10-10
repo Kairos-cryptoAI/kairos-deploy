@@ -54,8 +54,11 @@ MAX_SECONDS = 240
 CLEANUP_SECONDS = 60
 MAX_SOURCE_BYTES = 256 * 1024**2
 MAX_SOURCE_FILES = 4096
-MAX_XRANGE_ENTRIES = 20_000
-MAX_XRANGE_BYTES = 32 * 1024**2
+# The initial 20,000-entry prefix was insufficient for the preserved stream.
+# Expand only the isolated read-only search; keep its existing wall-clock and
+# memory/CPU/source-copy limits unchanged. Pages are processed incrementally.
+MAX_XRANGE_ENTRIES = 120_000
+MAX_XRANGE_BYTES = 128 * 1024**2
 XRANGE_PAGE_SIZE = 500
 MAX_STDOUT = 256 * 1024
 WORKER_REJECTION_FIELDS = frozenset(
