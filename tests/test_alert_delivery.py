@@ -200,6 +200,181 @@ class QualificationTests(unittest.TestCase):
         self.factory.assert_not_called()
 
 
+class AcknowledgementTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "ops"
+        self.receipts = self.root / "receipts"
+        self.receipts.mkdir(parents=True, mode=0o700)
+        self.journal = delivery._qualification_path(self.root)
+        self.entries = self.synthetic_entries()
+        self.raw = b"".join(delivery.canonical(entry) + b"\n" for entry in self.entries)
+        self.journal.write_bytes(self.raw)
+        self.journal.chmod(0o600)
+        self.digest = hashlib.sha256(self.raw).hexdigest()
+        self.acl = patch.object(delivery, "_private_acl")
+        self.acl.start()
+        self.addCleanup(self.acl.stop)
+
+    @staticmethod
+    def synthetic_entries() -> list[dict]:
+        common = {"schema_version": 1, "implementation_sha256": hashlib.sha256(b"historical qualification implementation").hexdigest(), "test_message_sha256": hashlib.sha256(delivery.TEST_MESSAGE.encode("utf-8")).hexdigest(), "expected_bot_username": delivery.EXPECTED_BOT, "expected_chat_id": delivery.EXPECTED_TEST_CHAT, "recipient_purpose": "qualification_test_only", "human_acknowledged": False, "trading_authority": False}
+        stages = ["PRECHECK_STARTED", "IDENTITY_VERIFIED", "SEND_RESERVED", "TRANSPORT_ACCEPTED"]
+        counts = [{"getMe": 0, "getChat": 0, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 1}]
+        entries = []
+        for index, stage in enumerate(stages):
+            entry = {**common, "stage": stage, "send_attempts": 1 if index >= 2 else 0, "http_method_counts": counts[index], "transport_accepted": index == 3}
+            if index > 0:
+                entry.update({"error_category": None, "observed_at_utc": "2026-10-10T09:00:00+00:00"})
+            if index == 3:
+                entry["message_id"] = 42
+            entries.append(entry)
+        return entries
+
+    def attest(self) -> dict:
+        return delivery.acknowledge(expected_journal_sha256=self.digest, message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+
+    def test_success_is_local_attestation_and_readback_survives_restart(self) -> None:
+        with patch.object(delivery, "TelegramTransport", side_effect=AssertionError("ack must not access Telegram")) as transport:
+            result = self.attest()
+            readback = delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+        self.assertEqual(result, readback)
+        self.assertNotEqual(self.entries[0]["implementation_sha256"], hashlib.sha256(Path(delivery.__file__).read_bytes()).hexdigest())
+        self.assertEqual(result["basis"], "LOCAL_OPERATOR_ATTESTATION")
+        self.assertFalse(result["telegram_user_authenticated"])
+        self.assertFalse(result["operationally_qualified"])
+        self.assertFalse(result["trading_authority"])
+        self.assertEqual(self.journal.read_bytes(), self.raw)
+        self.assertEqual(transport.call_count, 0)
+        self.assertFalse((self.root / "secrets" / "telegram_bot_token").exists())
+
+    def test_requires_exact_confirmation_digest_and_message_id(self) -> None:
+        for kwargs, error in (({"confirmation": "yes"}, "EXPLICIT_ACKNOWLEDGEMENT_REQUIRED"), ({"expected_journal_sha256": "0" * 64}, "QUALIFICATION_JOURNAL_SHA256_MISMATCH"), ({"message_id": 43}, "MESSAGE_ID_MISMATCH"), ({"message_id": True}, "MESSAGE_ID_REQUIRED")):
+            args = {"expected_journal_sha256": self.digest, "message_id": 42, "confirmation": delivery.ACK_CONFIRMATION, "ops_root": self.root}
+            args.update(kwargs)
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(delivery.DeliveryError, error):
+                delivery.acknowledge(**args)
+        self.assertFalse(delivery._acknowledgement_path(self.root).exists())
+
+    def test_rejects_wrong_chat_bot_flags_and_tampered_sequence(self) -> None:
+        mutations = ((3, "expected_chat_id", -1), (3, "expected_bot_username", "wrong"), (3, "trading_authority", True), (3, "trading_authority", 0), (3, "human_acknowledged", True), (3, "human_acknowledged", 0), (3, "transport_accepted", False), (3, "stage", "SEND_OUTCOME_UNKNOWN"), (2, "error_category", "uncertain"), (3, "extra", "unknown"), (3, "implementation_sha256", "0" * 64))
+        for index, key, value in mutations:
+            with self.subTest(key=key, value=value):
+                entries = self.synthetic_entries()
+                entries[index][key] = value
+                raw = b"".join(delivery.canonical(entry) + b"\n" for entry in entries)
+                self.journal.write_bytes(raw)
+                self.journal.chmod(0o600)
+                digest = hashlib.sha256(raw).hexdigest()
+                with self.assertRaises(delivery.DeliveryError):
+                    delivery.acknowledge(expected_journal_sha256=digest, message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+                self.assertFalse(delivery._acknowledgement_path(self.root).exists())
+
+    def test_rejects_middle_record_source_fingerprint_drift(self) -> None:
+        entries = self.synthetic_entries()
+        entries[1]["implementation_sha256"] = "0" * 64
+        raw = b"".join(delivery.canonical(entry) + b"\n" for entry in entries)
+        self.journal.write_bytes(raw)
+        self.journal.chmod(0o600)
+        with self.assertRaisesRegex(delivery.DeliveryError, "QUALIFICATION_JOURNAL_DRIFT"):
+            delivery.acknowledge(expected_journal_sha256=hashlib.sha256(raw).hexdigest(), message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+        self.assertFalse(delivery._acknowledgement_path(self.root).exists())
+
+    def test_refuses_partial_extra_duplicate_or_ambiguous_journals(self) -> None:
+        cases = (b"".join(self.raw.splitlines(keepends=True)[:2]), self.raw + self.raw.splitlines(keepends=True)[-1], self.raw.replace(b"TRANSPORT_ACCEPTED", b"SEND_OUTCOME_UNKNOWN"), self.raw[:-1])
+        for raw in cases:
+            with self.subTest(length=len(raw)):
+                self.journal.write_bytes(raw)
+                self.journal.chmod(0o600)
+                digest = hashlib.sha256(raw).hexdigest()
+                with self.assertRaises(delivery.DeliveryError):
+                    delivery.acknowledge(expected_journal_sha256=digest, message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+                self.assertFalse(delivery._acknowledgement_path(self.root).exists())
+
+    def test_existing_complete_or_partial_acknowledgement_is_never_overwritten(self) -> None:
+        receipt = delivery._acknowledgement_path(self.root)
+        self.attest()
+        original = receipt.read_bytes()
+        with self.assertRaisesRegex(delivery.DeliveryError, "EXISTING_ACKNOWLEDGEMENT_REQUIRES_REVIEW"):
+            self.attest()
+        self.assertEqual(receipt.read_bytes(), original)
+        receipt.unlink()
+        receipt.write_bytes(b'{"partial":')
+        receipt.chmod(0o600)
+        original = receipt.read_bytes()
+        with self.assertRaisesRegex(delivery.DeliveryError, "EXISTING_ACKNOWLEDGEMENT_REQUIRES_REVIEW"):
+            self.attest()
+        self.assertEqual(receipt.read_bytes(), original)
+        with self.assertRaisesRegex(delivery.DeliveryError, "ACKNOWLEDGEMENT_RECEIPT_INVALID"):
+            delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+
+    def test_journal_and_ack_reads_are_bounded_and_reparse_safe(self) -> None:
+        self.journal.write_bytes(b"x" * (delivery.MAX_QUALIFICATION_JOURNAL_BYTES + 1))
+        with self.assertRaisesRegex(delivery.DeliveryError, "QUALIFICATION_JOURNAL_SIZE_REJECTED"):
+            self.attest()
+        self.journal.unlink()
+        outside = Path(self.temporary.name) / "outside.jsonl"
+        outside.write_bytes(self.raw)
+        try:
+            self.journal.symlink_to(outside)
+        except OSError:
+            self.skipTest("Symlink creation unavailable on this host")
+        with self.assertRaisesRegex(delivery.DeliveryError, "REPARSE_PATH_REJECTED"):
+            self.attest()
+
+    def test_readback_refuses_changed_or_missing_original_journal(self) -> None:
+        result = self.attest()
+        self.assertEqual(result["basis"], "LOCAL_OPERATOR_ATTESTATION")
+        changed = self.raw.replace(b"TRANSPORT_ACCEPTED", b"SEND_OUTCOME_UNKNOWN")
+        self.journal.write_bytes(changed)
+        self.journal.chmod(0o600)
+        with self.assertRaisesRegex(delivery.DeliveryError, "QUALIFICATION_JOURNAL_SHA256_MISMATCH"):
+            delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+        self.journal.unlink()
+        with self.assertRaisesRegex(delivery.DeliveryError, "QUALIFICATION_JOURNAL_REQUIRED"):
+            delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+
+    def test_readback_rejects_bool_type_confusion_and_ack_before_terminal(self) -> None:
+        result = self.attest()
+        receipt_path = Path(result["receipt_path"])
+        receipt = json.loads(receipt_path.read_bytes())
+        receipt["trading_authority"] = 0
+        receipt_path.write_bytes(delivery.canonical(receipt) + b"\n")
+        receipt_path.chmod(0o600)
+        with self.assertRaisesRegex(delivery.DeliveryError, "ACKNOWLEDGEMENT_RECEIPT_MISMATCH"):
+            delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+        receipt["trading_authority"] = False
+        receipt["attested_at_utc"] = "2026-10-10T08:59:59+00:00"
+        receipt_path.write_bytes(delivery.canonical(receipt) + b"\n")
+        receipt_path.chmod(0o600)
+        with self.assertRaisesRegex(delivery.DeliveryError, "ACKNOWLEDGEMENT_TIME_ORDER_REJECTED"):
+            delivery.read_acknowledgement(expected_journal_sha256=self.digest, message_id=42, ops_root=self.root)
+
+    def test_journal_observation_times_must_be_utc_and_monotonic(self) -> None:
+        for index, timestamp in ((1, "2026-10-10T12:00:00+03:00"), (2, "2026-10-10T08:59:59+00:00")):
+            with self.subTest(timestamp=timestamp):
+                entries = self.synthetic_entries()
+                entries[index]["observed_at_utc"] = timestamp
+                raw = b"".join(delivery.canonical(entry) + b"\n" for entry in entries)
+                self.journal.write_bytes(raw)
+                self.journal.chmod(0o600)
+                with self.assertRaises(delivery.DeliveryError):
+                    delivery.acknowledge(expected_journal_sha256=hashlib.sha256(raw).hexdigest(), message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+
+    def test_future_terminal_time_fails_before_exclusive_receipt_creation(self) -> None:
+        entries = self.synthetic_entries()
+        future = "2100-01-01T00:00:00+00:00"
+        for entry in entries[1:]:
+            entry["observed_at_utc"] = future
+        raw = b"".join(delivery.canonical(entry) + b"\n" for entry in entries)
+        self.journal.write_bytes(raw)
+        self.journal.chmod(0o600)
+        with self.assertRaisesRegex(delivery.DeliveryError, "ACKNOWLEDGEMENT_TIME_ORDER_REJECTED"):
+            delivery.acknowledge(expected_journal_sha256=hashlib.sha256(raw).hexdigest(), message_id=42, confirmation=delivery.ACK_CONFIRMATION, ops_root=self.root)
+        self.assertFalse(delivery._acknowledgement_path(self.root).exists())
+
+
 class TransportTests(unittest.TestCase):
     def test_actual_acl_probe_accepts_only_restricted_synthetic_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

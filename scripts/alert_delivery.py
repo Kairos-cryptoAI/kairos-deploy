@@ -31,6 +31,9 @@ ALERTMANAGER_IMAGE = "prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f
 API_ROOT = "https://api.telegram.org"
 MAX_RESPONSE = 65_536
 TIMEOUT_SECONDS = 15
+MAX_QUALIFICATION_JOURNAL_BYTES = 128 * 1024
+MAX_QUALIFICATION_JOURNAL_LINES = 8
+ACK_CONFIRMATION = "OWNER_SAW_QUALIFICATION_MESSAGE"
 TEST_MESSAGE = "[KAIROS QUALIFICATION TEST] Проверка аварийного канала. Это тест, не торговый сигнал и не разрешение LIVE."
 POLICY_FIELDS = {"schema_version", "enabled", "receiver", "profile", "source_sha256", "expected_bot_username", "expected_chat_id", "group_wait_seconds", "group_interval_seconds", "repeat_interval_seconds"}
 
@@ -261,6 +264,195 @@ def qualify(token_file: Path, *, authorize_one_test: bool, ops_root: Path = OPS_
     return result
 
 
+def _qualification_scope() -> str:
+    return hashlib.sha256(canonical({"bot": EXPECTED_BOT, "chat": EXPECTED_TEST_CHAT})).hexdigest()
+
+
+def _qualification_path(ops_root: Path) -> Path:
+    return ops_root / "receipts" / ("telegram-qualification-" + _qualification_scope() + ".jsonl")
+
+
+def _acknowledgement_path(ops_root: Path) -> Path:
+    return ops_root / "receipts" / ("telegram-acknowledgement-" + _qualification_scope() + ".json")
+
+
+def _read_protected_file(path: Path, *, maximum: int) -> bytes:
+    _no_reparse(path)
+    if not path.is_file():
+        raise DeliveryError("QUALIFICATION_JOURNAL_REQUIRED")
+    _private_acl(path)
+    size = path.stat().st_size
+    if not 0 < size <= maximum:
+        raise DeliveryError("QUALIFICATION_JOURNAL_SIZE_REJECTED")
+    try:
+        with path.open("rb") as stream:
+            value = stream.read(maximum + 1)
+    except OSError:
+        raise DeliveryError("QUALIFICATION_JOURNAL_READ_FAILED") from None
+    if len(value) != size or len(value) > maximum:
+        raise DeliveryError("QUALIFICATION_JOURNAL_CHANGED_DURING_READ")
+    return value
+
+
+def _validated_terminal_journal(raw: bytes, *, message_id: int) -> list[dict[str, Any]]:
+    if type(message_id) is not int or message_id <= 0:
+        raise DeliveryError("MESSAGE_ID_REQUIRED")
+    if not raw.endswith(b"\n"):
+        raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+    lines = raw.splitlines()
+    if len(lines) != 4 or len(lines) > MAX_QUALIFICATION_JOURNAL_LINES:
+        raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+    entries: list[dict[str, Any]] = []
+    try:
+        for line in lines:
+            def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                result: dict[str, Any] = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate key")
+                    result[key] = value
+                return result
+
+            entry = json.loads(line, object_pairs_hook=unique_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite JSON")))
+            if not isinstance(entry, dict):
+                raise ValueError("entry is not an object")
+            entries.append(entry)
+    except (ValueError, UnicodeDecodeError):
+        raise DeliveryError("QUALIFICATION_JOURNAL_INVALID") from None
+
+    stages = ("PRECHECK_STARTED", "IDENTITY_VERIFIED", "SEND_RESERVED", "TRANSPORT_ACCEPTED")
+    common = {"schema_version": 1, "test_message_sha256": hashlib.sha256(TEST_MESSAGE.encode("utf-8")).hexdigest(), "expected_bot_username": EXPECTED_BOT, "expected_chat_id": EXPECTED_TEST_CHAT, "recipient_purpose": "qualification_test_only"}
+    base_keys = set(common) | {"implementation_sha256", "human_acknowledged", "trading_authority", "stage", "send_attempts", "http_method_counts", "transport_accepted"}
+    previous_observed_at: datetime | None = None
+    for index, (entry, stage) in enumerate(zip(entries, stages, strict=True)):
+        expected_keys = base_keys if index == 0 else base_keys | {"error_category", "observed_at_utc"}
+        if index == 3:
+            expected_keys |= {"message_id"}
+        if set(entry) != expected_keys:
+            raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+        implementation_hash = entry.get("implementation_sha256")
+        if not isinstance(implementation_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", implementation_hash):
+            raise DeliveryError("QUALIFICATION_JOURNAL_IDENTITY_REJECTED")
+        if any(entry.get(key) != value or (key in {"schema_version", "expected_chat_id"} and type(entry.get(key)) is not int) for key, value in common.items()):
+            raise DeliveryError("QUALIFICATION_JOURNAL_IDENTITY_REJECTED")
+        if type(entry.get("human_acknowledged")) is not bool or entry["human_acknowledged"] is not False or type(entry.get("trading_authority")) is not bool or entry["trading_authority"] is not False:
+            raise DeliveryError("QUALIFICATION_JOURNAL_FLAGS_REJECTED")
+        if entry.get("stage") != stage or entry.get("send_attempts") != (1 if index >= 2 else 0) or type(entry.get("send_attempts")) is not int:
+            raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+        expected_counts = ({"getMe": 0, "getChat": 0, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 0}, {"getMe": 1, "getChat": 1, "sendMessage": 1})[index]
+        if entry.get("http_method_counts") != expected_counts or any(type(value) is not int for value in entry.get("http_method_counts", {}).values()):
+            raise DeliveryError("QUALIFICATION_JOURNAL_COUNTERS_REJECTED")
+        if entry.get("transport_accepted") is not (index == 3):
+            raise DeliveryError("QUALIFICATION_JOURNAL_FLAGS_REJECTED")
+        if index == 3:
+            if entry.get("message_id") != message_id or type(entry.get("message_id")) is not int:
+                raise DeliveryError("MESSAGE_ID_MISMATCH")
+        elif "message_id" in entry:
+            raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+        if index == 0:
+            if "error_category" in entry:
+                raise DeliveryError("QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+        elif entry.get("error_category") is not None:
+            raise DeliveryError("QUALIFICATION_JOURNAL_NOT_SUCCESSFUL")
+        if index > 0:
+            observed_at = _parse_utc_timestamp(entry.get("observed_at_utc"), "QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+            if previous_observed_at is not None and observed_at < previous_observed_at:
+                raise DeliveryError("QUALIFICATION_JOURNAL_TIME_ORDER_REJECTED")
+            previous_observed_at = observed_at
+    fingerprint_fields = ("implementation_sha256", "test_message_sha256", "expected_bot_username", "expected_chat_id", "recipient_purpose")
+    if any(any(entry.get(key) != entries[0].get(key) for key in fingerprint_fields) for entry in entries[1:]):
+        raise DeliveryError("QUALIFICATION_JOURNAL_DRIFT")
+    return entries
+
+
+def _parse_utc_timestamp(value: Any, error: str) -> datetime:
+    if not isinstance(value, str):
+        raise DeliveryError(error)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise DeliveryError(error) from None
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise DeliveryError(error)
+    return parsed
+
+
+def read_acknowledgement(*, expected_journal_sha256: str, message_id: int, ops_root: Path = OPS_ROOT) -> dict[str, Any]:
+    """Read back a local operator attestation; this does not authenticate a Telegram user."""
+    if not isinstance(expected_journal_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_journal_sha256):
+        raise DeliveryError("EXPECTED_JOURNAL_SHA256_REQUIRED")
+    if type(message_id) is not int or message_id <= 0:
+        raise DeliveryError("MESSAGE_ID_REQUIRED")
+    _no_reparse(ops_root)
+    receipt_root = ops_root / "receipts"
+    _no_reparse(receipt_root)
+    _private_acl(ops_root)
+    _private_acl(receipt_root)
+    journal = _qualification_path(ops_root)
+    journal_raw = _read_protected_file(journal, maximum=MAX_QUALIFICATION_JOURNAL_BYTES)
+    if hashlib.sha256(journal_raw).hexdigest() != expected_journal_sha256:
+        raise DeliveryError("QUALIFICATION_JOURNAL_SHA256_MISMATCH")
+    journal_entries = _validated_terminal_journal(journal_raw, message_id=message_id)
+    path = _acknowledgement_path(ops_root)
+    raw = _read_protected_file(path, maximum=16 * 1024)
+    try:
+        def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate key")
+                result[key] = value
+            return result
+
+        receipt = json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite JSON")))
+    except (ValueError, UnicodeDecodeError):
+        raise DeliveryError("ACKNOWLEDGEMENT_RECEIPT_INVALID") from None
+    expected = {"schema_version": 1, "kind": "kairos.telegram.local-operator-attestation.v1", "status": "RECORDED_LOCAL_OPERATOR_ATTESTATION", "basis": "LOCAL_OPERATOR_ATTESTATION", "bot_username": EXPECTED_BOT, "chat_id": EXPECTED_TEST_CHAT, "recipient_purpose": "qualification_test_only", "scope_sha256": _qualification_scope(), "qualification_journal_sha256": expected_journal_sha256, "message_id": message_id, "confirmation": ACK_CONFIRMATION, "human_acknowledged": True, "telegram_user_authenticated": False, "operationally_qualified": False, "trading_authority": False}
+    boolean_fields = {"human_acknowledged": True, "telegram_user_authenticated": False, "operationally_qualified": False, "trading_authority": False}
+    if not isinstance(receipt, dict) or any(receipt.get(key) != value or (key in {"schema_version", "chat_id", "message_id"} and type(receipt.get(key)) is not int) for key, value in expected.items()) or any(type(receipt.get(key)) is not bool or receipt.get(key) is not value for key, value in boolean_fields.items()) or set(receipt) != set(expected) | {"attested_at_utc"}:
+        raise DeliveryError("ACKNOWLEDGEMENT_RECEIPT_MISMATCH")
+    attested_at = _parse_utc_timestamp(receipt.get("attested_at_utc"), "ACKNOWLEDGEMENT_RECEIPT_MISMATCH")
+    terminal_at = _parse_utc_timestamp(journal_entries[-1]["observed_at_utc"], "QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+    if attested_at < terminal_at:
+        raise DeliveryError("ACKNOWLEDGEMENT_TIME_ORDER_REJECTED")
+    return {**expected, "attested_at_utc": receipt["attested_at_utc"], "receipt_path": str(path)}
+
+
+def acknowledge(*, expected_journal_sha256: str, message_id: int, confirmation: str, ops_root: Path = OPS_ROOT) -> dict[str, Any]:
+    """Record an explicit local operator statement after validating the immutable send journal."""
+    if confirmation != ACK_CONFIRMATION:
+        raise DeliveryError("EXPLICIT_ACKNOWLEDGEMENT_REQUIRED")
+    if not isinstance(expected_journal_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_journal_sha256):
+        raise DeliveryError("EXPECTED_JOURNAL_SHA256_REQUIRED")
+    if type(message_id) is not int or message_id <= 0:
+        raise DeliveryError("MESSAGE_ID_REQUIRED")
+    _no_reparse(ops_root)
+    receipt_root = ops_root / "receipts"
+    _no_reparse(receipt_root)
+    if not receipt_root.is_dir():
+        raise DeliveryError("QUALIFICATION_JOURNAL_REQUIRED")
+    _private_acl(ops_root)
+    _private_acl(receipt_root)
+    journal = _qualification_path(ops_root)
+    raw = _read_protected_file(journal, maximum=MAX_QUALIFICATION_JOURNAL_BYTES)
+    if hashlib.sha256(raw).hexdigest() != expected_journal_sha256:
+        raise DeliveryError("QUALIFICATION_JOURNAL_SHA256_MISMATCH")
+    journal_entries = _validated_terminal_journal(raw, message_id=message_id)
+    attested_at = datetime.now(timezone.utc)
+    terminal_at = _parse_utc_timestamp(journal_entries[-1]["observed_at_utc"], "QUALIFICATION_JOURNAL_SEQUENCE_REJECTED")
+    if attested_at < terminal_at:
+        raise DeliveryError("ACKNOWLEDGEMENT_TIME_ORDER_REJECTED")
+    path = _acknowledgement_path(ops_root)
+    _no_reparse(path)
+    receipt = {"schema_version": 1, "kind": "kairos.telegram.local-operator-attestation.v1", "status": "RECORDED_LOCAL_OPERATOR_ATTESTATION", "basis": "LOCAL_OPERATOR_ATTESTATION", "bot_username": EXPECTED_BOT, "chat_id": EXPECTED_TEST_CHAT, "recipient_purpose": "qualification_test_only", "scope_sha256": _qualification_scope(), "qualification_journal_sha256": expected_journal_sha256, "message_id": message_id, "confirmation": ACK_CONFIRMATION, "human_acknowledged": True, "telegram_user_authenticated": False, "operationally_qualified": False, "trading_authority": False, "attested_at_utc": attested_at.isoformat()}
+    try:
+        _exclusive(path, canonical(receipt) + b"\n")
+    except FileExistsError:
+        raise DeliveryError("EXISTING_ACKNOWLEDGEMENT_REQUIRES_REVIEW") from None
+    _private_acl(path)
+    return read_acknowledgement(expected_journal_sha256=expected_journal_sha256, message_id=message_id, ops_root=ops_root)
+
+
 class SafeParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise DeliveryError("INVALID_ARGUMENTS")
@@ -276,15 +468,26 @@ def main(argv: list[str] | None = None) -> int:
         test = actions.add_parser("qualify")
         test.add_argument("--token-file", type=Path, required=True)
         test.add_argument("--authorize-one-test", action="store_true")
+        attestation = actions.add_parser("acknowledge")
+        attestation.add_argument("--expected-journal-sha256", required=True)
+        attestation.add_argument("--message-id", type=int, required=True)
+        attestation.add_argument("--confirm", required=True)
+        verify = actions.add_parser("verify-ack")
+        verify.add_argument("--expected-journal-sha256", required=True)
+        verify.add_argument("--message-id", type=int, required=True)
         args = parser.parse_args(argv)
         if args.action == "render":
             if args.policy.stat().st_size > 8_192:
                 raise DeliveryError("POLICY_TOO_LARGE")
             result = render_files(json.loads(args.policy.read_text(encoding="utf-8")), args.new_output_directory)
-        else:
+        elif args.action == "qualify":
             result = qualify(args.token_file, authorize_one_test=args.authorize_one_test)
+        elif args.action == "acknowledge":
+            result = acknowledge(expected_journal_sha256=args.expected_journal_sha256, message_id=args.message_id, confirmation=args.confirm)
+        else:
+            result = read_acknowledgement(expected_journal_sha256=args.expected_journal_sha256, message_id=args.message_id)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("stage") in (None, "TRANSPORT_ACCEPTED") else 2
+        return 0 if result.get("stage") in (None, "TRANSPORT_ACCEPTED") or result.get("status") == "RECORDED_LOCAL_OPERATOR_ATTESTATION" else 2
     except DeliveryError as error:
         print(json.dumps({"status": "BLOCKED", "error_category": error.category}))
     except Exception:
