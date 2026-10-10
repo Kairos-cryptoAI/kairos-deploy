@@ -1,10 +1,12 @@
 """Read-only Redis acceptance evidence from a cold, isolated volume clone.
 
-The default is PLAN_ONLY. Execution never starts or connects to the original
-Redis container, never reads container environment/config values, and never
-contacts PostgreSQL or publishes. It copies the stopped source volume into a
-new owned volume, verifies source immutability, starts Redis only from that
-copy on an isolated network namespace, then performs bounded INFO/XRANGE reads.
+The default is PLAN_ONLY. The optional historical-root-RDB mode is a separate
+read-only observation and never represents current Redis state. Execution
+never starts or connects to the original Redis container, never reads
+container environment/config values, and never contacts PostgreSQL or
+publishes. It copies the stopped source volume into a new owned volume,
+verifies source immutability, starts Redis only from that copy on an isolated
+network namespace, then performs bounded INFO/XRANGE reads.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import time
 import uuid
@@ -50,6 +53,8 @@ SCOPE_LABEL = "com.kairos.cold-redis.scope"
 SCOPE = "cold-redis-acceptance-v1"
 KIND = "kairos.cold-redis-acceptance.v1"
 CONFIRMATION = "COLD_REDIS_ACCEPTANCE_CLONE_ONLY_NO_PRIMARY_ACTIONS"
+HISTORICAL_RDB_KIND = "kairos.cold-redis-historical-rdb-observation.v1"
+HISTORICAL_RDB_CONFIRMATION = "COLD_REDIS_HISTORICAL_ROOT_RDB_OBSERVATION_ONLY"
 MAX_SECONDS = 240
 CLEANUP_SECONDS = 60
 MAX_SOURCE_BYTES = 256 * 1024**2
@@ -216,7 +221,7 @@ def _file_sha256(
 
 
 def _open_noatime(path: Path):
-    flags = os.O_RDONLY | getattr(os, "O_NOATIME", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOATIME", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -390,10 +395,15 @@ def _target_from_inspection(
     }
 
 
-def plan() -> dict[str, Any]:
+def plan(*, historical_rdb_only: bool = False) -> dict[str, Any]:
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB mode must be an explicit boolean")
     return {
-        "kind": KIND,
+        "kind": HISTORICAL_RDB_KIND if historical_rdb_only else KIND,
         "result": "PLAN_ONLY_NO_NATIVE_CALLS",
+        "persistence_identity": "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE"
+        if historical_rdb_only
+        else "CURRENT_REDIS_PERSISTENCE_DEFAULT",
         "source": {
             "container_id": SOURCE_CONTAINER_ID,
             "image_id": SOURCE_IMAGE_ID,
@@ -422,12 +432,17 @@ def plan() -> dict[str, Any]:
         "result_policy": {
             "zero_matches": "INCONCLUSIVE_NO_REPLAY",
             "multiple_matches": "CONFLICT_NO_REPLAY",
-            "one_complete_scan_match": "POSITIVE_ACCEPTED_METADATA_ONLY",
+            "one_complete_scan_match": "HISTORICAL_RDB_MATCH_OBSERVED_ONLY"
+            if historical_rdb_only
+            else "POSITIVE_ACCEPTED_METADATA_ONLY",
             "primary_database_contacted": False,
             "automatic_resolution": False,
             "publishing": False,
+            "historical_rdb_positive_is_observational_only": historical_rdb_only,
         },
-        "native_execution_requires": CONFIRMATION,
+        "native_execution_requires": HISTORICAL_RDB_CONFIRMATION
+        if historical_rdb_only
+        else CONFIRMATION,
     }
 
 
@@ -620,7 +635,12 @@ def _worker_command(
     source: str | None = None,
     target: str | None = None,
     script_path: Path | None = None,
+    historical_rdb_only: bool = False,
 ) -> list[str]:
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB worker mode must be a boolean")
+    if historical_rdb_only and mode not in {"copy-hash", "manifest-only"}:
+        raise ColdRedisError("historical RDB mode is limited to source lineage workers")
     command = [
         "create",
         "--network=none",
@@ -659,6 +679,8 @@ def _worker_command(
         f"type=bind,src={script_path},dst=/work/cold_redis_acceptance.py,readonly",
     ]
     command += [RUNNER_IMAGE, "-B", "/work/cold_redis_acceptance.py", "--worker", mode]
+    if historical_rdb_only:
+        command.append("--historical-root-rdb-only")
     return command
 
 
@@ -710,9 +732,14 @@ def _run_worker(
     target: str | None = None,
     user: str | None = None,
     script_path: Path | None = None,
+    historical_rdb_only: bool = False,
 ) -> dict[str, Any]:
     command = _worker_command(
-        mode, source=source, target=target, script_path=script_path
+        mode,
+        source=source,
+        target=target,
+        script_path=script_path,
+        historical_rdb_only=historical_rdb_only,
     )
     command[1:1] = [
         "--name",
@@ -743,8 +770,10 @@ def _run_worker(
     return value
 
 
-def _copy_worker(mode: str) -> int:
+def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
     """Worker mode runs only in the pinned offline helper image."""
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB worker mode must be a boolean")
     stage = "worker_mode"
     try:
         if mode == "prepare-target":
@@ -779,7 +808,9 @@ def _copy_worker(mode: str) -> int:
                     {
                         "state": "COPY_VERIFIED",
                         **manifest,
-                        "persistence": _persistence_layout(source),
+                        "persistence": _persistence_layout(
+                            source, require_root_rdb=historical_rdb_only
+                        ),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -792,7 +823,7 @@ def _copy_worker(mode: str) -> int:
         source, target = Path("/source"), Path("/data")
         before = _manifest_tree(source)
         stage = "copy_persistence_before"
-        persistence = _persistence_layout(source)
+        persistence = _persistence_layout(source, require_root_rdb=historical_rdb_only)
         stage = "copy_bounds"
         if before["file_count"] < 1 or before["total_bytes"] > MAX_SOURCE_BYTES:
             raise ColdRedisError(
@@ -811,7 +842,8 @@ def _copy_worker(mode: str) -> int:
         if (
             before != after
             or before["content_sha256"] != copied["content_sha256"]
-            or persistence != _persistence_layout(source)
+            or persistence
+            != _persistence_layout(source, require_root_rdb=historical_rdb_only)
         ):
             raise ColdRedisError(
                 "source changed during copy or snapshot content differs"
@@ -907,8 +939,93 @@ def _manifest_tree(root: Path) -> dict[str, Any]:
     }
 
 
-def _persistence_layout(root: Path) -> dict[str, Any]:
-    """Validate Redis persistence lineage using only filenames and AOF manifest metadata."""
+def _root_rdb_metadata(root: Path, *, required: bool) -> dict[str, Any] | None:
+    path = root / "dump.rdb"
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise ColdRedisError("historical root RDB is missing") from None
+        return None
+    except OSError:
+        raise ColdRedisError("historical root RDB metadata is unavailable") from None
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or path.is_symlink()
+        or before.st_size <= 0
+        or before.st_size > MAX_SOURCE_BYTES
+    ):
+        raise ColdRedisError("historical root RDB is not a bounded plain file")
+    digest = hashlib.sha256()
+    header = b""
+    bytes_read = 0
+    try:
+        with _open_noatime(path) as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+            ) != (before.st_dev, before.st_ino, before.st_size):
+                raise ColdRedisError("historical root RDB changed during inspection")
+            while True:
+                remaining = min(MAX_SOURCE_BYTES, before.st_size) - bytes_read
+                block = stream.read(min(1024 * 1024, remaining + 1))
+                if len(block) > remaining:
+                    raise ColdRedisError(
+                        "historical root RDB exceeded its captured size bound"
+                    )
+                if not block:
+                    break
+                if not header:
+                    header = block[:9]
+                digest.update(block)
+                bytes_read += len(block)
+            after = os.fstat(stream.fileno())
+    except OSError:
+        raise ColdRedisError(
+            "historical root RDB cannot be read without changing access metadata"
+        ) from None
+    try:
+        final = path.lstat()
+    except OSError:
+        raise ColdRedisError("historical root RDB changed during inspection") from None
+    if (
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        or bytes_read != before.st_size
+        or (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns)
+        != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        or re.fullmatch(rb"REDIS[0-9]{4}", header) is None
+    ):
+        raise ColdRedisError("historical root RDB metadata or header is invalid")
+    return {
+        "filename": "dump.rdb",
+        "size_bytes": before.st_size,
+        "sha256": digest.hexdigest(),
+        "identity": "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE",
+    }
+
+
+def _receipt_classification(state: object, *, historical_rdb_only: bool) -> str:
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB mode must be an explicit boolean")
+    if not historical_rdb_only:
+        return state if isinstance(state, str) else "FAILED_CLOSED"
+    return {
+        "POSITIVE_ACCEPTED": "HISTORICAL_RDB_MATCH_OBSERVED_ONLY",
+        "CONFLICT": "HISTORICAL_RDB_CONFLICT_NO_ADMISSION",
+        "INCONCLUSIVE_ZERO_MATCH": "HISTORICAL_RDB_INCONCLUSIVE_ZERO_MATCH",
+        "INCONCLUSIVE_SCAN_LIMIT": "HISTORICAL_RDB_INCONCLUSIVE_SCAN_LIMIT",
+    }.get(state, "FAILED_CLOSED")
+
+
+def _persistence_layout(
+    root: Path, *, require_root_rdb: bool = False
+) -> dict[str, Any]:
+    """Validate Redis persistence lineage using filenames and AOF metadata."""
+    if type(require_root_rdb) is not bool:
+        raise ColdRedisError("historical root RDB requirement must be a boolean")
     relative_files: set[str] = set()
     for directory, _dirs, files in os.walk(root, topdown=True, followlinks=False):
         base = Path(directory)
@@ -1068,7 +1185,7 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
                 "NO_PERSISTENCE_IMAGE",
                 "Redis volume has no recognized persistence image",
             )
-    return {
+    result = {
         "format": mode,
         "aof_manifest_sha256": manifest_sha256,
         "aof_file_hashes": [
@@ -1082,6 +1199,12 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
         ],
         "rdb_present": "dump.rdb" in relative_files,
     }
+    if require_root_rdb:
+        root_rdb = _root_rdb_metadata(root, required=True)
+        if root_rdb is None:
+            raise ColdRedisError("historical root RDB is missing")
+        result["historical_root_rdb"] = root_rdb
+    return result
 
 
 def _metadata_row(
@@ -1245,7 +1368,10 @@ def _inspect_stream(
     *,
     deadline: float,
     connect: Any = socket.create_connection,
+    include_evidence: bool = True,
 ) -> dict[str, Any]:
+    if type(include_evidence) is not bool:
+        raise ColdRedisError("observer evidence mode must be an explicit boolean")
     received_total = 0
     probe_run_id = uuid.uuid4().hex
     probed_at_utc = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -1376,7 +1502,7 @@ def _inspect_stream(
         "xrange_limit": MAX_XRANGE_ENTRIES,
         "xrange_response_bytes_limit": MAX_XRANGE_BYTES,
     }
-    if state == "POSITIVE_ACCEPTED":
+    if state == "POSITIVE_ACCEPTED" and include_evidence:
         result["evidence"] = {
             "schema": "kairos.redis-acceptance-evidence.v1",
             "redis_server_run_id": run_id,
@@ -1397,9 +1523,13 @@ def _worker_manifest(
     name: str,
     owner: str,
     script_path: Path | None = None,
+    historical_rdb_only: bool = False,
 ) -> dict[str, Any]:
     command = _worker_command(
-        "manifest-only", source=SOURCE_VOLUME, script_path=script_path
+        "manifest-only",
+        source=SOURCE_VOLUME,
+        script_path=script_path,
+        historical_rdb_only=historical_rdb_only,
     )
     command[1:1] = [
         "--name",
@@ -1430,10 +1560,13 @@ def _metadata_only_docker_command(
     image: str,
     *,
     watchdog_seconds: int = 150,
+    historical_rdb_only: bool = False,
 ) -> list[str]:
-    if not 30 <= watchdog_seconds <= MAX_SECONDS:
+    if type(historical_rdb_only) is not bool or not (
+        30 <= watchdog_seconds <= MAX_SECONDS
+    ):
         raise ColdRedisError(
-            "Redis clone watchdog must remain within the global deadline"
+            "Redis clone mode or watchdog is outside its explicit bound"
         )
     watchdog_script = (
         'redis-server "$@" & redis_pid=$!; '
@@ -1459,7 +1592,8 @@ def _metadata_only_docker_command(
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,nodev,size=32m",
         "--mount",
-        f"type=volume,src={volume},dst=/data",
+        f"type=volume,src={volume},dst=/data"
+        + (",readonly" if historical_rdb_only else ""),
         "--label",
         f"{OWNER_LABEL}={owner}",
         "--label",
@@ -1479,7 +1613,7 @@ def _metadata_only_docker_command(
         "--dir",
         "/data",
         "--appendonly",
-        "yes",
+        "no" if historical_rdb_only else "yes",
         "--aof-load-truncated",
         "no",
         "--daemonize",
@@ -1488,14 +1622,23 @@ def _metadata_only_docker_command(
         "0",
         "--save",
         "",
+        *(["--dbfilename", "dump.rdb"] if historical_rdb_only else []),
         "--loglevel",
         "warning",
     ]
 
 
 def _validate_clone_metadata(
-    docker: BoundedDocker, container: str, volume: str, owner: str
+    docker: BoundedDocker,
+    container: str,
+    volume: str,
+    owner: str,
+    *,
+    expected_cmd: list[str],
+    historical_rdb_only: bool = False,
 ) -> dict[str, Any]:
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB clone mode must be a boolean")
     raw = docker.call(
         [
             "inspect",
@@ -1504,16 +1647,21 @@ def _validate_clone_metadata(
                 "{{.Id}}|{{.Image}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}|"
                 "{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Memory}}|"
                 "{{.HostConfig.MemorySwap}}|{{.HostConfig.NanoCpus}}|"
-                "{{.HostConfig.PidsLimit}}|{{json .Mounts}}|{{json .Config.Labels}}"
+                "{{.HostConfig.PidsLimit}}|{{json .Mounts}}|{{json .Config.Labels}}|"
+                "{{json .Config.Cmd}}"
             ),
             container,
         ]
     )
-    parts = raw.split("|", 10)
-    if len(parts) != 11:
+    parts = raw.split("|", 11)
+    if len(parts) != 12:
         raise ColdRedisError("owned Redis clone metadata is malformed")
     try:
-        mounts, labels = json.loads(parts[9]), json.loads(parts[10])
+        mounts, labels, command = (
+            json.loads(parts[9]),
+            json.loads(parts[10]),
+            json.loads(parts[11]),
+        )
     except json.JSONDecodeError:
         raise ColdRedisError("owned Redis clone metadata is malformed") from None
     if (
@@ -1527,12 +1675,17 @@ def _validate_clone_metadata(
         or parts[8] != "64"
         or not isinstance(mounts, list)
         or not isinstance(labels, dict)
+        or command != expected_cmd
         or labels.get(OWNER_LABEL) != owner
         or labels.get(SCOPE_LABEL) != SCOPE
     ):
         raise ColdRedisError("owned Redis clone security or resource bounds differ")
     data = [item for item in mounts if item.get("Destination") == "/data"]
-    if len(data) != 1 or data[0].get("Name") != volume or data[0].get("RW") is not True:
+    if (
+        len(data) != 1
+        or data[0].get("Name") != volume
+        or data[0].get("RW") is not (not historical_rdb_only)
+    ):
         raise ColdRedisError("owned Redis clone is not using the exact snapshot volume")
     return {
         "container_id": parts[0],
@@ -1704,12 +1857,18 @@ def execute(
     native_inspection: Path,
     expected_deploy_revision: str,
     confirmation: str,
+    historical_rdb_only: bool = False,
     work_root: Path = ROOT,
     docker_native: Any | None = None,
     clock: Any = time.monotonic,
 ) -> dict[str, Any]:
+    if type(historical_rdb_only) is not bool:
+        raise ColdRedisError("historical RDB mode must be an explicit boolean")
+    required_confirmation = (
+        HISTORICAL_RDB_CONFIRMATION if historical_rdb_only else CONFIRMATION
+    )
     if (
-        confirmation != CONFIRMATION
+        confirmation != required_confirmation
         or REVISION.fullmatch(expected_deploy_revision) is None
     ):
         raise ColdRedisError(
@@ -1826,6 +1985,7 @@ def execute(
             target=names["volume"],
             user="999:999",
             script_path=script_snapshot,
+            historical_rdb_only=historical_rdb_only,
         )
         created.add("copy")
         volume_after = _volume_metadata(docker, SOURCE_VOLUME)
@@ -1836,21 +1996,30 @@ def execute(
             )
         watchdog_seconds = min(150, int(deadline - clock() - 20))
         attempted.add("redis")
-        docker.call(
-            _metadata_only_docker_command(
-                owner,
-                names["volume"],
-                names["redis"],
-                SOURCE_IMAGE_ID,
-                watchdog_seconds=watchdog_seconds,
-            )
+        redis_command = _metadata_only_docker_command(
+            owner,
+            names["volume"],
+            names["redis"],
+            SOURCE_IMAGE_ID,
+            watchdog_seconds=watchdog_seconds,
+            historical_rdb_only=historical_rdb_only,
         )
+        docker.call(redis_command)
         created.add("redis")
         clone_metadata = _validate_clone_metadata(
-            docker, names["redis"], names["volume"], owner
+            docker,
+            names["redis"],
+            names["volume"],
+            owner,
+            expected_cmd=redis_command[redis_command.index(SOURCE_IMAGE_ID) + 1 :],
+            historical_rdb_only=historical_rdb_only,
         )
         docker.call(["start", names["redis"]], seconds=30)
-        (revision_dir / "target.json").write_bytes(_canonical(target) + b"\n")
+        observer_config = {
+            **target,
+            "historical_rdb_only": historical_rdb_only,
+        }
+        (revision_dir / "target.json").write_bytes(_canonical(observer_config) + b"\n")
         attempted.add("observer")
         docker.call(
             [
@@ -1872,9 +2041,15 @@ def execute(
                 "--entrypoint",
                 "python",
                 "--mount",
-                f"type=bind,src={script_snapshot},dst=/work/cold_redis_acceptance.py,readonly",
+                (
+                    f"type=bind,src={script_snapshot},"
+                    "dst=/work/cold_redis_acceptance.py,readonly"
+                ),
                 "--mount",
-                f"type=bind,src={revision_dir / 'target.json'},dst=/run/target.json,readonly",
+                (
+                    f"type=bind,src={revision_dir / 'target.json'},"
+                    "dst=/run/target.json,readonly"
+                ),
                 "--label",
                 f"{OWNER_LABEL}={owner}",
                 "--label",
@@ -1909,7 +2084,11 @@ def execute(
             )
         attempted.add("verify")
         after_probe_manifest = _worker_manifest(
-            docker, name=names["verify"], owner=owner, script_path=script_snapshot
+            docker,
+            name=names["verify"],
+            owner=owner,
+            script_path=script_snapshot,
+            historical_rdb_only=historical_rdb_only,
         )
         created.add("verify")
         if after_probe_manifest.get("manifest_sha256") != copy_proof.get(
@@ -1965,10 +2144,20 @@ def execute(
             error_category = "ORIGINAL_REDIS_SOURCE_UNVERIFIED"
     if cleanup_ok and (source_after != source_before or volume_after != volume_before):
         error_category = "ORIGINAL_REDIS_SOURCE_CHANGED"
+    raw_result = _receipt_classification(
+        observation.get("state") if observation else None,
+        historical_rdb_only=historical_rdb_only,
+    )
     result = {
         "schema_version": 1,
-        "kind": KIND,
-        "result": observation.get("state")
+        "kind": HISTORICAL_RDB_KIND if historical_rdb_only else KIND,
+        "persistence_identity": "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE"
+        if historical_rdb_only
+        else "CURRENT_REDIS_PERSISTENCE_DEFAULT",
+        "observation_identity": "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE"
+        if historical_rdb_only
+        else "CURRENT_REDIS_PERSISTENCE_DEFAULT",
+        "result": raw_result
         if observation and error_category is None
         else "FAILED_CLOSED",
         "owner": owner,
@@ -2010,7 +2199,11 @@ def execute(
             "persistence_lineage": copy_proof.get("persistence")
             if copy_proof
             else None,
-            "redis_instance_identity": "ISOLATED_COLD_CLONE_NOT_ORIGINAL_SERVER",
+            "redis_instance_identity": (
+                "ISOLATED_HISTORICAL_ROOT_RDB_CLONE_NOT_CURRENT_STATE"
+            )
+            if historical_rdb_only
+            else "ISOLATED_COLD_CLONE_NOT_ORIGINAL_SERVER",
             "clone_container_id": clone_metadata.get("container_id")
             if clone_metadata
             else None,
@@ -2020,7 +2213,11 @@ def execute(
             "native_container_removed": cleanup_ok,
             "snapshot_volume_removed": cleanup_ok,
         },
-        "redis_server_identity_scope": "ISOLATED_COLD_CLONE_NOT_ORIGINAL_SERVER",
+        "redis_server_identity_scope": (
+            "ISOLATED_HISTORICAL_ROOT_RDB_CLONE_NOT_CURRENT_STATE"
+        )
+        if historical_rdb_only
+        else "ISOLATED_COLD_CLONE_NOT_ORIGINAL_SERVER",
         "cold_redis_sha256": copy_proof.get("snapshot_content_sha256")
         if copy_proof
         else None,
@@ -2056,6 +2253,7 @@ def _observer_worker(config_path: Path) -> int:
             config.get("message_id"),
             config.get("canonical_payload_sha256"),
         )
+        historical_rdb_only = config.get("historical_rdb_only", False)
         if (
             not isinstance(topic, str)
             or TOPIC.fullmatch(topic) is None
@@ -2063,10 +2261,15 @@ def _observer_worker(config_path: Path) -> int:
             or MESSAGE_ID.fullmatch(message_id) is None
             or not isinstance(payload_sha256, str)
             or SHA256.fullmatch(payload_sha256) is None
+            or type(historical_rdb_only) is not bool
         ):
             raise ColdRedisError("observer target metadata is invalid")
         result = _inspect_stream(
-            topic, message_id, payload_sha256, deadline=time.monotonic() + 150
+            topic,
+            message_id,
+            payload_sha256,
+            deadline=time.monotonic() + 150,
+            include_evidence=not historical_rdb_only,
         )
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
@@ -2105,6 +2308,7 @@ def _run_worker_bounded(callback: Any, *, seconds: int) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute-cold-clone", action="store_true")
+    parser.add_argument("--historical-root-rdb-only", action="store_true")
     parser.add_argument("--confirmation")
     parser.add_argument("--expected-deploy-revision")
     parser.add_argument("--accepted-clone-receipt", type=Path)
@@ -2117,17 +2321,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("worker_config", nargs="?", type=Path)
     args = parser.parse_args(argv)
     if args.worker == "copy-hash":
-        return _run_worker_bounded(lambda: _copy_worker("copy-hash"), seconds=120)
+        return _run_worker_bounded(
+            lambda: _copy_worker(
+                "copy-hash", historical_rdb_only=args.historical_root_rdb_only
+            ),
+            seconds=120,
+        )
     if args.worker == "prepare-target":
         return _run_worker_bounded(lambda: _copy_worker("prepare-target"), seconds=30)
     if args.worker == "manifest-only":
-        return _run_worker_bounded(lambda: _copy_worker("manifest-only"), seconds=60)
+        return _run_worker_bounded(
+            lambda: _copy_worker(
+                "manifest-only", historical_rdb_only=args.historical_root_rdb_only
+            ),
+            seconds=60,
+        )
     if args.worker == "observe" and args.worker_config is not None:
         return _run_worker_bounded(
             lambda: _observer_worker(args.worker_config), seconds=150
         )
     if not args.execute_cold_clone:
-        print(json.dumps(plan(), sort_keys=True, indent=2))
+        print(
+            json.dumps(
+                plan(historical_rdb_only=args.historical_root_rdb_only),
+                sort_keys=True,
+                indent=2,
+            )
+        )
         return 0
     if any(
         value is None
@@ -2149,6 +2369,7 @@ def main(argv: list[str] | None = None) -> int:
             native_inspection=args.native_inspection,
             expected_deploy_revision=args.expected_deploy_revision,
             confirmation=args.confirmation,
+            historical_rdb_only=args.historical_root_rdb_only,
             work_root=args.work_root,
         )
         print(
@@ -2167,6 +2388,10 @@ def main(argv: list[str] | None = None) -> int:
                 "CONFLICT",
                 "INCONCLUSIVE_ZERO_MATCH",
                 "INCONCLUSIVE_SCAN_LIMIT",
+                "HISTORICAL_RDB_MATCH_OBSERVED_ONLY",
+                "HISTORICAL_RDB_CONFLICT_NO_ADMISSION",
+                "HISTORICAL_RDB_INCONCLUSIVE_ZERO_MATCH",
+                "HISTORICAL_RDB_INCONCLUSIVE_SCAN_LIMIT",
             }
             else 1
         )

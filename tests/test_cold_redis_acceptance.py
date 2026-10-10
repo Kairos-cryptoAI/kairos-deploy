@@ -451,6 +451,253 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
             plan["result_policy"]["zero_matches"], "INCONCLUSIVE_NO_REPLAY"
         )
 
+    def test_default_and_historical_plans_are_distinct_and_side_effect_free(
+        self,
+    ) -> None:
+        output = io.StringIO()
+        with (
+            redirect_stdout(output),
+            mock.patch.object(cold, "execute") as execute,
+            mock.patch.object(cold, "_verify_deploy_head") as verify_head,
+        ):
+            self.assertEqual(cold.main([]), 0)
+        execute.assert_not_called()
+        verify_head.assert_not_called()
+        default_plan = json.loads(output.getvalue())
+        self.assertEqual(default_plan["kind"], cold.KIND)
+        self.assertEqual(
+            default_plan["persistence_identity"],
+            "CURRENT_REDIS_PERSISTENCE_DEFAULT",
+        )
+
+        historical = cold.plan(historical_rdb_only=True)
+        self.assertEqual(historical["kind"], cold.HISTORICAL_RDB_KIND)
+        self.assertEqual(
+            historical["persistence_identity"],
+            "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE",
+        )
+        self.assertTrue(
+            historical["result_policy"]["historical_rdb_positive_is_observational_only"]
+        )
+        self.assertEqual(
+            historical["result_policy"]["one_complete_scan_match"],
+            "HISTORICAL_RDB_MATCH_OBSERVED_ONLY",
+        )
+        self.assertEqual(
+            historical["native_execution_requires"], cold.HISTORICAL_RDB_CONFIRMATION
+        )
+        with self.assertRaises(cold.ColdRedisError):
+            cold.plan(historical_rdb_only=1)
+
+    def test_historical_root_rdb_docker_mode_is_readonly_and_explicit(self) -> None:
+        current = cold._metadata_only_docker_command(
+            "owner", "owned-volume", "owned-redis", cold.SOURCE_IMAGE_ID
+        )
+        self.assertEqual(current[current.index("--appendonly") + 1], "yes")
+        self.assertNotIn("--dbfilename", current)
+        self.assertIn("type=volume,src=owned-volume,dst=/data", current)
+
+        historical = cold._metadata_only_docker_command(
+            "owner",
+            "owned-volume",
+            "owned-redis",
+            cold.SOURCE_IMAGE_ID,
+            historical_rdb_only=True,
+        )
+        self.assertIn("type=volume,src=owned-volume,dst=/data,readonly", historical)
+        self.assertEqual(historical[historical.index("--appendonly") + 1], "no")
+        self.assertEqual(historical[historical.index("--dbfilename") + 1], "dump.rdb")
+        self.assertEqual(historical[historical.index("--save") + 1], "")
+        self.assertIn("--network=none", historical)
+        self.assertIn("--read-only", historical)
+        self.assertIn("127.0.0.1", historical)
+
+        expected_cmd = historical[historical.index(cold.SOURCE_IMAGE_ID) + 1 :]
+        self.assertEqual(expected_cmd[0], "-c")
+        self.assertEqual(expected_cmd[expected_cmd.index("--appendonly") + 1], "no")
+        self.assertEqual(
+            expected_cmd[expected_cmd.index("--dbfilename") + 1], "dump.rdb"
+        )
+
+        class InspectDocker:
+            def call(self, arguments: list[str], **_kwargs: object) -> str:
+                self.asserted = arguments
+                return "|".join(
+                    (
+                        "a" * 64,
+                        cold.SOURCE_IMAGE_ID,
+                        "false",
+                        "none",
+                        "true",
+                        str(512 * 1024**2),
+                        str(512 * 1024**2),
+                        "1000000000",
+                        "64",
+                        json.dumps(
+                            [
+                                {
+                                    "Destination": "/data",
+                                    "Name": "owned-volume",
+                                    "RW": False,
+                                }
+                            ]
+                        ),
+                        json.dumps(
+                            {
+                                cold.OWNER_LABEL: "owner",
+                                cold.SCOPE_LABEL: cold.SCOPE,
+                            }
+                        ),
+                        json.dumps(expected_cmd),
+                    )
+                )
+
+        inspection = InspectDocker()
+        clone = cold._validate_clone_metadata(
+            inspection,
+            "owned-redis",
+            "owned-volume",
+            "owner",
+            expected_cmd=expected_cmd,
+            historical_rdb_only=True,
+        )
+        self.assertEqual(clone["image_id"], cold.SOURCE_IMAGE_ID)
+        self.assertIn(".Config.Cmd", inspection.asserted[2])
+        raw = inspection.call([])
+        for invalid in (
+            raw.replace('"RW": false', '"RW": true'),
+            raw.rsplit("|", 1)[0] + "|" + json.dumps(["-c", "redis-server"]),
+        ):
+            with (
+                mock.patch.object(inspection, "call", return_value=invalid),
+                self.assertRaises(cold.ColdRedisError),
+            ):
+                cold._validate_clone_metadata(
+                    inspection,
+                    "owned-redis",
+                    "owned-volume",
+                    "owner",
+                    expected_cmd=expected_cmd,
+                    historical_rdb_only=True,
+                )
+
+    def test_historical_root_rdb_requires_bounded_plain_valid_file_and_hashes_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            body = b"REDIS0011PRIVATE_RDB_BODY"
+            (root / "dump.rdb").write_bytes(body)
+            metadata = cold._root_rdb_metadata(root, required=True)
+            self.assertEqual(metadata["filename"], "dump.rdb")
+            self.assertEqual(metadata["size_bytes"], len(body))
+            self.assertEqual(metadata["sha256"], hashlib.sha256(body).hexdigest())
+            self.assertEqual(
+                metadata["identity"],
+                "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE",
+            )
+            self.assertNotIn("PRIVATE_RDB_BODY", json.dumps(metadata))
+
+            bad = root / "bad"
+            bad.mkdir()
+            (bad / "dump.rdb").write_bytes(b"PRIVATE_INVALID_RDB")
+            with self.assertRaises(cold.ColdRedisError):
+                cold._root_rdb_metadata(bad, required=True)
+
+            empty = root / "empty"
+            empty.mkdir()
+            (empty / "dump.rdb").write_bytes(b"")
+            with self.assertRaises(cold.ColdRedisError):
+                cold._root_rdb_metadata(empty, required=True)
+
+            with self.assertRaises(cold.ColdRedisError):
+                cold._root_rdb_metadata(root / "missing", required=True)
+            oversized = root / "oversized"
+            oversized.mkdir()
+            (oversized / "dump.rdb").write_bytes(b"REDIS0011x")
+            with (
+                mock.patch.object(cold, "MAX_SOURCE_BYTES", 9),
+                self.assertRaises(cold.ColdRedisError),
+            ):
+                cold._root_rdb_metadata(oversized, required=True)
+
+    def test_historical_lineage_hashes_root_rdb_without_changing_default_aof(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            appendonly = root / "appendonlydir"
+            appendonly.mkdir()
+            (appendonly / "appendonly.aof.manifest").write_text(
+                "file appendonly.aof.1.base.rdb seq 1 type b\n"
+                "file appendonly.aof.1.incr.aof seq 1 type i\n",
+                encoding="ascii",
+            )
+            (appendonly / "appendonly.aof.1.base.rdb").write_bytes(b"base")
+            (appendonly / "appendonly.aof.1.incr.aof").write_bytes(b"increment")
+            rdb = b"REDIS0011HISTORICAL"
+            (root / "dump.rdb").write_bytes(rdb)
+
+            default = cold._persistence_layout(root)
+            self.assertEqual(default["format"], "REDIS_MULTIPART_AOF")
+            self.assertNotIn("historical_root_rdb", default)
+
+            historical = cold._persistence_layout(root, require_root_rdb=True)
+            self.assertEqual(historical["format"], "REDIS_MULTIPART_AOF")
+            self.assertEqual(
+                historical["historical_root_rdb"]["sha256"],
+                hashlib.sha256(rdb).hexdigest(),
+            )
+            self.assertEqual(
+                historical["historical_root_rdb"]["identity"],
+                "ROOT_DUMP_RDB_HISTORICAL_NOT_CURRENT_STATE",
+            )
+
+    def test_historical_positive_is_observational_and_partial_match_is_inconclusive(
+        self,
+    ) -> None:
+        payload = {"message_id": "historical-target", "private": "DO_NOT_LEAK"}
+        payload_hash = hashlib.sha256(cold._canonical(payload)).hexdigest()
+        info = _bulk(b"run_id:" + b"d" * 40 + b"\r\n")
+        complete = _FakeConnection([info, _array([_entry("1700000000000-0", payload)])])
+        result = cold._inspect_stream(
+            "kairos.paper.events",
+            "historical-target",
+            payload_hash,
+            deadline=cold.time.monotonic() + 10,
+            connect=lambda *_args, **_kwargs: complete,
+            include_evidence=False,
+        )
+        self.assertEqual(result["state"], "POSITIVE_ACCEPTED")
+        self.assertNotIn("evidence", result)
+        self.assertEqual(
+            cold._receipt_classification(result["state"], historical_rdb_only=True),
+            "HISTORICAL_RDB_MATCH_OBSERVED_ONLY",
+        )
+        self.assertNotIn("evidence", result)
+        self.assertEqual(
+            cold._receipt_classification(result["state"], historical_rdb_only=False),
+            "POSITIVE_ACCEPTED",
+        )
+        self.assertNotIn("DO_NOT_LEAK", json.dumps(result))
+
+        partial = _FakeConnection([info, _array([_entry("1700000000000-0", payload)])])
+        with mock.patch.object(cold, "MAX_XRANGE_ENTRIES", 1):
+            result = cold._inspect_stream(
+                "kairos.paper.events",
+                "historical-target",
+                payload_hash,
+                deadline=cold.time.monotonic() + 10,
+                connect=lambda *_args, **_kwargs: partial,
+                include_evidence=False,
+            )
+        self.assertEqual(result["state"], "INCONCLUSIVE_SCAN_LIMIT")
+        self.assertEqual(
+            cold._receipt_classification(result["state"], historical_rdb_only=True),
+            "HISTORICAL_RDB_INCONCLUSIVE_SCAN_LIMIT",
+        )
+        self.assertNotIn("evidence", result)
+
     def test_clone_receipt_and_private_target_are_exactly_hash_bound(self) -> None:
         payload = {"message_id": "legacy-unknown-1", "value": 7}
         payload_hash = hashlib.sha256(cold._canonical(payload)).hexdigest()
