@@ -42,6 +42,8 @@ PRIOR_INTERRUPTION_SHA = (
 PRIOR_STORAGE = ROOT / "run-c02b4b44dab048a0b7abdc437f93249f/receipt.json"
 PRIOR_STORAGE_SHA = "f30fc5eb0befc5615cfbab4a3368accbb29ffa636b6293daf0df86424d79b66c"
 SOURCE = "kairos-paper-gate-timescaledb-1"
+PRIOR_DISCOVERY = ROOT / "run-27b78621945747edb9e0d88f85dea906/receipt.json"
+PRIOR_DISCOVERY_SHA = "2669484db4668d958c532c94c3a4a74d8abc478e22ac934b60016f582c923eaf"
 PRIOR_COMPOSE = ROOT / "run-caffd376f0874b70b9aae4d7cbdf2c76/receipt.json"
 PRIOR_COMPOSE_SHA = "b8128193eb68ba9e711b558cf991b2c8895af49848d5409dba726c0c56a3ba56"
 COMPOSE_PLUGIN = Path(
@@ -219,6 +221,43 @@ def supervisor_environment() -> dict[str, str]:
 
 def auth_free_docker_config() -> dict:
     return {"cliPluginsExtraDirs": [COMPOSE_PLUGIN.parent.as_posix()]}
+
+
+def source_copy_compose(owner: str, name: str, directory: Path, script: str) -> dict:
+    return {
+        "services": {
+            "timescaledb": {
+                "image": IMAGE,
+                "container_name": name,
+                "network_mode": "none",
+                "read_only": True,
+                "user": "postgres",
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "mem_limit": "4g",
+                "memswap_limit": "4g",
+                "cpus": 1,
+                "pids_limit": 128,
+                "tmpfs": [
+                    "/var/lib/postgresql/data:rw,nosuid,nodev,size=3g,uid=70,gid=70,mode=0700",
+                    "/var/run/postgresql:rw,nosuid,nodev,size=8m,uid=70,gid=70",
+                    "/tmp:rw,nosuid,nodev,size=128m,uid=70,gid=70",
+                ],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str(directory),
+                        "target": "/cold",
+                        "read_only": True,
+                    }
+                ],
+                "entrypoint": "/bin/sh",
+                # Compose interpolation must render the original shell dollars.
+                "command": ["-c", script.replace("$", "$$")],
+                "labels": {OWNER_LABEL: owner, "com.kairos.recovery.scope": SCOPE},
+            }
+        }
+    }
 
 
 def full_table_query(tables: list[str]) -> str:
@@ -448,7 +487,7 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v6.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v7.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
@@ -858,11 +897,9 @@ class Controller:
         text = module.render_candidate(self.work / "docker-config", journal, self.owner)
         text += "\nfunction docker { Invoke-KairosPublicDocker @args }\n"
         relative = self.work.relative_to(REPO).as_posix()
-        compose = (
-            f"services:\n  timescaledb:\n    image: {IMAGE}\n    network_mode: none\n"
-        )
-        write(self.work / "source-compose.yml", compose.encode())
-        text += f"& '{OFFICIAL}' -ComposeProject '{project}' -ComposeFile '{relative}/source-compose.yml' -EnvFile 'tests/sim_full_path_gate/empty.env' -OutputDirectory '{relative}' -Database 'kairos' -DatabaseUser 'kairos'\n"
+        if sha(self.work / "source-compose.yml") != self.proofs["copy_compose_sha256"]:
+            raise Rejected("COPY_COMPOSE_PROJECTION_CHANGED")
+        text += f"\n$ErrorActionPreference='Stop'\ntry {{ & '{OFFICIAL}' -ComposeProject '{project}' -ComposeFile '{relative}/source-compose.yml' -EnvFile 'tests/sim_full_path_gate/empty.env' -OutputDirectory '{relative}' -Database 'kairos' -DatabaseUser 'kairos' }} catch {{ throw 'PINNED_OFFICIAL_BACKUP_PIPELINE_FAILED' }}\n"
         wrapper = self.work / "official-backup.ps1"
         write(wrapper, text.encode())
         self.process(
@@ -1021,6 +1058,30 @@ class Controller:
                 "default_transaction_read_only=on",
             ]
         )
+        save(
+            self.work / "source-compose.yml",
+            source_copy_compose(self.owner, name, self.work, script),
+        )
+        hash_output = self.docker(
+            [
+                "compose",
+                "-p",
+                project,
+                "-f",
+                str(self.work / "source-compose.yml"),
+                "--env-file",
+                str(REPO / "tests/sim_full_path_gate/empty.env"),
+                "config",
+                "--hash",
+                "timescaledb",
+            ]
+        )
+        match = re.fullmatch(r"timescaledb\s+([0-9a-f]{64})", hash_output)
+        if match is None:
+            raise Rejected("EXACT_COPY_COMPOSE_HASH_REQUIRED")
+        labels += ["com.docker.compose.config-hash=" + match[1]]
+        self.proofs["copy_compose_sha256"] = sha(self.work / "source-compose.yml")
+        self.proofs["copy_compose_config_hash"] = match[1]
         self.create(
             name,
             mounts=["type=bind,src=" + str(self.work) + ",dst=/cold,readonly"],
@@ -1029,6 +1090,11 @@ class Controller:
             command=["-c", script],
         )
         self.ready(name, "kairos")
+        if (
+            self.inspect(name)["labels"].get("com.docker.compose.config-hash")
+            != match[1]
+        ):
+            raise Rejected("COPY_COMPOSE_LABEL_DIFFERS")
         if self.docker(["exec", name, "cat", "/tmp/cold-verified"]) != expected:
             raise Rejected("PRESTART_COLD_COPY_FIDELITY_UNPROVEN")
         self.proofs["cold_copy_fidelity_verified_before_start"] = True
@@ -1109,6 +1175,7 @@ class Controller:
                 "pg_amcheck",
                 "--database=" + database,
                 "--username=kairos",
+                "--install-missing",
                 "--heapallindexed",
                 "--parent-check",
                 "--rootdescend",
@@ -1457,9 +1524,29 @@ def main(argv=None):
         or complete.get("return_code") != 125
     ):
         raise Rejected("PRIOR_COMPOSE_TERMINAL_NO_DUMP_OR_CLEANUP_UNPROVEN")
+    if sha(PRIOR_DISCOVERY) != PRIOR_DISCOVERY_SHA:
+        raise Rejected("PRESERVED_DISCOVERY_DIAGNOSTIC_CHANGED")
+    prior_discovery = json.loads(PRIOR_DISCOVERY.read_text())
+    discovery_journal = PRIOR_DISCOVERY.parent / "backup-native-journal"
+    discovered = json.loads(
+        (discovery_journal / "native-001.complete.json").read_text()
+    )
+    if (
+        prior_discovery.get("cleanup_verified") is not True
+        or prior_discovery.get("result") != "FAILED_CLOSED"
+        or {item.name for item in discovery_journal.iterdir()}
+        != {"native-001.start.json", "native-001.complete.json"}
+        or discovered.get("category") != "COMPOSE_PS"
+        or discovered.get("owner") != "27b78621945747edb9e0d88f85dea906"
+        or discovered.get("return_code") != 0
+        or discovered.get("stdout_utf8_bytes") != 0
+        or list(PRIOR_DISCOVERY.parent.glob("*.dump*"))
+    ):
+        raise Rejected("PRIOR_DISCOVERY_TERMINAL_NO_DUMP_OR_CLEANUP_UNPROVEN")
     if args.supervise:
         return supervise(args)
     controller = Controller()
+    controller.proofs["preserved_discovery_diagnostic_sha256"] = PRIOR_DISCOVERY_SHA
     controller.proofs["preserved_compose_diagnostic_sha256"] = PRIOR_COMPOSE_SHA
     controller.proofs["preserved_storage_diagnostic_sha256"] = PRIOR_STORAGE_SHA
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision

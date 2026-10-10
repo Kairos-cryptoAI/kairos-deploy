@@ -98,6 +98,21 @@ class FreshRuntimeRecoveryTests(unittest.TestCase):
             },
         )
 
+    def test_copy_compose_projection_matches_bounded_readonly_container(self):
+        value = recovery.source_copy_compose(
+            "a" * 32, "isolated-copy", Path("D:/owned"), "exec postgres $public_setting"
+        )
+        service = value["services"]["timescaledb"]
+        self.assertEqual(service["image"], recovery.IMAGE)
+        self.assertEqual(service["network_mode"], "none")
+        self.assertTrue(service["read_only"])
+        self.assertEqual(service["cap_drop"], ["ALL"])
+        self.assertEqual(service["mem_limit"], "4g")
+        self.assertEqual(service["memswap_limit"], "4g")
+        self.assertEqual(service["command"], ["-c", "exec postgres $$public_setting"])
+        self.assertTrue(service["volumes"][0]["read_only"])
+        self.assertNotIn("environment", service)
+
     def test_copy_directory_times_are_restored_deepest_first(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.tar"
