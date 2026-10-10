@@ -205,6 +205,51 @@ class BoundPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.queries.count("UPDATE sample SET value=2"), 1)
 
 
+class RuntimePrincipalPreflightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_absent_role_checks_fresh_auth_without_mutating_database(
+        self,
+    ) -> None:
+        connection = mock.Mock()
+        connection.fetchval = mock.AsyncMock(return_value=False)
+        directory = Path("private-fixture")
+        with mock.patch.object(worker, "_runtime_auth") as auth:
+            await worker._preflight_runtime_login(
+                connection, "kairos", directory=directory
+            )
+        auth.assert_called_once_with(directory)
+        connection.fetchval.assert_awaited_once_with(
+            "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='kairos_runtime')"
+        )
+        self.assertEqual(len(connection.method_calls), 1)
+
+    async def test_existing_or_unknown_role_fails_before_reading_auth_or_mutation(
+        self,
+    ) -> None:
+        for state in (True, None, 0, 1, "false"):
+            with self.subTest(state=state):
+                connection = mock.Mock()
+                connection.fetchval = mock.AsyncMock(return_value=state)
+                with (
+                    mock.patch.object(worker, "_runtime_auth") as auth,
+                    self.assertRaisesRegex(
+                        worker.WorkerError, "ownership and ACL review"
+                    ),
+                ):
+                    await worker._preflight_runtime_login(
+                        connection, "kairos", directory=Path("private-fixture")
+                    )
+                auth.assert_not_called()
+                self.assertEqual(len(connection.method_calls), 1)
+
+    async def test_wrong_database_fails_before_role_query(self) -> None:
+        connection = mock.Mock()
+        with self.assertRaises(worker.WorkerError):
+            await worker._preflight_runtime_login(
+                connection, "other", directory=Path("private-fixture")
+            )
+        self.assertEqual(connection.method_calls, [])
+
+
 class RestoredPrimaryVerificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_verifies_exact_history_without_claiming_restored_role_permissions(
         self,

@@ -928,48 +928,21 @@ async def _verify_runtime_permissions(
 async def _preflight_runtime_login(
     connection: Any, database: str, *, directory: Path
 ) -> None:
-    auth = _runtime_auth(directory)
+    if database != "kairos":
+        raise WorkerError(
+            "runtime principal preflight requires the exact primary database"
+        )
     exists = await connection.fetchval(
         "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='kairos_runtime')"
     )
-    if not exists:
-        return
-    try:
-        import asyncpg
-
-        dsn = (
-            "postgresql://kairos_runtime:"
-            + quote(auth["password"], safe="")
-            + "@127.0.0.1:5432/"
-            + database
-        )
-        probe = await asyncpg.connect(
-            dsn,
-            timeout=15,
-            command_timeout=30,
-            server_settings={
-                "application_name": "kairos-controlled-runtime-auth-preflight"
-            },
-        )
-        try:
-            who = await probe.fetchrow(
-                "SELECT current_user,session_user,current_database()"
-            )
-            if (
-                who is None
-                or who["current_user"] != "kairos_runtime"
-                or who["session_user"] != "kairos_runtime"
-                or who["current_database"] != database
-            ):
-                raise WorkerError("runtime auth preflight identity differs")
-        finally:
-            await probe.close()
-    except WorkerError:
-        raise
-    except Exception:  # noqa: BLE001 -- normalize runtime-login failure without leaking secrets.
+    if exists is not False:
+        # This is an initial, create-only legacy-to-current transition. Existing
+        # ownership or inherited ACLs cannot be proved safe by checking a password
+        # or role attributes, and must be reviewed before any primary mutation.
         raise WorkerError(
-            "existing runtime role credentials do not match the newly supplied auth file"
-        ) from None
+            "existing or indeterminate runtime principal requires separate ownership and ACL review"
+        )
+    _runtime_auth(directory)
 
 
 async def _prepare_exact(

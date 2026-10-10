@@ -52,7 +52,10 @@ remain unchanged.
 The primary transition creates a run-unique temporary login, grants only the
 reviewed migration-role assumption, atomically migrates/quarantines the exact
 reviewed expired row, and verifies the new runtime login's positive/negative
-permissions. It then drops its temporary login, makes a backup after, restores
+permissions. The initial transition requires the runtime principal to be absent;
+an existing or indeterminate principal blocks migration pending a separate
+ownership and ACL review, without trying or changing its credentials.
+It then drops its temporary login, makes a backup after, restores
 that archive into an isolated cluster and checks all histories and supported
 heaps/B-trees. Restored-cluster verification deliberately makes no claim about
 omitted role globals or original runtime ACLs.
