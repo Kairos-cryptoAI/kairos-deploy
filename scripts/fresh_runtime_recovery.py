@@ -188,6 +188,26 @@ def digest(value) -> str:
     ).hexdigest()
 
 
+def supervisor_environment() -> dict[str, str]:
+    # Git's already configured safe-directory and public GPG verification use
+    # the actual Windows profile. Never inherit provider tokens or proxy auth.
+    allowed = {
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOME",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PATH",
+        "COMSPEC",
+        "USERNAME",
+        "USERDOMAIN",
+    }
+    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+
+
 def full_table_query(tables: list[str]) -> str:
     if (
         len(tables) != 27
@@ -1193,11 +1213,7 @@ def supervise(args) -> int:
                     args.prior_diagnostic_sha256,
                 ],
                 cwd=REPO,
-                env={
-                    key: value
-                    for key, value in os.environ.items()
-                    if key.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
-                },
+                env=supervisor_environment(),
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=err,

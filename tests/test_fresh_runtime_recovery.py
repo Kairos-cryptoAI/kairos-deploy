@@ -71,6 +71,22 @@ class FreshRuntimeRecoveryTests(unittest.TestCase):
         self.assertTrue(recovery.FINGERPRINT.startswith("set -eu\nset -o pipefail\n"))
         self.assertIn("cluster_state=$(pg_controldata", recovery.FINGERPRINT)
 
+    def test_supervisor_keeps_existing_git_identity_without_provider_secrets(self):
+        with patch.dict(
+            recovery.os.environ,
+            {
+                "USERPROFILE": "fixture-profile",
+                "PATH": "fixture-bin",
+                "OPENAI_API_KEY": "synthetic-do-not-inherit",
+                "HTTPS_PROXY": "synthetic-do-not-inherit",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                recovery.supervisor_environment(),
+                {"USERPROFILE": "fixture-profile", "PATH": "fixture-bin"},
+            )
+
     def test_copy_directory_times_are_restored_deepest_first(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.tar"
