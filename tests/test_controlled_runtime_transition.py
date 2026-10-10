@@ -17,6 +17,120 @@ from scripts import prepare_controlled_runtime_wheels as wheels
 
 
 class CurrentControlledTransitionTests(unittest.TestCase):
+    def test_restored_primary_plan_changes_only_authorization_without_mutating_input(
+        self,
+    ):
+        owner = "a" * 32
+        plan = {
+            "owner": owner,
+            "primary_authorized": True,
+            "legacy_snapshot_sha256": "b" * 64,
+            "package_revisions": {"kairos-core": "c" * 40},
+        }
+        before = json.dumps(plan, sort_keys=True)
+        restored = current.restored_primary_worker_plan(plan, owner)
+        self.assertEqual(restored, {**plan, "primary_authorized": False})
+        self.assertEqual(json.dumps(plan, sort_keys=True), before)
+        self.assertIsNot(restored, plan)
+
+    def test_restored_primary_plan_refuses_unbound_or_nonprimary_input(self):
+        owner = "a" * 32
+        for plan, candidate in (
+            ({"owner": owner, "primary_authorized": False}, owner),
+            ({"owner": owner, "primary_authorized": 1}, owner),
+            ({"owner": "b" * 32, "primary_authorized": True}, owner),
+            ({"owner": owner, "primary_authorized": True}, "not-an-owner"),
+            ({"owner": owner}, owner),
+            ([], owner),
+        ):
+            with (
+                self.subTest(plan=plan, owner=candidate),
+                self.assertRaisesRegex(
+                    current.fresh.Rejected,
+                    "COMMITTED_PRIMARY_PLAN_REQUIRED_FOR_RESTORE",
+                ),
+            ):
+                current.restored_primary_worker_plan(plan, candidate)
+
+    def test_restore_worker_retains_primary_plan_and_excludes_runtime_credentials(self):
+        # Native boundary checks have dedicated tests. This fixture exercises
+        # the real create-only phase input/output path without launching Docker.
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root)
+            owner = "a" * 32
+            plan = {"owner": owner, "primary_authorized": True}
+            original = json.dumps(plan).encode()
+            (work / "plan.json").write_bytes(original)
+            (work / "runtime-auth.json").write_text('{"synthetic": "not-a-key"}')
+            wheelhouse = work / "wheelhouse"
+            wheelhouse.mkdir()
+            (wheelhouse / "manifest.json").write_text("{}")
+            operator = work / "operator"
+            operator.mkdir()
+            target = "owned-test-clone"
+            worker = "kairos-controlled-" + owner[:12] + "-verify-restored-primary"
+            output = work / ("worker-output-" + worker)
+            controller = object.__new__(current.Controller)
+            controller.work, controller.owner = work, owner
+            controller.owned, controller.workers = {target: []}, {}
+            controller.wheelhouse, controller.operator_snapshot = wheelhouse, operator
+            controller.operator_manifest = {}
+            controller.proofs = {
+                "wheel_manifest_sha256": current.fresh.sha(wheelhouse / "manifest.json")
+            }
+            view = {
+                "image": current.RUNNER,
+                "network": "container:" + "d" * 64,
+                "memory": 512 * 1024**2,
+                "swap": 512 * 1024**2,
+                "cpus": 10**9,
+                "readonly": True,
+                "caps": ["ALL"],
+                "ports": {},
+                "privileged": False,
+                "labels": {current.fresh.OWNER_LABEL: owner},
+                "mounts": [
+                    {
+                        "Type": "bind",
+                        "Destination": destination,
+                        "Source": str(source),
+                        "RW": writable,
+                    }
+                    for destination, source, writable in (
+                        ("/operator", operator, False),
+                        ("/wheelhouse", wheelhouse, False),
+                        ("/output", output, True),
+                    )
+                ],
+            }
+            controller.inspect = mock.Mock(
+                side_effect=lambda name: {"id": "d" * 64} if name == target else view
+            )
+            controller.docker = mock.Mock(
+                side_effect=lambda args, **_kwargs: "0" if args[0] == "wait" else ""
+            )
+            with (
+                mock.patch.object(current, "require_manifest"),
+                mock.patch.object(current, "verify_operator_snapshot"),
+                mock.patch.object(current.fresh, "safe", side_effect=lambda path: path),
+            ):
+                controller.worker(
+                    target,
+                    "kairos_recovery_" + owner[:12] + "_current_second",
+                    "verify-restored-primary",
+                )
+            self.assertEqual((work / "plan.json").read_bytes(), original)
+            self.assertEqual(
+                json.loads((output / "plan.json").read_text()),
+                {**plan, "primary_authorized": False},
+            )
+            self.assertFalse((output / "runtime-auth.json").exists())
+            self.assertEqual(
+                controller.proofs["restored_primary_worker_plan_sha256"],
+                current.fresh.sha(output / "plan.json"),
+            )
+            self.assertEqual(controller.workers, {})
+
     def test_defaults_never_launch_or_mutate(self):
         for module in (current, wheels):
             output = io.StringIO()

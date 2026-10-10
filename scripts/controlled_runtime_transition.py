@@ -41,6 +41,18 @@ OPERATOR_REQUIRED = {
 }
 
 
+def restored_primary_worker_plan(plan: dict, owner: str) -> dict:
+    """Derive only the clone authorization bit; never overwrite primary evidence."""
+    if (
+        not isinstance(plan, dict)
+        or not re.fullmatch(r"[0-9a-f]{32}", owner)
+        or plan.get("owner") != owner
+        or plan.get("primary_authorized") is not True
+    ):
+        raise fresh.Rejected("COMMITTED_PRIMARY_PLAN_REQUIRED_FOR_RESTORE")
+    return {**plan, "primary_authorized": False}
+
+
 def verify_operator_snapshot(directory: Path, manifest: dict[str, str]) -> str:
     """Require the exact regular-file tree captured from the signed Deploy archive."""
     if not directory.is_dir() or not isinstance(manifest, dict) or not manifest:
@@ -388,6 +400,14 @@ class Controller(fresh.Controller):
             raise fresh.Rejected("DUPLICATE_WORKER_REFUSED")
         output = self.work / ("worker-output-" + name)
         output.mkdir()
+        restore_plan = None
+        if mode == "verify-restored-primary":
+            source_plan = fresh.safe(self.work / "plan.json")
+            if not source_plan.is_file():
+                raise fresh.Rejected("COMMITTED_PRIMARY_PLAN_FILE_REQUIRED")
+            restore_plan = restored_primary_worker_plan(
+                json.loads(source_plan.read_text()), self.owner
+            )
         for source in self.work.iterdir():
             if not source.is_file() or not (
                 source.name == "plan.json"
@@ -400,6 +420,12 @@ class Controller(fresh.Controller):
                 continue
             if source.is_symlink():
                 raise fresh.Rejected("WORKER_INPUT_LINK_REJECTED")
+            if restore_plan is not None and source.name == "plan.json":
+                fresh.save(output / "plan.json", restore_plan)
+                continue
+            if restore_plan is not None and source.name == "runtime-auth.json":
+                # A dump restore proves history, not original-cluster logins.
+                continue
             fresh.write(output / source.name, source.read_bytes())
         args = [
             "create",
@@ -478,6 +504,13 @@ class Controller(fresh.Controller):
                 or artifact.is_symlink()
             ):
                 raise fresh.Rejected("CURRENT_WORKER_OUTPUT_BOUNDARY_CHANGED")
+            if restore_plan is not None and artifact.name == "plan.json":
+                if json.loads(artifact.read_text()) != restore_plan:
+                    raise fresh.Rejected("RESTORED_PRIMARY_WORKER_PLAN_CHANGED")
+                self.proofs["restored_primary_worker_plan_sha256"] = fresh.sha(artifact)
+                # This is an immutable phase-local view, not a replacement for
+                # the retained primary-authorized plan in the controller root.
+                continue
             destination = self.work / artifact.name
             if destination.exists():
                 if not destination.is_file() or fresh.sha(destination) != fresh.sha(

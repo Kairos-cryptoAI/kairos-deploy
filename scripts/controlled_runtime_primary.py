@@ -1243,9 +1243,8 @@ class PrimaryController(current.Controller):
         name, database = self.restore(dump, "current_second")
         # A restored pg_dump omits role globals; deliberately prove only data,
         # schema and exact history, not runtime-login privileges.
-        plan_for_restore = dict(primary_plan)
-        plan_for_restore["primary_authorized"] = False
-        fresh.save(self.work / "plan.json", plan_for_restore)
+        # worker() derives a create-only phase-local clone view. The admitted
+        # primary plan stays byte-unchanged, including after a committed apply.
         self.worker(name, database, "verify-restored-primary")
         restored = _json(self.work / "native-verify-restored-primary.json")
         if (
