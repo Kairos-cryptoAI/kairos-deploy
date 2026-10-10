@@ -339,7 +339,9 @@ def parse_table_digests(raw: str, tables: list[str]) -> list[dict]:
 def safe(path: Path) -> Path:
     path = path.absolute()
     for item in (path, *path.parents):
-        if item.exists() and item.stat().st_file_attributes & 0x400:
+        if item.is_symlink() or (
+            item.exists() and getattr(item.lstat(), "st_file_attributes", 0) & 0x400
+        ):
             raise Rejected("REPARSE_PATH_REJECTED")
     return path
 

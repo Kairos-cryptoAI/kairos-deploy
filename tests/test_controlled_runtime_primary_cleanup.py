@@ -47,6 +47,26 @@ class RemoteCreateIntentTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.controller = _controller(self.root)
 
+    def test_safe_paths_accept_missing_windows_attributes(self) -> None:
+        metadata = SimpleNamespace(st_mode=self.root.stat().st_mode)
+        with mock.patch.object(Path, "lstat", return_value=metadata):
+            self.assertEqual(primary.fresh.safe(self.root), self.root.absolute())
+
+    def test_safe_paths_reject_links_and_windows_reparse_attributes(self) -> None:
+        with (
+            mock.patch.object(Path, "is_symlink", return_value=True),
+            self.assertRaisesRegex(primary.fresh.Rejected, "REPARSE_PATH_REJECTED"),
+        ):
+            primary.fresh.safe(self.root)
+        metadata = SimpleNamespace(
+            st_mode=self.root.stat().st_mode, st_file_attributes=0x400
+        )
+        with (
+            mock.patch.object(Path, "lstat", return_value=metadata),
+            self.assertRaisesRegex(primary.fresh.Rejected, "REPARSE_PATH_REJECTED"),
+        ):
+            primary.fresh.safe(self.root)
+
     def test_intent_is_durable_before_sql_copy_and_backup_dump(self) -> None:
         sql = self.root / "provision.sql"
         sql.write_bytes(b"synthetic SQL fixture")
