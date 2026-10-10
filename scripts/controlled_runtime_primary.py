@@ -848,17 +848,10 @@ class PrimaryController(current.Controller):
             raise fresh.Rejected("PRIMARY_PRIVATE_SQL_TARGET_NOT_OWNED")
         self._reserve_remote_file(purpose, local_sql=path)
         self.docker(["cp", str(path), fresh.SOURCE + ":" + container_path], seconds=20)
-        self.docker(
-            [
-                "exec",
-                "--user=0",
-                fresh.SOURCE,
-                "chown",
-                "postgres:postgres",
-                container_path,
-            ],
-            seconds=10,
-        )
+        # Docker cp creates this exact owned file as UID 0. Keep that ownership:
+        # the primary drops ALL capabilities, so even UID 0 cannot chown it.
+        # Only the bounded UID-0 psql process below reads the mode-0600 file;
+        # its database identity is still explicitly kairos, not an OS-derived role.
         self.docker(
             ["exec", "--user=0", fresh.SOURCE, "chmod", "0600", container_path],
             seconds=10,
@@ -1052,6 +1045,7 @@ class PrimaryController(current.Controller):
         self.docker(
             [
                 "exec",
+                "--user=0",
                 fresh.SOURCE,
                 "psql",
                 "--no-psqlrc",
@@ -1189,6 +1183,7 @@ class PrimaryController(current.Controller):
         self.docker(
             [
                 "exec",
+                "--user=0",
                 fresh.SOURCE,
                 "pg_dump",
                 "--format=custom",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import inspect
@@ -112,8 +113,8 @@ class RemoteCreateIntentTests(unittest.TestCase):
 
         def docker(args, **_kwargs):
             calls.append(args)
-            if args[0] == "exec" and "chown" in args:
-                raise primary.fresh.Rejected("fixture chown failure")
+            if args[0] == "exec" and "chmod" in args:
+                raise primary.fresh.Rejected("fixture chmod failure")
             return ""
 
         self.controller.docker.side_effect = docker
@@ -124,6 +125,86 @@ class RemoteCreateIntentTests(unittest.TestCase):
         evidence = primary.remote_artifact_cleanup_evidence(self.root, OWNER, REVISION)
         self.assertFalse(evidence["verified"])
         self.assertEqual(evidence["pending_purposes"], ["provision-sql"])
+
+    def test_private_sql_keeps_root_ownership_without_capability_changes(self) -> None:
+        sql = self.root / "provision.sql"
+        sql.write_bytes(b"synthetic SQL fixture")
+        remote, _ = primary.remote_artifact_specs(OWNER)["provision-sql"]
+
+        def docker(args, **_kwargs):
+            if "chown" in args:
+                raise PermissionError("CAP_CHOWN is unavailable in the primary")
+            if "sha256sum" in args:
+                return f"{hashlib.sha256(sql.read_bytes()).hexdigest()}  {remote}"
+            return ""
+
+        self.controller.docker.side_effect = docker
+        self.controller._copy_sql(sql, remote)
+        calls = [entry.args[0] for entry in self.controller.docker.call_args_list]
+        self.assertEqual(
+            calls,
+            [
+                ["cp", str(sql), primary.fresh.SOURCE + ":" + remote],
+                ["exec", "--user=0", primary.fresh.SOURCE, "chmod", "0600", remote],
+                ["exec", "--user=0", primary.fresh.SOURCE, "sha256sum", "--", remote],
+            ],
+        )
+        self.assertFalse(any("chown" in call for call in calls))
+        self.assertFalse(
+            any(value.startswith("--cap-add") for call in calls for value in call)
+        )
+
+    def test_private_sql_reader_is_root_but_database_identity_remains_kairos(
+        self,
+    ) -> None:
+        sql = self.root / "provision.sql"
+        remote, _ = primary.remote_artifact_specs(OWNER)["provision-sql"]
+        self.controller.proofs = {}
+        self.controller._copy_sql = mock.Mock()
+        self.controller._remove_owned_container_file = mock.Mock()
+        self.controller._run_sql_file(sql, remote, "temporary_login_provision")
+        self.controller._copy_sql.assert_called_once_with(sql, remote)
+        self.controller.docker.assert_called_once_with(
+            [
+                "exec",
+                "--user=0",
+                primary.fresh.SOURCE,
+                "psql",
+                "--no-psqlrc",
+                "--no-password",
+                "--username=kairos",
+                "--dbname=postgres",
+                "--set=ON_ERROR_STOP=1",
+                "--file=" + remote,
+            ],
+            seconds=25,
+        )
+        self.controller._remove_owned_container_file.assert_called_once_with(remote)
+        self.assertTrue(
+            self.controller.proofs["temporary_login_provision_acknowledged"]
+        )
+
+    def test_primary_backup_is_written_by_its_private_hash_reader(self) -> None:
+        # The hardened source has no DAC_OVERRIDE/CHOWN capabilities. pg_dump
+        # creates private archives, so its writer must match the UID-0 hash
+        # reader rather than depending on an unavailable root bypass.
+        tree = ast.parse(inspect.getsource(primary.PrimaryController))
+        commands = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.List)
+            and any(
+                isinstance(item, ast.Constant) and item.value == "pg_dump"
+                for item in node.elts
+            )
+        ]
+        self.assertEqual(len(commands), 1)
+        values = [
+            item.value for item in commands[0].elts if isinstance(item, ast.Constant)
+        ]
+        self.assertEqual(values[:3], ["exec", "--user=0", "pg_dump"])
+        self.assertIn("--username=kairos", values)
+        self.assertIn("--dbname=kairos", values)
 
     def test_successful_copy_cleanup_records_owned_bytes_removed(self) -> None:
         data = b"synthetic SQL"
