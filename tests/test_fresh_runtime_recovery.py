@@ -1,0 +1,245 @@
+"""Offline contracts for fresh runtime recovery; never launches native tools."""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import io
+import json
+import tempfile
+import unittest
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import patch
+
+from scripts import fresh_runtime_recovery as recovery
+
+
+class FreshRuntimeRecoveryTests(unittest.TestCase):
+    def make_manifest(self, directory: Path) -> tuple[dict, Path]:
+        project = "kairos-recovery-copy-a1b2c3d4e5f6"
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        dump = directory / f"{project}-{stamp}.dump"
+        dump.write_bytes(b"PGDMP-offline-fixture")
+        checkpoints = dict.fromkeys(recovery.CHECKPOINTS, 0)
+        checkpoints["event_audit"] = 1
+        value = {
+            "schema_version": 1,
+            "created_at_utc": datetime.now(UTC).isoformat(),
+            "compose_project": project,
+            "database": "kairos",
+            "file": dump.name,
+            "bytes": dump.stat().st_size,
+            "sha256": hashlib.sha256(dump.read_bytes()).hexdigest(),
+            "checkpoints": checkpoints,
+            "timescaledb_bgw_owners": ["kairos"],
+        }
+        return value, dump
+
+    def test_default_plan_does_not_construct_native_controller(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                recovery,
+                "Controller",
+                side_effect=AssertionError("native controller constructed"),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(recovery.main([]), 0)
+        plan = json.loads(output.getvalue())
+        self.assertEqual(plan["result"], "PLAN_ONLY")
+        self.assertIs(plan["primary_start"], False)
+        self.assertIs(plan["consumers"], False)
+
+    def test_manifest_accepts_exact_official_shape_and_pgdmp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            recovery.validate_manifest(manifest, dump, manifest["compose_project"])
+
+    def test_manifest_rejects_missing_or_extra_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            for bad in (
+                {
+                    key: value
+                    for key, value in manifest.items()
+                    if key != "created_at_utc"
+                },
+                {**manifest, "unexpected": "field"},
+            ):
+                with self.subTest(keys=set(bad)), self.assertRaises(recovery.Rejected):
+                    recovery.validate_manifest(bad, dump, manifest["compose_project"])
+
+    def test_manifest_rejects_bad_identity_hash_size_and_owner_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            invalid = (
+                {**manifest, "schema_version": True},
+                {**manifest, "compose_project": "kairos-paper-gate"},
+                {**manifest, "database": "other"},
+                {**manifest, "file": "different.dump"},
+                {**manifest, "bytes": True},
+                {**manifest, "sha256": "0" * 64},
+                {**manifest, "timescaledb_bgw_owners": "kairos"},
+                {**manifest, "timescaledb_bgw_owners": ["kairos", "other"]},
+            )
+            for bad in invalid:
+                with self.subTest(manifest=bad), self.assertRaises(recovery.Rejected):
+                    recovery.validate_manifest(bad, dump, manifest["compose_project"])
+
+    def test_manifest_rejects_incomplete_extra_or_invalid_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            bad_checkpoints = (
+                {},
+                {**manifest["checkpoints"], "not_a_table": 0},
+                {
+                    key: value
+                    for key, value in manifest["checkpoints"].items()
+                    if key != "message_inbox"
+                },
+                {**manifest["checkpoints"], "event_audit": True},
+                {**manifest["checkpoints"], "event_audit": -1},
+                {**manifest["checkpoints"], "event_audit": 0},
+            )
+            for checkpoints in bad_checkpoints:
+                with (
+                    self.subTest(checkpoints=checkpoints),
+                    self.assertRaises(recovery.Rejected),
+                ):
+                    recovery.validate_manifest(
+                        {**manifest, "checkpoints": checkpoints},
+                        dump,
+                        manifest["compose_project"],
+                    )
+
+    def test_manifest_rejects_stale_or_malformed_timestamp_and_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            for created in ("not-a-timestamp", "2000-01-01T00:00:00Z"):
+                with (
+                    self.subTest(created=created),
+                    self.assertRaises(recovery.Rejected),
+                ):
+                    recovery.validate_manifest(
+                        {**manifest, "created_at_utc": created},
+                        dump,
+                        manifest["compose_project"],
+                    )
+            with self.assertRaises(recovery.Rejected):
+                recovery.validate_manifest(
+                    {**manifest, "file": "unbound.dump"},
+                    dump,
+                    manifest["compose_project"],
+                )
+
+    def test_manifest_rejects_non_custom_archive_magic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, dump = self.make_manifest(Path(directory))
+            dump.write_bytes(b"not-a-pg-dump")
+            manifest["bytes"] = dump.stat().st_size
+            manifest["sha256"] = hashlib.sha256(dump.read_bytes()).hexdigest()
+            with self.assertRaises(recovery.Rejected):
+                recovery.validate_manifest(manifest, dump, manifest["compose_project"])
+
+    def test_integrity_state_accepts_clean_and_rejects_corruption(self) -> None:
+        value = {
+            "inbox_failed": 0,
+            "inbox_processing": 0,
+            "pending": 10,
+            "dead_lettered": 0,
+            "active_leases": 0,
+            "expired_leases": 1,
+            "duplicate_audit": 0,
+            "duplicate_outbox": 0,
+            "orphan_outbox": 0,
+            "effects": 0,
+            "trades": 0,
+            "invalid_indexes": 0,
+            "unvalidated_constraints": 0,
+        }
+        recovery.validate_state(value)
+        for field in (
+            "inbox_failed",
+            "inbox_processing",
+            "dead_lettered",
+            "active_leases",
+            "duplicate_audit",
+            "duplicate_outbox",
+            "orphan_outbox",
+            "invalid_indexes",
+            "unvalidated_constraints",
+        ):
+            with self.subTest(field=field), self.assertRaises(recovery.Rejected):
+                recovery.validate_state({**value, field: 1})
+        for bad in (True, 1.0, -1, "1"):
+            with self.subTest(bad=bad), self.assertRaises(recovery.Rejected):
+                recovery.validate_state({**value, "pending": bad})
+
+    def test_bars_require_five_ordered_contiguous_symbol_prefixes(self) -> None:
+        symbols = ("BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT")
+        rows = [
+            {"symbol": symbol, "count": 2, "first": 0, "last": 60000, "gaps": 0}
+            for symbol in symbols
+        ]
+        recovery.validate_bars(rows)
+        invalid = (
+            rows[:-1],
+            list(reversed(rows)),
+            [{**row, "last": 120000} for row in rows],
+            [{**row, "gaps": 1} for row in rows],
+            [{**row, "count": True} for row in rows],
+        )
+        for candidate in invalid:
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaises(recovery.Rejected),
+            ):
+                recovery.validate_bars(candidate)
+
+    def test_mount_identity_normalizes_windows_and_docker_desktop_aliases(self) -> None:
+        expected = "d:/kairos/backups/restore.dump"
+        for path in (
+            r"D:\Kairos\backups\restore.dump",
+            "D:/Kairos/backups/restore.dump",
+            "/run/desktop/mnt/host/d/Kairos/backups/restore.dump",
+            "/host_mnt/d/Kairos/backups/restore.dump",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(recovery.mount_identity(path), expected)
+        self.assertNotEqual(
+            recovery.mount_identity("/other-host/d/Kairos/backups/restore.dump"),
+            expected,
+        )
+
+    def test_mount_identity_rejects_parent_traversal(self) -> None:
+        for path in ("D:/Kairos/../escape.dump", "/host_mnt/d/Kairos/../escape.dump"):
+            with self.subTest(path=path), self.assertRaises(recovery.Rejected):
+                recovery.mount_identity(path)
+
+    def test_process_tree_proof_requires_assignment_and_verified_cleanup(self) -> None:
+        good = {
+            "assigned_before_resume": True,
+            "tree_cleanup_verified": True,
+            "active_owned_processes_after": 0,
+        }
+        self.assertIsNone(recovery.require_tree_proof(good))
+        invalid = (
+            {**good, "assigned_before_resume": False},
+            {**good, "tree_cleanup_verified": False},
+            {**good, "active_owned_processes_after": 1},
+            {**good, "active_owned_processes_after": True},
+            {
+                key: value
+                for key, value in good.items()
+                if key != "tree_cleanup_verified"
+            },
+        )
+        for proof in invalid:
+            with self.subTest(proof=proof), self.assertRaises(recovery.Rejected):
+                recovery.require_tree_proof(proof)
+
+
+if __name__ == "__main__":
+    unittest.main()
