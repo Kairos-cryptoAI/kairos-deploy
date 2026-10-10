@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import tempfile
+import tarfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,34 @@ from scripts import fresh_runtime_recovery as recovery
 
 
 class FreshRuntimeRecoveryTests(unittest.TestCase):
+    def test_copy_directory_times_are_restored_deepest_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.tar"
+            with tarfile.open(path, "w") as archive:
+                for name in (".", "./base", "./base/123"):
+                    item = tarfile.TarInfo(name)
+                    item.type = tarfile.DIRTYPE
+                    item.mtime = 1791102419
+                    archive.addfile(item)
+            text = recovery.directory_times_script(path)
+            self.assertLess(text.index("./base/123"), text.index(" ./base\n"))
+            self.assertIn("export TZ=UTC", text)
+
+    def test_cold_archive_member_escape_and_links_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, kind in (
+                ("../escape", tarfile.DIRTYPE),
+                ("/absolute", tarfile.DIRTYPE),
+                ("./pg_wal/link", tarfile.SYMTYPE),
+            ):
+                path = Path(directory) / (str(len(name)) + str(kind) + ".tar")
+                with tarfile.open(path, "w") as archive:
+                    item = tarfile.TarInfo(name)
+                    item.type = kind
+                    archive.addfile(item)
+                with self.subTest(name=name), self.assertRaises(recovery.Rejected):
+                    recovery.directory_times_script(path)
+
     def make_manifest(self, directory: Path) -> tuple[dict, Path]:
         project = "kairos-recovery-copy-a1b2c3d4e5f6"
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")

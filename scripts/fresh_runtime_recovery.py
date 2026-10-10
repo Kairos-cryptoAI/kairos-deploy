@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import subprocess
+import tarfile
 import time
 import uuid
 from datetime import UTC, datetime
@@ -29,6 +30,8 @@ else:
 REPO = Path("D:/Kairos/kairos-deploy")
 ROOT = REPO / "backups/fresh-runtime-recovery-20261010"
 PRIOR_DIAGNOSTIC = ROOT / "run-4a577cdff7594788bbf41c96c6c3653e/receipt.json"
+PRIOR_COPY_DIAGNOSTIC = ROOT / "run-aebef6e118d94b289a92b685fc22e4fe/receipt.json"
+PRIOR_COPY_SHA = "63531497e9f13d9c1721a81b021a999aebd7891b68c8d702609141139cd3444a"
 SOURCE = "kairos-paper-gate-timescaledb-1"
 VOLUME = "kairos-paper-gate_paper-ts-data"
 NETWORK = "kairos-paper-gate_paper-data"
@@ -319,6 +322,37 @@ def require_tree_proof(value) -> None:
         raise Rejected("HOST_PROCESS_TREE_CLEANUP_UNPROVEN")
 
 
+def directory_times_script(archive_path: Path) -> str:
+    """Restore copy-directory mtimes deepest first after BusyBox tar extraction.
+
+    Full content/metadata digests must still match before PostgreSQL startup.
+    Reject any archive escape or link before extraction, even on a clone.
+    """
+    with tarfile.open(archive_path, "r:") as archive:
+        members = archive.getmembers()
+    for member in members:
+        if (
+            not (member.isdir() or member.isfile())
+            or not re.fullmatch(r"\.(?:/[A-Za-z0-9_.-]+)*", member.name)
+            or ".." in member.name.split("/")
+        ):
+            raise Rejected("UNSAFE_COLD_ARCHIVE_MEMBER")
+    directories = sorted(
+        (m for m in members if m.isdir()), key=lambda m: m.name.count("/"), reverse=True
+    )
+    return (
+        "cd /var/lib/postgresql/data\nexport TZ=UTC\n"
+        + "\n".join(
+            "touch -m -t "
+            + datetime.fromtimestamp(m.mtime, UTC).strftime("%Y%m%d%H%M.%S")
+            + " "
+            + shlex.quote(m.name)
+            for m in directories
+        )
+        + "\n"
+    )
+
+
 class Controller:
     def __init__(self):
         self.owner = uuid.uuid4().hex
@@ -326,7 +360,7 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v2.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v3.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
@@ -853,9 +887,11 @@ class Controller:
         )
         # Equality is checked BEFORE postgres is allowed to modify copied WAL.
         script = (
-            "set -eu; tar -xf /cold/cluster.tar -C /var/lib/postgresql/data; fingerprint_root=/var/lib/postgresql/data\nfingerprint() {\n"
+            "set -eu; tar -xf /cold/cluster.tar -C /var/lib/postgresql/data; "
+            + directory_times_script(self.work / "cluster.tar")
+            + "fingerprint_root=/var/lib/postgresql/data\nfingerprint() {\n"
             + FINGERPRINT
-            + '\n}\nactual=$(fingerprint)\n[ "$actual" = '
+            + '\n}\nactual=$(fingerprint)\nprintf \'%s\\n\' "$actual"\n[ "$actual" = '
             + shlex.quote(expected)
             + " ] || exit 91\nprintf '%s\\n' \"$actual\" > /tmp/cold-verified\nprintf 'local all all trust\\nhost all all 127.0.0.1/32 trust\\n' > /tmp/recovery-hba.conf\nexec postgres "
         )
@@ -1132,11 +1168,22 @@ def main(argv=None):
         or "official_backup" in prior.get("proofs", {})
     ):
         raise Rejected("PRIOR_BACKUP_NOT_DISPATCHED_OR_CLEANUP_UNPROVEN")
+    if sha(PRIOR_COPY_DIAGNOSTIC) != PRIOR_COPY_SHA:
+        raise Rejected("PRESERVED_COPY_DIAGNOSTIC_CHANGED")
+    prior_copy = json.loads(PRIOR_COPY_DIAGNOSTIC.read_text())
+    if (
+        prior_copy.get("result") != "FAILED_CLOSED"
+        or prior_copy.get("phase") != "COLD_READONLY_BACKUP"
+        or prior_copy.get("cleanup_verified") is not True
+        or "official_backup" in prior_copy.get("proofs", {})
+    ):
+        raise Rejected("PRIOR_COPY_CLEANUP_UNPROVEN")
     controller = Controller()
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision
     controller.proofs["preserved_prebackup_diagnostic_sha256"] = (
         args.prior_diagnostic_sha256
     )
+    controller.proofs["preserved_copy_diagnostic_sha256"] = PRIOR_COPY_SHA
     try:
         controller.run()
     except BaseException as error:  # noqa: BLE001 -- interrupts must also clean only owned clones
