@@ -38,6 +38,162 @@ GPG = (
     else Path("/usr/bin/gpg")
 )
 MAX_SECONDS = 1800
+MAX_PRIVATE_SQL_BYTES = 64 * 1024
+MAX_PRIMARY_TEMP_BYTES = 256 * 1024 * 1024
+
+
+def remote_artifact_specs(owner: str) -> dict[str, tuple[str, str]]:
+    if not re.fullmatch(r"[0-9a-f]{32}", owner):
+        raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_OWNER_INVALID")
+    short = owner[:12]
+    return {
+        "provision-sql": ("/tmp/controlled-runtime-" + short + ".sql", "provision.sql"),
+        "cleanup-sql": (
+            "/tmp/controlled-runtime-cleanup-" + short + ".sql",
+            "cleanup-role.sql",
+        ),
+        "backup-after": (
+            "/tmp/controlled-primary-after-" + short + ".dump",
+            "primary-after.dump",
+        ),
+    }
+
+
+def remote_artifact_cleanup_evidence(run: Path, owner: str, revision: str) -> dict:
+    """Bind immutable create/remove records without reading SQL or auth values."""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_REVISION_INVALID")
+    specs = remote_artifact_specs(owner)
+    if run.is_symlink() or getattr(run.lstat(), "st_file_attributes", 0) & 0x400:
+        raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_DIRECTORY_INVALID")
+    expected_names = {
+        prefix + purpose + ".json"
+        for purpose in specs
+        for prefix in ("remote-create-", "remote-remove-")
+    }
+    observed_names = {
+        path.name
+        for prefix in ("remote-create-", "remote-remove-")
+        for path in run.glob(prefix + "*.json")
+    }
+    if observed_names - expected_names:
+        raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_RECORD_SET_INVALID")
+    bindings, pending = {}, []
+    created = completed = 0
+    for purpose, (remote_path, _local_name) in specs.items():
+        intent_path = run / ("remote-create-" + purpose + ".json")
+        remove_path = run / ("remote-remove-" + purpose + ".json")
+        if not intent_path.exists():
+            if remove_path.exists() or intent_path.is_symlink():
+                raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_ORPHAN_RECORD")
+            continue
+        intent = _json(intent_path)
+        expected_size = intent.get("expected_bytes")
+        expected_sha = intent.get("expected_sha256")
+        maximum = intent.get("maximum_bytes")
+        if (
+            set(intent)
+            != {
+                "schema_version",
+                "kind",
+                "owner",
+                "source_container_id",
+                "purpose",
+                "remote_path",
+                "expected_revision",
+                "expected_sha256",
+                "expected_bytes",
+                "maximum_bytes",
+            }
+            or intent.get("schema_version") != 1
+            or intent.get("kind") != "controlled-primary-remote-create-v1"
+            or intent.get("owner") != owner
+            or intent.get("source_container_id") != fresh.SOURCE_ID
+            or intent.get("purpose") != purpose
+            or intent.get("remote_path") != remote_path
+            or intent.get("expected_revision") != revision
+            or type(maximum) is not int
+            or (
+                purpose == "backup-after"
+                and (
+                    expected_size is not None
+                    or expected_sha is not None
+                    or maximum != MAX_PRIMARY_TEMP_BYTES
+                )
+            )
+            or (
+                purpose != "backup-after"
+                and (
+                    type(expected_size) is not int
+                    or not 0 < expected_size <= MAX_PRIVATE_SQL_BYTES
+                    or maximum != expected_size
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(expected_sha))
+                )
+            )
+        ):
+            raise fresh.Rejected("PRIMARY_REMOTE_CREATE_INTENT_INVALID")
+        created += 1
+        intent_sha = fresh.sha(intent_path)
+        bindings[intent_path.name] = intent_sha
+        if not remove_path.exists():
+            if remove_path.is_symlink():
+                raise fresh.Rejected("PRIMARY_REMOTE_REMOVE_RECORD_INVALID")
+            pending.append(purpose)
+            continue
+        removal = _json(remove_path)
+        observed_size = removal.get("observed_bytes")
+        observed_sha = removal.get("observed_sha256")
+        outcome = removal.get("outcome")
+        if (
+            set(removal)
+            != {
+                "schema_version",
+                "kind",
+                "owner",
+                "source_container_id",
+                "purpose",
+                "remote_path",
+                "create_intent_sha256",
+                "outcome",
+                "observed_sha256",
+                "observed_bytes",
+            }
+            or removal.get("schema_version") != 1
+            or removal.get("kind") != "controlled-primary-remote-remove-v1"
+            or removal.get("owner") != owner
+            or removal.get("source_container_id") != fresh.SOURCE_ID
+            or removal.get("purpose") != purpose
+            or removal.get("remote_path") != remote_path
+            or removal.get("create_intent_sha256") != intent_sha
+            or outcome not in {"ABSENT", "OWNED_BYTES_REMOVED"}
+            or (
+                outcome == "ABSENT"
+                and (observed_size is not None or observed_sha is not None)
+            )
+            or (
+                outcome == "OWNED_BYTES_REMOVED"
+                and (
+                    type(observed_size) is not int
+                    or not 0 <= observed_size <= maximum
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(observed_sha))
+                    or (
+                        purpose != "backup-after"
+                        and observed_size == expected_size
+                        and observed_sha != expected_sha
+                    )
+                )
+            )
+        ):
+            raise fresh.Rejected("PRIMARY_REMOTE_REMOVE_RECORD_INVALID")
+        completed += 1
+        bindings[remove_path.name] = fresh.sha(remove_path)
+    return {
+        "verified": not pending,
+        "created_count": created,
+        "completed_count": completed,
+        "pending_purposes": pending,
+        "record_sha256": bindings,
+    }
 
 
 class SupervisorContext(current.Controller):
@@ -223,6 +379,19 @@ def supervise_primary(args) -> int:
         error = error or (
             str(caught) if isinstance(caught, fresh.Rejected) else type(caught).__name__
         )
+    remote_cleanup = None
+    run_directory = current.ROOT / ("primary-run-" + owner)
+    try:
+        if run_directory.exists():
+            remote_cleanup = remote_artifact_cleanup_evidence(
+                run_directory, owner, args.expected_revision
+            )
+            if not remote_cleanup["verified"]:
+                raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_CLEANUP_UNVERIFIED")
+    except BaseException as caught:  # noqa: BLE001 -- preserve uncertainty; never restart the stopped primary for cleanup.
+        error = error or (
+            str(caught) if isinstance(caught, fresh.Rejected) else type(caught).__name__
+        )
     child_output = None
     child_receipt_sha256 = None
     if not error and child is not None and child.returncode == 0:
@@ -249,6 +418,11 @@ def supervise_primary(args) -> int:
                 or proofs.get("restored_primary_pg_amcheck_exit_code") != 0
                 or not proofs.get("operator_snapshot_sha256")
                 or not proofs.get("primary_controller_sha256")
+                or not isinstance(remote_cleanup, dict)
+                or remote_cleanup.get("verified") is not True
+                or remote_cleanup.get("created_count") != 3
+                or remote_cleanup.get("completed_count") != 3
+                or proofs.get("remote_artifact_cleanup") != remote_cleanup
             ):
                 raise fresh.Rejected("PRIMARY_CHILD_RESULT_NOT_ACCEPTED")
             child_receipt_sha256 = fresh.sha(receipt_path)
@@ -270,6 +444,7 @@ def supervise_primary(args) -> int:
         "child_result": child_output,
         "child_receipt_sha256": child_receipt_sha256,
         "original_primary_stopped": stopped,
+        "remote_artifact_cleanup": remote_cleanup,
         "error_category": error,
         "primary_consumers_started": 0,
         "publisher_calls": 0,
@@ -568,6 +743,7 @@ class PrimaryController(current.Controller):
         self.primary_apply_invoked = False
         self.worker_cleanup_verified = True
         self.remote_owned_files: dict[str, str] = {}
+        self.remote_create_intents: dict[str, dict] = {}
         self.temp_role = "kairos_transition_" + owner[:12]
         self.temp_sql = "/tmp/controlled-runtime-" + owner[:12] + ".sql"
         self.temp_cleanup_sql = "/tmp/controlled-runtime-cleanup-" + owner[:12] + ".sql"
@@ -634,8 +810,17 @@ class PrimaryController(current.Controller):
     def _copy_sql(self, path: Path, container_path: str):
         if path.parent != self.work or not path.is_file() or path.is_symlink():
             raise fresh.Rejected("PRIVATE_SQL_FILE_REQUIRED")
-        self.assert_primary_target()
-        self._require_remote_absent(container_path)
+        purposes = {
+            remote_path: purpose
+            for purpose, (remote_path, local_name) in remote_artifact_specs(
+                self.owner
+            ).items()
+            if local_name == path.name and purpose != "backup-after"
+        }
+        purpose = purposes.get(container_path)
+        if purpose is None:
+            raise fresh.Rejected("PRIMARY_PRIVATE_SQL_TARGET_NOT_OWNED")
+        self._reserve_remote_file(purpose, local_sql=path)
         self.docker(["cp", str(path), fresh.SOURCE + ":" + container_path], seconds=20)
         self.docker(
             [
@@ -661,30 +846,179 @@ class PrimaryController(current.Controller):
             raise fresh.Rejected("COPIED_PRIVATE_SQL_HASH_MISMATCH")
         self.remote_owned_files[container_path] = digest
 
-    def _remove_owned_container_file(self, container_path: str):
-        expected = self.remote_owned_files.get(container_path)
-        if expected is None:
-            raise fresh.Rejected("UNOWNED_CONTAINER_FILE_CLEANUP_REFUSED")
+    def _reserve_remote_file(self, purpose: str, *, local_sql: Path | None = None):
+        specs = remote_artifact_specs(self.owner)
+        if purpose not in specs:
+            raise fresh.Rejected("PRIMARY_REMOTE_CREATE_PURPOSE_INVALID")
+        container_path, local_name = specs[purpose]
+        if container_path in self.remote_create_intents:
+            raise fresh.Rejected("PRIMARY_REMOTE_CREATE_ALREADY_RESERVED")
+        expected_sha = expected_size = None
+        maximum = MAX_PRIMARY_TEMP_BYTES
+        if purpose != "backup-after":
+            if (
+                local_sql != self.work / local_name
+                or local_sql.is_symlink()
+                or not local_sql.is_file()
+                or getattr(local_sql.lstat(), "st_file_attributes", 0) & 0x400
+                or not 0 < local_sql.stat().st_size <= MAX_PRIVATE_SQL_BYTES
+            ):
+                raise fresh.Rejected("PRIMARY_PRIVATE_SQL_SOURCE_INVALID")
+            payload = local_sql.read_bytes()
+            expected_sha = hashlib.sha256(payload).hexdigest()
+            expected_size = maximum = len(payload)
+        elif local_sql is not None:
+            raise fresh.Rejected("PRIMARY_BACKUP_CREATE_SOURCE_INVALID")
         self.assert_primary_target()
-        self.docker(
-            ["exec", fresh.SOURCE, "test", "!", "-L", container_path], seconds=10
-        )
-        observed = self.docker(
-            ["exec", "--user=0", fresh.SOURCE, "sha256sum", "--", container_path],
-            seconds=10,
-        ).split()
-        if (
-            len(observed) != 2
-            or observed[0] != expected
-            or observed[1] != container_path
-        ):
-            raise fresh.Rejected("CONTAINER_TEMP_FILE_IDENTITY_CHANGED")
-        self.docker(
-            ["exec", "--user=0", fresh.SOURCE, "rm", "-f", "--", container_path],
-            seconds=10,
-        )
         self._require_remote_absent(container_path)
-        self.remote_owned_files.pop(container_path)
+        record = {
+            "schema_version": 1,
+            "kind": "controlled-primary-remote-create-v1",
+            "owner": self.owner,
+            "source_container_id": fresh.SOURCE_ID,
+            "purpose": purpose,
+            "remote_path": container_path,
+            "expected_revision": self.revision,
+            "expected_sha256": expected_sha,
+            "expected_bytes": expected_size,
+            "maximum_bytes": maximum,
+        }
+        intent_path = self.work / ("remote-create-" + purpose + ".json")
+        # Durable, create-only reservation BEFORE cp/pg_dump can create bytes.
+        # A disconnected child therefore cannot silently forget a temp secret.
+        fresh.save(intent_path, record)
+        self.remote_create_intents[container_path] = {
+            "record": record,
+            "sha256": fresh.sha(intent_path),
+        }
+
+    def _remote_file_state(self, container_path: str) -> str:
+        script = (
+            'if [ -L "$1" ]; then exit 90; fi; '
+            'if [ ! -e "$1" ]; then printf ABSENT; exit 0; fi; '
+            '[ -f "$1" ] || exit 91; '
+            'stat -c "%d:%i:%s:%u:%h:%f" -- "$1"'
+        )
+        return self.docker(
+            [
+                "exec",
+                "--user=0",
+                fresh.SOURCE,
+                "/bin/sh",
+                "-c",
+                script,
+                "controlled-owned-file-state",
+                container_path,
+            ],
+            seconds=10,
+        ).strip()
+
+    def _remove_owned_container_file(self, container_path: str):
+        intent = self.remote_create_intents.get(container_path)
+        if not isinstance(intent, dict):
+            raise fresh.Rejected("UNOWNED_CONTAINER_FILE_CLEANUP_REFUSED")
+        record = intent["record"]
+        purpose = record["purpose"]
+        expected_path, local_name = remote_artifact_specs(self.owner)[purpose]
+        intent_path = self.work / ("remote-create-" + purpose + ".json")
+        if (
+            container_path != expected_path
+            or _json(intent_path) != record
+            or fresh.sha(intent_path) != intent["sha256"]
+        ):
+            raise fresh.Rejected("PRIMARY_REMOTE_CREATE_INTENT_CHANGED")
+        self.assert_primary_target()
+        state = self._remote_file_state(container_path)
+        observed_sha = observed_size = None
+        outcome = "ABSENT"
+        if state != "ABSENT":
+            if not re.fullmatch(r"[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9]+:[0-9a-f]+", state):
+                raise fresh.Rejected("PRIMARY_REMOTE_FILE_METADATA_INVALID")
+            _device, _inode, size, uid, links, mode = state.split(":")
+            observed_size = int(size)
+            postgres_uid = self.docker(
+                ["exec", fresh.SOURCE, "id", "-u", "postgres"], seconds=10
+            ).strip()
+            if (
+                not postgres_uid.isdecimal()
+                or int(uid) not in {0, int(postgres_uid)}
+                or int(links) != 1
+                or int(mode, 16) & 0xF000 != 0x8000
+                or not 0 <= observed_size <= record["maximum_bytes"]
+            ):
+                raise fresh.Rejected("PRIMARY_REMOTE_FILE_OWNERSHIP_UNVERIFIED")
+            observed = self.docker(
+                ["exec", "--user=0", fresh.SOURCE, "sha256sum", "--", container_path],
+                seconds=15,
+            ).split()
+            if (
+                len(observed) != 2
+                or not re.fullmatch(r"[0-9a-f]{64}", observed[0])
+                or observed[1] != container_path
+            ):
+                raise fresh.Rejected("PRIMARY_REMOTE_FILE_HASH_UNVERIFIED")
+            observed_sha = observed[0]
+            expected = self.remote_owned_files.get(container_path)
+            if purpose != "backup-after":
+                expected = record["expected_sha256"]
+                if observed_size != record["expected_bytes"]:
+                    source = self.work / local_name
+                    if (
+                        source.is_symlink()
+                        or not source.is_file()
+                        or getattr(source.lstat(), "st_file_attributes", 0) & 0x400
+                        or source.stat().st_size != record["expected_bytes"]
+                        or fresh.sha(source) != record["expected_sha256"]
+                    ):
+                        raise fresh.Rejected("PRIMARY_PARTIAL_SQL_SOURCE_UNVERIFIED")
+                    # A failed copy may leave only a prefix. Verify its exact
+                    # bytes against our protected generated SQL, never its text.
+                    expected = hashlib.sha256(
+                        source.read_bytes()[:observed_size]
+                    ).hexdigest()
+            elif expected is None:
+                header = self.docker(
+                    [
+                        "exec",
+                        "--user=0",
+                        fresh.SOURCE,
+                        "head",
+                        "-c",
+                        "5",
+                        "--",
+                        container_path,
+                    ],
+                    seconds=10,
+                )
+                if header != "PGDMP"[: min(5, observed_size)]:
+                    raise fresh.Rejected("PRIMARY_PARTIAL_DUMP_HEADER_UNVERIFIED")
+            if expected is not None and observed_sha != expected:
+                raise fresh.Rejected("CONTAINER_TEMP_FILE_IDENTITY_CHANGED")
+            if self._remote_file_state(container_path) != state:
+                raise fresh.Rejected("PRIMARY_REMOTE_FILE_CHANGED_DURING_CLEANUP")
+            self.docker(
+                ["exec", "--user=0", fresh.SOURCE, "rm", "-f", "--", container_path],
+                seconds=10,
+            )
+            outcome = "OWNED_BYTES_REMOVED"
+        self._require_remote_absent(container_path)
+        fresh.save(
+            self.work / ("remote-remove-" + purpose + ".json"),
+            {
+                "schema_version": 1,
+                "kind": "controlled-primary-remote-remove-v1",
+                "owner": self.owner,
+                "source_container_id": fresh.SOURCE_ID,
+                "purpose": purpose,
+                "remote_path": container_path,
+                "create_intent_sha256": intent["sha256"],
+                "outcome": outcome,
+                "observed_sha256": observed_sha,
+                "observed_bytes": observed_size,
+            },
+        )
+        self.remote_owned_files.pop(container_path, None)
+        self.remote_create_intents.pop(container_path)
 
     def _run_sql_file(self, path: Path, container_path: str, label: str):
         self._copy_sql(path, container_path)
@@ -825,11 +1159,7 @@ class PrimaryController(current.Controller):
         dump = self.work / "primary-after.dump"
         if dump.exists() or dump.is_symlink():
             raise fresh.Rejected("PRIMARY_BACKUP_ARTIFACT_ALREADY_EXISTS")
-        self.assert_primary_target()
-        self._require_remote_absent(
-            "/tmp/controlled-primary-after-" + self.owner[:12] + ".dump"
-        )
-        self.assert_primary_target()
+        self._reserve_remote_file("backup-after")
         self.docker(
             [
                 "exec",
@@ -992,7 +1322,11 @@ class PrimaryController(current.Controller):
                 raise
             try:
                 self.assert_primary_target()
-                if self.provision_attempted and self.worker_cleanup_verified:
+                if (
+                    self.provision_attempted
+                    and self.worker_cleanup_verified
+                    and not self.proofs.get("temporary_login_drop_acknowledged")
+                ):
                     cleanup = self.work / "cleanup-role.sql"
                     if cleanup.exists():
                         self._run_sql_file(
@@ -1001,11 +1335,11 @@ class PrimaryController(current.Controller):
                         cleanup.unlink()
             except BaseException as caught:  # noqa: BLE001 -- continue fail-closed cleanup of other owned files.
                 failure = caught
-            try:
-                for container_path in list(self.remote_owned_files):
+            for container_path in list(self.remote_create_intents):
+                try:
                     self._remove_owned_container_file(container_path)
-            except BaseException as caught:  # noqa: BLE001 -- continue to stop primary after cleanup failure.
-                failure = failure or caught
+                except BaseException as caught:  # noqa: BLE001 -- still clean other exact owned paths and stop primary.
+                    failure = failure or caught
             try:
                 self.docker(["stop", "--time=30", fresh.SOURCE], seconds=45)
                 self.started_source = False
@@ -1047,6 +1381,16 @@ class PrimaryController(current.Controller):
             self.cleanup_primary()
         except BaseException as caught:  # noqa: BLE001 -- failed cleanup must be recorded in final receipt.
             success, error = False, caught
+        try:
+            remote_cleanup = remote_artifact_cleanup_evidence(
+                self.work, self.owner, self.revision
+            )
+            self.proofs["remote_artifact_cleanup"] = remote_cleanup
+            if not remote_cleanup["verified"] or self.remote_create_intents:
+                raise fresh.Rejected("PRIMARY_REMOTE_ARTIFACT_CLEANUP_UNVERIFIED")
+        except BaseException as caught:  # noqa: BLE001 -- missing/malformed/unclosed intents forbid acceptance.
+            self.proofs["primary_cleanup_uncertain"] = True
+            success, error, cleanup = False, error or caught, False
         cleanup = (
             cleanup
             and not self.started_source
