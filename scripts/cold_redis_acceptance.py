@@ -58,6 +58,46 @@ MAX_XRANGE_ENTRIES = 20_000
 MAX_XRANGE_BYTES = 32 * 1024**2
 XRANGE_PAGE_SIZE = 500
 MAX_STDOUT = 256 * 1024
+WORKER_REJECTION_FIELDS = frozenset({"state", "error", "stage", "exception_class"})
+WORKER_REJECTION_ERROR = "bounded read-only copy check failed"
+WORKER_REJECTION_STAGES = frozenset(
+    {
+        "prepare_target_mkdir",
+        "prepare_target_empty_check",
+        "prepare_target_chmod",
+        "prepare_target_chown",
+        "manifest_source",
+        "manifest_bounds",
+        "manifest_persistence",
+        "copy_source_manifest",
+        "copy_persistence_before",
+        "copy_bounds",
+        "copy_target_empty_check",
+        "copy_tree",
+        "copy_source_manifest_after",
+        "copy_target_manifest",
+        "copy_persistence_after",
+        "worker_mode",
+    }
+)
+WORKER_EXCEPTION_CLASSES = frozenset(
+    {
+        "AssertionError",
+        "ColdRedisError",
+        "FileExistsError",
+        "FileNotFoundError",
+        "IsADirectoryError",
+        "NotADirectoryError",
+        "OSError",
+        "OverflowError",
+        "PermissionError",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "ValueError",
+        "OtherError",
+    }
+)
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 REDIS_RUN_ID = re.compile(r"^[0-9a-f]{40}$")
@@ -346,7 +386,13 @@ class BoundedDocker:
         self.deadline = self.cleanup_deadline
         self.script_snapshot = None
 
-    def call(self, arguments: list[str], *, seconds: float = 20) -> str:
+    def call(
+        self,
+        arguments: list[str],
+        *,
+        seconds: float = 20,
+        allow_worker_rejection: bool = False,
+    ) -> str:
         if self.script_snapshot is not None:
             _reject_linked_path(
                 self.script_snapshot, "immutable cold-clone script snapshot"
@@ -358,12 +404,27 @@ class BoundedDocker:
                 raise ColdRedisError(
                     "cold-clone script snapshot changed before a native call"
                 )
+        if allow_worker_rejection and (
+            len(arguments) != 4
+            or arguments[:3] != ["start", "--attach", "--interactive"]
+            or re.fullmatch(
+                r"kairos-cold-redis-(?:prepare|copy|verify)-[0-9a-f]{12}",
+                arguments[3],
+            )
+            is None
+        ):
+            raise ColdRedisError(
+                "worker rejection capture is only valid for an owned worker start"
+            )
         remaining = self.deadline - time.monotonic()
         if remaining <= 4:
             raise ColdRedisError("global cold clone deadline exhausted")
         try:
-            _, output = self.native.call(
-                arguments, self.deadline, seconds=min(seconds, remaining - 3)
+            exit_code, output = self.native.call(
+                arguments,
+                self.deadline,
+                seconds=min(seconds, remaining - 3),
+                allow_failure=allow_worker_rejection,
             )
         except Exception:  # noqa: BLE001 -- sanitize host adapter failures
             raise ColdRedisError(
@@ -371,6 +432,32 @@ class BoundedDocker:
             ) from None
         if len(output.encode("utf-8")) > MAX_STDOUT:
             raise ColdRedisError("bounded Docker output exceeded its size limit")
+        if exit_code != 0:
+            if not allow_worker_rejection:
+                raise ColdRedisError("bounded Docker operation returned nonzero")
+            try:
+                rejection = json.loads(output)
+            except (TypeError, json.JSONDecodeError):
+                raise ColdRedisError(
+                    "bounded worker rejection record is malformed"
+                ) from None
+            if (
+                not isinstance(rejection, dict)
+                or set(rejection) != WORKER_REJECTION_FIELDS
+                or rejection.get("state") != "COPY_REJECTED"
+                or rejection.get("error") != WORKER_REJECTION_ERROR
+                or not isinstance(rejection.get("stage"), str)
+                or rejection.get("stage") not in WORKER_REJECTION_STAGES
+                or not isinstance(rejection.get("exception_class"), str)
+                or rejection.get("exception_class") not in WORKER_EXCEPTION_CLASSES
+            ):
+                raise ColdRedisError("bounded worker rejection record is invalid")
+            raise ColdRedisError(
+                "WORKER_REJECTED:"
+                + rejection["stage"]
+                + ":"
+                + rejection["exception_class"]
+            )
         return output
 
 
@@ -556,7 +643,11 @@ def _run_worker(
     if user:
         command[1:1] = ["--user", user]
     docker.call(command)
-    raw = docker.call(["start", "--attach", "--interactive", name], seconds=60)
+    raw = docker.call(
+        ["start", "--attach", "--interactive", name],
+        seconds=60,
+        allow_worker_rejection=True,
+    )
     try:
         value = json.loads(raw)
     except json.JSONDecodeError:
@@ -572,27 +663,35 @@ def _run_worker(
 
 def _copy_worker(mode: str) -> int:
     """Worker mode runs only in the pinned offline helper image."""
+    stage = "worker_mode"
     try:
         if mode == "prepare-target":
+            stage = "prepare_target_mkdir"
             data = Path("/data")
             data.mkdir(parents=True, exist_ok=True)
+            stage = "prepare_target_empty_check"
             if any(data.iterdir()):
                 raise ColdRedisError(
                     "new owned target must be empty before preparation"
                 )
+            stage = "prepare_target_chmod"
             data.chmod(0o700)
+            stage = "prepare_target_chown"
             os.chown(data, 999, 999)
             print(
                 json.dumps({"state": "COPY_VERIFIED", "prepared": True}, sort_keys=True)
             )
             return 0
         if mode == "manifest-only":
+            stage = "manifest_source"
             source = Path("/source")
             manifest = _manifest_tree(source)
+            stage = "manifest_bounds"
             if manifest["file_count"] < 1 or manifest["total_bytes"] > MAX_SOURCE_BYTES:
                 raise ColdRedisError(
                     "source Redis volume is empty or exceeds the copy-size bound"
                 )
+            stage = "manifest_persistence"
             print(
                 json.dumps(
                     {
@@ -607,18 +706,26 @@ def _copy_worker(mode: str) -> int:
             return 0
         if mode != "copy-hash":
             return 2
+        stage = "copy_source_manifest"
         source, target = Path("/source"), Path("/data")
         before = _manifest_tree(source)
+        stage = "copy_persistence_before"
         persistence = _persistence_layout(source)
+        stage = "copy_bounds"
         if before["file_count"] < 1 or before["total_bytes"] > MAX_SOURCE_BYTES:
             raise ColdRedisError(
                 "source Redis volume is empty or exceeds the copy-size bound"
             )
+        stage = "copy_target_empty_check"
         if any(target.iterdir()):
             raise ColdRedisError("owned snapshot volume is not empty before copy")
+        stage = "copy_tree"
         _copy_tree(source, target)
+        stage = "copy_source_manifest_after"
         after = _manifest_tree(source)
+        stage = "copy_target_manifest"
         copied = _manifest_tree(target)
+        stage = "copy_persistence_after"
         if (
             before != after
             or before["content_sha256"] != copied["content_sha256"]
@@ -643,12 +750,17 @@ def _copy_worker(mode: str) -> int:
             )
         )
         return 0
-    except Exception:  # noqa: BLE001 -- worker must not print file or payload details
+    except Exception as exc:  # noqa: BLE001 -- emit only allowlisted diagnostic tokens.
+        exception_class = type(exc).__name__
+        if exception_class not in WORKER_EXCEPTION_CLASSES:
+            exception_class = "OtherError"
         print(
             json.dumps(
                 {
                     "state": "COPY_REJECTED",
-                    "error": "bounded read-only copy check failed",
+                    "error": WORKER_REJECTION_ERROR,
+                    "stage": stage,
+                    "exception_class": exception_class,
                 }
             )
         )
@@ -1526,7 +1638,8 @@ def execute(
         docker.call(prepare)
         created.add("prepare")
         prepare_result = docker.call(
-            ["start", "--attach", "--interactive", names["prepare"]]
+            ["start", "--attach", "--interactive", names["prepare"]],
+            allow_worker_rejection=True,
         )
         if json.loads(prepare_result).get("prepared") is not True:
             raise ColdRedisError("owned snapshot volume preparation did not complete")

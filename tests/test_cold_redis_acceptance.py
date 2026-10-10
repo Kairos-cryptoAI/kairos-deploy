@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import runpy
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Self
 from unittest import mock
@@ -52,6 +54,23 @@ class _FakeConnection:
 
 
 class ColdRedisAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def _worker_rejection(
+        *,
+        stage: str = "copy_tree",
+        exception_class: str = "PermissionError",
+        **extra: object,
+    ) -> str:
+        return json.dumps(
+            {
+                "state": "COPY_REJECTED",
+                "error": cold.WORKER_REJECTION_ERROR,
+                "stage": stage,
+                "exception_class": exception_class,
+                **extra,
+            }
+        )
+
     @staticmethod
     def _git_results(
         *,
@@ -188,6 +207,149 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
             docker.begin_cleanup()
             self.assertEqual(docker.deadline, work_deadline + cold.CLEANUP_SECONDS)
             self.assertEqual(docker.call(["inspect", "owned-fixture"]), "removed")
+
+    def test_worker_permission_rejection_is_staged_and_secret_free(self) -> None:
+        data = mock.Mock()
+        data.iterdir.return_value = iter(())
+        output = io.StringIO()
+        with (
+            mock.patch.object(cold, "Path", return_value=data),
+            mock.patch.object(
+                cold.os,
+                "chown",
+                side_effect=PermissionError("secret /data path payload"),
+                create=True,
+            ),
+            redirect_stdout(output),
+        ):
+            result = cold._copy_worker("prepare-target")
+
+        rejection = json.loads(output.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(set(rejection), cold.WORKER_REJECTION_FIELDS)
+        self.assertEqual(rejection["state"], "COPY_REJECTED")
+        self.assertEqual(rejection["error"], cold.WORKER_REJECTION_ERROR)
+        self.assertEqual(rejection["stage"], "prepare_target_chown")
+        self.assertEqual(rejection["exception_class"], "PermissionError")
+        self.assertNotIn("secret", output.getvalue())
+        self.assertNotIn("/data", output.getvalue())
+        data.chmod.assert_called_once_with(0o700)
+
+    def test_copy_tree_permission_rejection_has_allowlisted_stage(self) -> None:
+        source, target = mock.Mock(), mock.Mock()
+        target.iterdir.return_value = iter(())
+        output = io.StringIO()
+        with (
+            mock.patch.object(cold, "Path", side_effect=[source, target]),
+            mock.patch.object(
+                cold,
+                "_manifest_tree",
+                return_value={"file_count": 1, "total_bytes": 1},
+            ),
+            mock.patch.object(cold, "_persistence_layout", return_value={}),
+            mock.patch.object(
+                cold,
+                "_copy_tree",
+                side_effect=PermissionError("private path must not be emitted"),
+            ),
+            redirect_stdout(output),
+        ):
+            result = cold._copy_worker("copy-hash")
+
+        rejection = json.loads(output.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(rejection["stage"], "copy_tree")
+        self.assertEqual(rejection["exception_class"], "PermissionError")
+        self.assertNotIn("private path", output.getvalue())
+
+    def test_bounded_worker_start_captures_only_exact_rejection_record(self) -> None:
+        owner = "a" * 32
+        name = "kairos-cold-redis-copy-" + owner[:12]
+        native = mock.Mock()
+        native.call.side_effect = [
+            (0, "created"),
+            (1, self._worker_rejection(stage="copy_tree")),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            docker = cold.BoundedDocker(
+                Path(temporary), cold.time.monotonic() + 30, native
+            )
+            with self.assertRaisesRegex(
+                cold.ColdRedisError, "WORKER_REJECTED:copy_tree:PermissionError"
+            ):
+                cold._run_worker(
+                    docker,
+                    name=name,
+                    owner=owner,
+                    mode="copy-hash",
+                    source=cold.SOURCE_VOLUME,
+                    target="kairos-cold-redis-data-" + owner[:12],
+                    user="999:999",
+                )
+
+        self.assertEqual(native.call.call_count, 2)
+        self.assertFalse(native.call.call_args_list[0].kwargs["allow_failure"])
+        self.assertTrue(native.call.call_args_list[1].kwargs["allow_failure"])
+
+    def test_worker_rejection_capture_rejects_malformed_or_unexpected_json(
+        self,
+    ) -> None:
+        owner = "b" * 12
+        start = [
+            "start",
+            "--attach",
+            "--interactive",
+            "kairos-cold-redis-copy-" + owner,
+        ]
+        malformed = (
+            "{secret token",
+            self._worker_rejection(secret="PRIVATE_PAYLOAD"),
+            self._worker_rejection(stage="/private/path"),
+            self._worker_rejection(exception_class="SecretError"),
+            json.dumps(
+                {
+                    "state": "COPY_VERIFIED",
+                    "prepared": True,
+                }
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for response in malformed:
+                with self.subTest(response=response[:30]):
+                    native = mock.Mock()
+                    native.call.return_value = (1, response)
+                    docker = cold.BoundedDocker(
+                        Path(temporary), cold.time.monotonic() + 30, native
+                    )
+                    with self.assertRaises(cold.ColdRedisError) as raised:
+                        docker.call(start, allow_worker_rejection=True)
+                    self.assertNotIn("secret", str(raised.exception).lower())
+                    self.assertNotIn("PRIVATE_PAYLOAD", str(raised.exception))
+
+    def test_nonzero_success_json_never_passes_and_nonworker_call_cannot_opt_in(
+        self,
+    ) -> None:
+        owner = "c" * 12
+        start = [
+            "start",
+            "--attach",
+            "--interactive",
+            "kairos-cold-redis-copy-" + owner,
+        ]
+        success = json.dumps({"state": "COPY_VERIFIED", "prepared": True})
+        with tempfile.TemporaryDirectory() as temporary:
+            native = mock.Mock()
+            native.call.return_value = (1, success)
+            docker = cold.BoundedDocker(
+                Path(temporary), cold.time.monotonic() + 30, native
+            )
+            with self.assertRaises(cold.ColdRedisError):
+                docker.call(start, allow_worker_rejection=True)
+
+            native.reset_mock()
+            with self.assertRaises(cold.ColdRedisError):
+                docker.call(["inspect", "owned-fixture"], allow_worker_rejection=True)
+            native.call.assert_not_called()
 
     def test_frozen_linux_worker_imports_without_sibling_deploy_scripts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
