@@ -39,6 +39,8 @@ PRIOR_INTERRUPTION = Path(
 PRIOR_INTERRUPTION_SHA = (
     "b5b315bf06fecb53615f267bc3a7e08e0698b32d39b2db7385fa27efed0ae074"
 )
+PRIOR_STORAGE = ROOT / "run-c02b4b44dab048a0b7abdc437f93249f/receipt.json"
+PRIOR_STORAGE_SHA = "f30fc5eb0befc5615cfbab4a3368accbb29ffa636b6293daf0df86424d79b66c"
 SOURCE = "kairos-paper-gate-timescaledb-1"
 VOLUME = "kairos-paper-gate_paper-ts-data"
 NETWORK = "kairos-paper-gate_paper-data"
@@ -92,6 +94,7 @@ MIGRATIONS = [
     "012_outbox_producer_order.sql",
 ]
 SECONDS = 1500
+MEMORY_BYTES = 4 * 1024**3
 WATCHDOG = f"(sleep {SECONDS}; kill -TERM 1) &\n"
 VIEW = (
     '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},'
@@ -216,7 +219,7 @@ def full_table_query(tables: list[str]) -> str:
     ):
         raise Rejected("EXACT_LEGACY_TABLE_CATALOG_REQUIRED")
     queries = [
-        f"SELECT json_build_object('table','{table}','count',count(*),'sha256',encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex')) FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha FROM public.\"{table}\" t) r"
+        f"SELECT json_build_object('table','{table}','count',count(*),'sha256',encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex')) FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha FROM public.\"{table}\" t) SELECT row_sha FROM row_hashes) r"
         for table in tables
     ]
     return (
@@ -435,7 +438,7 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v4.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v5.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
@@ -595,8 +598,8 @@ class Controller:
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges:true",
             "--user=postgres",
-            "--memory=3g",
-            "--memory-swap=3g",
+            "--memory=4g",
+            "--memory-swap=4g",
             "--cpus=1",
             "--pids-limit=128",
             "--label",
@@ -604,7 +607,7 @@ class Controller:
             "--label",
             "com.kairos.recovery.scope=" + SCOPE,
             "--tmpfs",
-            "/var/lib/postgresql/data:rw,nosuid,nodev,size=2g,uid=70,gid=70,mode=0700",
+            "/var/lib/postgresql/data:rw,nosuid,nodev,size=3g,uid=70,gid=70,mode=0700",
             "--tmpfs",
             "/var/run/postgresql:rw,nosuid,nodev,size=8m,uid=70,gid=70",
             "--tmpfs",
@@ -643,8 +646,8 @@ class Controller:
             or value["network"] != "none"
             or value["ports"]
             or value["privileged"]
-            or value["memory"] != 3 * 1024**3
-            or value["swap"] != 3 * 1024**3
+            or value["memory"] != MEMORY_BYTES
+            or value["swap"] != MEMORY_BYTES
             or value["cpus"] != 10**9
             or value["readonly"] is not True
             or value["caps"] != ["ALL"]
@@ -683,8 +686,8 @@ class Controller:
         name = "kairos-recovery-" + self.owner[:12] + ("-cold" if copy else "-verify")
         script = "fingerprint_root=/source\n" + FINGERPRINT
         if copy:
-            # 1.75GiB admission in a 2GiB copy tmpfs; the observed source is
-            # 1.57GiB. This leaves 256MiB for transient copy-only PG writes.
+            # Keep cold-data admission at 1.75GiB; extra bounded PGDATA space
+            # is reserved for clone-only WAL and SQL temporary files.
             script += "[ $(du -sk /source | awk '{print $1}') -lt 1835008 ]\ntar -cf /evidence/cluster.tar -C /source .\n"
         mounts = ["type=volume,src=" + VOLUME + ",dst=/source,readonly"]
         if copy:
@@ -1041,7 +1044,6 @@ class Controller:
                 "--database=" + database,
                 "--username=kairos",
                 "--install-missing",
-                "--schema=public",
                 "--heapallindexed",
                 "--parent-check",
                 "--rootdescend",
@@ -1053,7 +1055,7 @@ class Controller:
             "heapallindexed": True,
             "parent_check": True,
             "rootdescend": True,
-            "scope": "restored-clone-public",
+            "scope": "restored-clone-all-supported-heaps-and-btrees",
         }
         if self.snapshot(name, database) != baseline:
             raise Rejected("INTEGRITY_CHECK_CHANGED_PUBLIC_HISTORY")
@@ -1088,13 +1090,19 @@ class Controller:
                 "pg_amcheck",
                 "--database=" + database,
                 "--username=kairos",
-                "--schema=public",
                 "--heapallindexed",
                 "--parent-check",
                 "--rootdescend",
             ],
             seconds=240,
         )
+        self.proofs["second_pg_amcheck"] = {
+            "exit_code": 0,
+            "heapallindexed": True,
+            "parent_check": True,
+            "rootdescend": True,
+            "scope": "second-restored-clone-all-supported-heaps-and-btrees",
+        }
         self.remove(name)
         self.phase = "PRIMARY_UNCHANGED_VERIFICATION"
         after = self.source()
@@ -1403,9 +1411,20 @@ def main(argv=None):
         or interrupted.get("lease_removed") is not False
     ):
         raise Rejected("PRIOR_INTERRUPTION_CLEANUP_UNPROVEN")
+    if sha(PRIOR_STORAGE) != PRIOR_STORAGE_SHA:
+        raise Rejected("PRESERVED_STORAGE_DIAGNOSTIC_CHANGED")
+    prior_storage = json.loads(PRIOR_STORAGE.read_text())
+    if (
+        prior_storage.get("owner") != "c02b4b44dab048a0b7abdc437f93249f"
+        or prior_storage.get("result") != "FAILED_CLOSED"
+        or prior_storage.get("cleanup_verified") is not True
+        or "official_backup" in prior_storage.get("proofs", {})
+    ):
+        raise Rejected("PRIOR_STORAGE_CLEANUP_OR_NO_BACKUP_UNPROVEN")
     if args.supervise:
         return supervise(args)
     controller = Controller()
+    controller.proofs["preserved_storage_diagnostic_sha256"] = PRIOR_STORAGE_SHA
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision
     controller.proofs["preserved_prebackup_diagnostic_sha256"] = (
         args.prior_diagnostic_sha256

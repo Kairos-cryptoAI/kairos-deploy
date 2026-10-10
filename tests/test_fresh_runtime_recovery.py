@@ -46,6 +46,7 @@ class FreshRuntimeRecoveryTests(unittest.TestCase):
         tables, _ = self.table_fixture()
         query = recovery.full_table_query(tables)
         self.assertEqual(query.count(" UNION ALL "), 26)
+        self.assertEqual(query.count("WITH row_hashes AS MATERIALIZED"), 27)
         self.assertEqual(query.count(";"), 1)
         self.assertTrue(query.startswith("SELECT fingerprint FROM ("))
         self.assertNotIn("COMMIT", query)
