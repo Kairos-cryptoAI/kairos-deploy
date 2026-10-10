@@ -19,6 +19,12 @@ remain unchanged.
 - Each run has a create-only owner lease, bounded private captures, exact Docker
   identities, resource limits and assign-before-resume Windows supervision.
   Existing live owners and failed historical leases are never adopted.
+- The full clone qualification has a 30-minute outer deadline. Nine rollback
+  rehearsals have a 930-second clone-only application deadline inside a
+  960-second Linux watchdog. Ordinary/primary workers retain 330 seconds;
+  per-snapshot SQL, row, byte and resource limits are unchanged. Precommit
+  cancellation rolls back and preserves timeout classification; create-only,
+  payload-free progress artifacts identify completed verification checkpoints.
 
 ## Required sequence
 

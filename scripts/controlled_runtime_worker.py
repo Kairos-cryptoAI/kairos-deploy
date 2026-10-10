@@ -87,6 +87,21 @@ SCHEMA_QUERY = """SELECT json_build_object(
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_ROWS = 1_000_000
 MAX_SECONDS = 300
+REHEARSAL_SECONDS = 900
+REHEARSAL_PROGRESS_STAGES = (
+    "inspection_verified",
+    "after_migration_013",
+    "after_migration_014",
+    "after_migration_015",
+    "after_migration_016",
+    "after_migration_018",
+    "after_migration_026",
+    "after_quarantine",
+    "after_roles",
+    "before_commit",
+    "committed_exact_readonly",
+    "idempotence_verified",
+)
 
 
 class WorkerError(RuntimeError):
@@ -167,6 +182,27 @@ def _write_private_json(path: Path, directory: Path, value: dict[str, Any]) -> s
     except OSError:
         raise WorkerError("private receipt durability is unconfirmed") from None
     return hashlib.sha256(data).hexdigest()
+
+
+def _operation_seconds(mode: str, *, primary: bool) -> int:
+    if mode == "rehearse" and not primary:
+        return REHEARSAL_SECONDS + 30
+    return MAX_SECONDS + 30
+
+
+def _rehearsal_progress(directory: Path, stage: str, started: float) -> None:
+    if stage not in REHEARSAL_PROGRESS_STAGES:
+        raise WorkerError("rehearsal progress stage is not allowlisted")
+    _write_private_json(
+        directory / ("native-progress-" + stage + ".json"),
+        directory,
+        {
+            "kind": "controlled-runtime-rehearsal-progress-v1",
+            "stage": stage,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "primary_mutations": 0,
+        },
+    )
 
 
 def validate_plan(plan: dict[str, Any], *, database: str, primary: bool) -> None:
@@ -1122,6 +1158,8 @@ async def _atomic_transition(
             await outer.rollback()
         except BaseException:  # noqa: BLE001 -- cancellation during rollback leaves commit outcome unknown.
             raise OutcomeUnknown(intent, hit) from None
+        if isinstance(exc, asyncio.CancelledError):
+            raise
         if isinstance(exc, WorkerError):
             raise
         raise WorkerError(
@@ -1739,6 +1777,7 @@ async def _rehearse(
     directory: Path,
     manifest_sha256: str,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     directory = _safe_directory(directory)
     inspection_path = directory / "native-inspection.json"
     if inspection_path.exists():
@@ -1786,6 +1825,7 @@ async def _rehearse(
             "private_target": _private_target(inspection_target),
         }
         _write_private_json(inspection_path, directory, inspection)
+    _rehearsal_progress(directory, "inspection_verified", started)
     checkpoints = [
         "after_migration_013",
         "after_migration_014",
@@ -1823,6 +1863,7 @@ async def _rehearse(
             "checkpoint": checkpoint,
             "rollback_history_sha256": _digest(observed),
         }
+        _rehearsal_progress(directory, checkpoint, started)
     try:
         await _atomic_transition(
             connection,
@@ -1860,6 +1901,7 @@ async def _rehearse(
         }
     else:
         raise WorkerError("lost clone commit reply checkpoint did not fire")
+    _rehearsal_progress(directory, "committed_exact_readonly", started)
     # API idempotence: a second exact quarantine call and current-profile migrate
     # in a fresh outer transaction must leave the complete current snapshot same.
     probe = await _connect(
@@ -1874,6 +1916,7 @@ async def _rehearse(
         await probe.close()
     if before != _digest(after):
         raise WorkerError("second migration/quarantine idempotence snapshot changed")
+    _rehearsal_progress(directory, "idempotence_verified", started)
     success["rollback_faults"] = rollback_states
     success["idempotence_history_sha256"] = before
     success["history"] = post
@@ -2115,7 +2158,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        result = asyncio.run(asyncio.wait_for(_run(args), timeout=MAX_SECONDS + 30))
+        result = asyncio.run(
+            asyncio.wait_for(
+                _run(args), timeout=_operation_seconds(args.mode, primary=args.primary)
+            )
+        )
     except BaseException as exc:  # noqa: BLE001 -- classify cancellation and keep commit outcome fail-closed.
         # No exception message, DSN, SQL error detail, row, or secret is echoed.
         mutation_state = "unknown" if args.primary and args.mode == "apply" else 0

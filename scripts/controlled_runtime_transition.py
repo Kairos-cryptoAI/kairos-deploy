@@ -30,7 +30,7 @@ ROOT = fresh.REPO / "backups/controlled-runtime-transition-20261010"
 KIND = "controlled-runtime-transition-v1"
 CONFIRM_CLONE = "CURRENT_CONTROLLED_RUNTIME_CLONE_ONLY_NO_TRADING"
 RUNNER = "sha256:2e10e9e936eae3a4a411f65d8b0bd14670ba808368eeff94b4e24021aa291077"
-MAX_SECONDS = 1500
+MAX_SECONDS = 1800
 SCRATCH_CEILING = 256 * 1024**2
 REDIS_IMAGE = "sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103"
 OPERATOR_REQUIRED = {
@@ -379,6 +379,10 @@ class Controller(fresh.Controller):
             )
             if primary:
                 invocation += " --primary"
+        # Nine full rollback snapshots on the preserved non-empty legacy history
+        # need a separate clone-only validation budget. Primary mutation and
+        # per-snapshot SQL/row/byte guards retain their existing smaller bounds.
+        worker_seconds = 960 if mode == "rehearse" and not primary else 600
         name = "kairos-controlled-" + self.owner[:12] + "-" + mode
         if name in self.workers:
             raise fresh.Rejected("DUPLICATE_WORKER_REFUSED")
@@ -434,7 +438,9 @@ class Controller(fresh.Controller):
             "for f in /output/native-*.json /output/precommit-*.json; do "
             '[ ! -f "$f" ] || { cp "$f" /evidence/; chmod 600 /evidence/"${f##*/}"; }; done; '
             "if [ -f /output/runtime-auth.json ]; then cp /output/runtime-auth.json /evidence/; chmod 600 /evidence/runtime-auth.json; fi; "
-            "export PYTHONPATH=/tmp/installed:/operator; set +e; timeout -s KILL 600 python -B "
+            "export PYTHONPATH=/tmp/installed:/operator; set +e; timeout -s KILL "
+            + str(worker_seconds)
+            + " python -B "
             + invocation
             + "; status=$?; set -e; "
             'for f in /evidence/*.json; do [ ! -f "$f" ] || cp -n "$f" /output/; done; exit "$status"',
@@ -459,7 +465,7 @@ class Controller(fresh.Controller):
         require_worker_mounts(view, self.operator_snapshot, self.wheelhouse, output)
         verify_operator_snapshot(self.operator_snapshot, self.operator_manifest)
         self.docker(["start", name])
-        code = self.docker(["wait", name], seconds=610)
+        code = self.docker(["wait", name], seconds=worker_seconds + 10)
         # Logs are private native captures, never copied to public receipts.
         self.docker(["logs", name], allow_failure=True)
         if code != "0":

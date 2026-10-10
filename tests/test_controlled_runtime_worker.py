@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -49,6 +50,37 @@ def _plan(*, primary_authorized: bool = False) -> dict:
 
 
 class WorkerPlanTests(unittest.TestCase):
+    def test_only_clone_rehearsal_gets_a_longer_bounded_validation_budget(self) -> None:
+        self.assertEqual(worker._operation_seconds("rehearse", primary=False), 930)
+        for mode, primary in (("apply", True), ("verify", False), ("rehearse", True)):
+            self.assertEqual(worker._operation_seconds(mode, primary=primary), 330)
+
+    def test_progress_is_create_only_and_contains_only_allowlisted_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp).resolve(strict=True)
+            if os.name != "nt":
+                directory.chmod(0o700)
+            worker._rehearsal_progress(
+                directory, "inspection_verified", worker.time.monotonic()
+            )
+            value = json.loads(
+                (directory / "native-progress-inspection_verified.json").read_text()
+            )
+            self.assertEqual(
+                set(value), {"kind", "stage", "elapsed_seconds", "primary_mutations"}
+            )
+            self.assertEqual(value["primary_mutations"], 0)
+            with self.assertRaises(worker.WorkerError):
+                worker._rehearsal_progress(
+                    directory, "inspection_verified", worker.time.monotonic()
+                )
+            with self.assertRaises(worker.WorkerError):
+                worker._rehearsal_progress(
+                    directory, "../not-allowlisted", worker.time.monotonic()
+                )
+
     def test_exact_clone_plan_passes_and_primary_needs_second_gate(self) -> None:
         plan = _plan()
         worker.validate_plan(
@@ -185,6 +217,29 @@ class _FakeConnection:
 
 
 class BoundPoolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_precommit_cancellation_rolls_back_without_hiding_the_timeout(
+        self,
+    ) -> None:
+        connection = _FakeConnection()
+        connection.fetchval = mock.AsyncMock(
+            side_effect=lambda query: (
+                "kairos" if query == "SELECT current_user" else 4242
+            )
+        )
+        with (
+            mock.patch.object(worker, "_lock_boundary", new=mock.AsyncMock()),
+            mock.patch.object(
+                worker,
+                "_prepare_exact",
+                new=mock.AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await worker._atomic_transition(
+                connection, _plan(), primary=False, directory=Path("private-fixture")
+            )
+        self.assertEqual(connection.depth, 0)
+
     async def test_bound_pool_requires_outer_transaction_and_preserves_connection(
         self,
     ) -> None:
