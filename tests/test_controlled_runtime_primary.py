@@ -236,6 +236,10 @@ class PrimaryAdmissionTests(unittest.TestCase):
         )
 
     def test_signature_verification_uses_posix_file_arguments_and_exact_signer(self):
+        trusted_key = (
+            Path(__file__).resolve().parents[1]
+            / "tests/offline_outbox_reconciliation/trusted-signer.asc"
+        )
         executable = self.root / "fixture-gpg"
         executable.write_bytes(b"not executed")
         receipt = self.root / "receipt.json"
@@ -250,7 +254,10 @@ class PrimaryAdmissionTests(unittest.TestCase):
             encoding="utf-8",
         )
         controller = SimpleNamespace(work=self.root, process=mock.Mock())
-        with mock.patch.object(primary, "GPG", executable):
+        with (
+            mock.patch.object(primary, "GPG", executable),
+            mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
+        ):
             primary._verify_signature(controller, receipt, signature, "clone")
         calls = controller.process.call_args_list
         self.assertEqual(len(calls), 2)
@@ -258,7 +265,7 @@ class PrimaryAdmissionTests(unittest.TestCase):
         self.assertEqual(
             import_args[1], primary._gpg_file_arg(self.root / "gpg-home-clone")
         )
-        self.assertEqual(import_args[-1], primary._gpg_file_arg(primary.TRUSTED_KEY))
+        self.assertEqual(import_args[-1], primary._gpg_file_arg(trusted_key))
         self.assertEqual(
             verify_args[-2:],
             [primary._gpg_file_arg(signature), primary._gpg_file_arg(receipt)],
@@ -274,6 +281,7 @@ class PrimaryAdmissionTests(unittest.TestCase):
         )
         with (
             mock.patch.object(primary, "GPG", executable),
+            mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
             self.assertRaisesRegex(primary.fresh.Rejected, "SIGNER_MISMATCH"),
         ):
             primary._verify_signature(controller, receipt, signature, "other")
