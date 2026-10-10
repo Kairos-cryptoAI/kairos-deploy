@@ -246,8 +246,15 @@ class Controller(fresh.Controller):
         )
         self.proofs["disk_scratch_observed_ceiling_bytes"] = SCRATCH_CEILING
 
-    def current_cold_verify(self):
-        name = "kairos-recovery-" + self.owner[:12] + "-current-cold-verify"
+    def current_cold_verify(self, checkpoint=None):
+        # Keep repeated read-only observations in distinct create-only files.
+        if checkpoint not in (None, "before", "after"):
+            raise fresh.Rejected("CURRENT_COLD_CHECKPOINT_INVALID")
+        suffix = "" if checkpoint is None else "-" + checkpoint
+        log = self.work / ("current-cold-verify" + suffix + "-log.json")
+        if log.exists() or log.is_symlink():
+            raise fresh.Rejected("CURRENT_COLD_CHECKPOINT_ALREADY_RECORDED")
+        name = "kairos-recovery-" + self.owner[:12] + "-current-cold-verify" + suffix
         self.create(
             name,
             mounts=["type=volume,src=" + fresh.VOLUME + ",dst=/source,readonly"],
@@ -263,7 +270,7 @@ class Controller(fresh.Controller):
         )
         code = self.docker(["wait", name], seconds=180)
         lines = self.docker(["logs", name]).splitlines()
-        fresh.save(self.work / "current-cold-verify-log.json", lines)
+        fresh.save(log, lines)
         if (
             code != "0"
             or len(lines) != 3

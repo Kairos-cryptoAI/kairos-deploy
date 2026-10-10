@@ -17,6 +17,75 @@ from scripts import prepare_controlled_runtime_wheels as wheels
 
 
 class CurrentControlledTransitionTests(unittest.TestCase):
+    def test_cold_before_after_keep_distinct_immutable_observations(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = object.__new__(current.Controller)
+            controller.work, controller.owner = Path(root), "a" * 32
+            lines = ["b" * 64 + "  -", "c" * 64 + "  -", "123"]
+            controller.create = mock.Mock()
+            controller.remove = mock.Mock()
+            controller.docker = mock.Mock(
+                side_effect=lambda args, **_kwargs: (
+                    "0" if args[0] == "wait" else "\n".join(lines)
+                )
+            )
+            before = controller.current_cold_verify("before")
+            before_path = controller.work / "current-cold-verify-before-log.json"
+            recorded = before_path.read_bytes()
+            after = controller.current_cold_verify("after")
+            self.assertEqual(before, after)
+            self.assertEqual(before_path.read_bytes(), recorded)
+            self.assertEqual(
+                json.loads(
+                    (controller.work / "current-cold-verify-after-log.json").read_text()
+                ),
+                lines,
+            )
+            self.assertNotEqual(
+                controller.create.call_args_list[0].args[0],
+                controller.create.call_args_list[1].args[0],
+            )
+            self.assertEqual(controller.remove.call_count, 2)
+            with self.assertRaisesRegex(
+                current.fresh.Rejected, "CURRENT_COLD_CHECKPOINT_ALREADY_RECORDED"
+            ):
+                controller.current_cold_verify("before")
+            self.assertEqual(controller.create.call_count, 2)
+
+    def test_cold_invalid_checkpoint_refuses_before_remote_operations(self):
+        controller = object.__new__(current.Controller)
+        controller.create = mock.Mock()
+        for checkpoint in ("../after", "repeat", "", 1):
+            with (
+                self.subTest(checkpoint=checkpoint),
+                self.assertRaisesRegex(
+                    current.fresh.Rejected, "CURRENT_COLD_CHECKPOINT_INVALID"
+                ),
+            ):
+                controller.current_cold_verify(checkpoint)
+        controller.create.assert_not_called()
+
+    def test_cold_default_retains_legacy_create_only_filename(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = object.__new__(current.Controller)
+            controller.work, controller.owner = Path(root), "a" * 32
+            lines = ["b" * 64 + "  -", "c" * 64 + "  -", "123"]
+            controller.create, controller.remove = mock.Mock(), mock.Mock()
+            controller.docker = mock.Mock(
+                side_effect=lambda args, **_kwargs: (
+                    "0" if args[0] == "wait" else "\n".join(lines)
+                )
+            )
+            controller.current_cold_verify()
+            self.assertTrue(
+                (controller.work / "current-cold-verify-log.json").is_file()
+            )
+            with self.assertRaisesRegex(
+                current.fresh.Rejected, "CURRENT_COLD_CHECKPOINT_ALREADY_RECORDED"
+            ):
+                controller.current_cold_verify()
+            self.assertEqual(controller.create.call_count, 1)
+
     def test_restored_primary_plan_changes_only_authorization_without_mutating_input(
         self,
     ):
