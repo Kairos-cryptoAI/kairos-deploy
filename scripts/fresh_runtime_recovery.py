@@ -28,6 +28,7 @@ else:
 
 REPO = Path("D:/Kairos/kairos-deploy")
 ROOT = REPO / "backups/fresh-runtime-recovery-20261010"
+PRIOR_DIAGNOSTIC = ROOT / "run-4a577cdff7594788bbf41c96c6c3653e/receipt.json"
 SOURCE = "kairos-paper-gate-timescaledb-1"
 VOLUME = "kairos-paper-gate_paper-ts-data"
 NETWORK = "kairos-paper-gate_paper-data"
@@ -324,7 +325,8 @@ class Controller:
         safe(ROOT).mkdir(parents=True, exist_ok=True)
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
-        self.lease = ROOT / "fresh-recovery.execution.lock"
+        # The pre-backup capacity admission failure is preserved, not adopted.
+        self.lease = ROOT / "fresh-recovery-v2.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
@@ -568,14 +570,21 @@ class Controller:
         name = "kairos-recovery-" + self.owner[:12] + ("-cold" if copy else "-verify")
         script = "fingerprint_root=/source\n" + FINGERPRINT
         if copy:
-            script += "[ $(du -sk /source | awk '{print $1}') -lt 1572864 ]\ntar -cf /evidence/cluster.tar -C /source .\n"
+            # 1.75GiB admission in a 2GiB copy tmpfs; the observed source is
+            # 1.57GiB. This leaves 256MiB for transient copy-only PG writes.
+            script += "[ $(du -sk /source | awk '{print $1}') -lt 1835008 ]\ntar -cf /evidence/cluster.tar -C /source .\n"
         mounts = ["type=volume,src=" + VOLUME + ",dst=/source,readonly"]
         if copy:
             mounts += ["type=bind,src=" + str(self.work) + ",dst=/evidence"]
         self.create(name, mounts=mounts, entrypoint="/bin/sh", command=["-c", script])
-        if self.docker(["wait", name], seconds=120) != "0":
-            raise Rejected("COLD_COPY_OR_CONTENT_FINGERPRINT_FAILED")
+        exit_code = self.docker(["wait", name], seconds=180)
         lines = self.docker(["logs", name]).splitlines()
+        save(
+            self.work / ("cold-copy-log.json" if copy else "cold-verify-log.json"),
+            lines,
+        )
+        if exit_code != "0":
+            raise Rejected("COLD_COPY_OR_CONTENT_FINGERPRINT_FAILED")
         if (
             len(lines) != 3
             or any(not re.fullmatch(r"[0-9a-f]{64}  -", line) for line in lines[:2])
@@ -1042,6 +1051,7 @@ def main(argv=None):
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirmation")
     parser.add_argument("--expected-revision")
+    parser.add_argument("--prior-diagnostic-sha256")
     args = parser.parse_args(argv)
     if not args.execute:
         print(
@@ -1065,6 +1075,7 @@ def main(argv=None):
         or sha(OFFICIAL) != OFFICIAL_SHA
         or sha(TRANSPORT) != TRANSPORT_SHA
         or not re.fullmatch(r"[0-9a-f]{40}", args.expected_revision or "")
+        or not re.fullmatch(r"[0-9a-f]{64}", args.prior_diagnostic_sha256 or "")
     ):
         raise Rejected("EXACT_WINDOWS_CONFIRMATION_SOURCE_REQUIRED")
     state = subprocess.run(
@@ -1110,8 +1121,22 @@ def main(argv=None):
             git("show", args.expected_revision + ":" + relative)
         ).hexdigest() != sha(REPO / relative):
             raise Rejected("REVIEWED_TRACKED_RUNNER_CHANGED")
+    if sha(PRIOR_DIAGNOSTIC) != args.prior_diagnostic_sha256:
+        raise Rejected("PRESERVED_PREBACKUP_DIAGNOSTIC_CHANGED")
+    prior = json.loads(PRIOR_DIAGNOSTIC.read_text())
+    if (
+        prior.get("owner") != "4a577cdff7594788bbf41c96c6c3653e"
+        or prior.get("phase") != "COLD_READONLY_BACKUP"
+        or prior.get("result") != "FAILED_CLOSED"
+        or prior.get("cleanup_verified") is not True
+        or "official_backup" in prior.get("proofs", {})
+    ):
+        raise Rejected("PRIOR_BACKUP_NOT_DISPATCHED_OR_CLEANUP_UNPROVEN")
     controller = Controller()
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision
+    controller.proofs["preserved_prebackup_diagnostic_sha256"] = (
+        args.prior_diagnostic_sha256
+    )
     try:
         controller.run()
     except BaseException as error:  # noqa: BLE001 -- interrupts must also clean only owned clones
