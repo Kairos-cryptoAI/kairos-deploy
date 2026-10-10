@@ -6,7 +6,7 @@ name: kairos-sim
 # internal-only network and receive no secrets or external endpoint settings.
 services:
   timescaledb:
-    image: timescale/timescaledb:2.28.3-pg16@sha256:61f891691050da6032023c01ea885730eeeba06b7c17b403e7d0b9c49c37dfe9
+    image: timescale/timescaledb:2.30.2-pg16@sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f
     environment:
       POSTGRES_USER: kairos
       POSTGRES_PASSWORD: synthetic_sim_gate_only
@@ -25,7 +25,7 @@ services:
     restart: "no"
 
   redis:
-    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    image: redis:8.4.7-alpine3.22@sha256:0514fa59e3d84e2f3be66731c5401fc2a85b8ea71b49c0116c850f6a558076f4
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     tmpfs: ["/data:rw,nosuid,size=64m"]
     networks: [isolated]
