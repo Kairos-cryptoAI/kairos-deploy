@@ -816,7 +816,7 @@ class PrimaryController(current.Controller):
                 raise fresh.Rejected("PRIMARY_MOUNT_SET_CHANGED")
         for identifier in self.docker(["ps", "-q"]).splitlines():
             other = self.inspect(identifier)
-            if identifier == view["id"]:
+            if other["id"] == view["id"]:
                 continue
             if (other["labels"] or {}).get(
                 "com.docker.compose.project"

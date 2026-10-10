@@ -235,6 +235,139 @@ class PrimaryAdmissionTests(unittest.TestCase):
             ],
         )
 
+    def test_primary_target_skips_source_using_inspected_full_id(self):
+        source = {
+            "id": primary.fresh.SOURCE_ID,
+            "image": primary.fresh.IMAGE_ID,
+            "labels": {
+                "com.docker.compose.project": "kairos-paper-gate",
+                "com.docker.compose.service": "timescaledb",
+            },
+            "state": {
+                "Status": "running",
+                "Running": True,
+                "Paused": False,
+                "Restarting": False,
+                "Dead": False,
+            },
+            "privileged": False,
+            "ports": {},
+            "networks": {primary.fresh.NETWORK: {}},
+            "mounts": [
+                {
+                    "Destination": "/var/lib/postgresql/data",
+                    "Name": primary.fresh.VOLUME,
+                    "Type": "volume",
+                }
+            ],
+        }
+        controller = object.__new__(primary.PrimaryController)
+        controller.inspect = mock.Mock(return_value=source)
+        controller.docker = mock.Mock(return_value=primary.fresh.SOURCE_ID[:12] + "\n")
+
+        controller.assert_primary_target()
+
+        self.assertEqual(
+            [call.args[0] for call in controller.inspect.call_args_list],
+            [primary.fresh.SOURCE, primary.fresh.SOURCE_ID[:12]],
+        )
+
+    def test_primary_target_still_rejects_separate_protected_container(self):
+        source = {
+            "id": primary.fresh.SOURCE_ID,
+            "image": primary.fresh.IMAGE_ID,
+            "labels": {
+                "com.docker.compose.project": "kairos-paper-gate",
+                "com.docker.compose.service": "timescaledb",
+            },
+            "state": {
+                "Status": "running",
+                "Running": True,
+                "Paused": False,
+                "Restarting": False,
+                "Dead": False,
+            },
+            "privileged": False,
+            "ports": {},
+            "networks": {primary.fresh.NETWORK: {}},
+            "mounts": [
+                {
+                    "Destination": "/var/lib/postgresql/data",
+                    "Name": primary.fresh.VOLUME,
+                    "Type": "volume",
+                }
+            ],
+        }
+        other = {
+            **source,
+            "id": "b" * 64,
+            "labels": {
+                "com.docker.compose.project": "kairos-paper-gate",
+                "com.docker.compose.service": "strategy-engine",
+            },
+            "mounts": [
+                {
+                    "Destination": "/var/lib/postgresql/data",
+                    "Name": primary.fresh.VOLUME,
+                    "Type": "volume",
+                }
+            ],
+        }
+        controller = object.__new__(primary.PrimaryController)
+        controller.inspect = mock.Mock(side_effect=[source, other])
+        controller.docker = mock.Mock(return_value=primary.fresh.SOURCE_ID[:12] + "\n")
+
+        with self.assertRaisesRegex(
+            primary.fresh.Rejected, "PROTECTED_PRIMARY_SERVICE_RUNNING"
+        ):
+            controller.assert_primary_target()
+
+        self.assertEqual(
+            [call.args[0] for call in controller.inspect.call_args_list],
+            [primary.fresh.SOURCE, primary.fresh.SOURCE_ID[:12]],
+        )
+
+    def test_primary_target_rejects_other_container_using_data_volume(self):
+        source = {
+            "id": primary.fresh.SOURCE_ID,
+            "image": primary.fresh.IMAGE_ID,
+            "labels": {
+                "com.docker.compose.project": "kairos-paper-gate",
+                "com.docker.compose.service": "timescaledb",
+            },
+            "state": {
+                "Status": "running",
+                "Running": True,
+                "Paused": False,
+                "Restarting": False,
+                "Dead": False,
+            },
+            "privileged": False,
+            "ports": {},
+            "networks": {primary.fresh.NETWORK: {}},
+            "mounts": [
+                {
+                    "Destination": "/var/lib/postgresql/data",
+                    "Name": primary.fresh.VOLUME,
+                    "Type": "volume",
+                }
+            ],
+        }
+        other = {
+            **source,
+            "id": "b" * 64,
+            "labels": {},
+            "networks": {},
+        }
+        controller = object.__new__(primary.PrimaryController)
+        controller.inspect = mock.Mock(side_effect=[source, other])
+        controller.docker = mock.Mock(return_value=primary.fresh.SOURCE_ID[:12] + "\n")
+
+        with self.assertRaisesRegex(
+            primary.fresh.Rejected, "PRIMARY_DATA_VOLUME_IN_USE"
+        ):
+            controller.assert_primary_target()
+
     def test_signature_verification_uses_posix_file_arguments_and_exact_signer(self):
         # This is an argument/status parser unit fixture, not a GPG acceptance.
         # Do not bind it to a particular checkout's key-file line endings.
