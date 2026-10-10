@@ -347,6 +347,10 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
         command = cold._worker_command("prepare-target", target=target)
         self.assertIn("--user=0:0", command)
         self.assertIn("--cap-drop=ALL", command)
+        self.assertEqual(
+            [value for value in command if value.startswith("--cap-add=")],
+            ["--cap-add=CHOWN"],
+        )
         self.assertIn("--network=none", command)
         self.assertIn("--read-only", command)
         self.assertIn(f"type=volume,src={target},dst=/data", command)
@@ -369,14 +373,17 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
                 with (
                     mock.patch.object(cold, "Path", return_value=data),
                     mock.patch("builtins.print"),
+                    mock.patch.object(cold.os, "chown", create=True) as chown,
                 ):
                     result = cold._copy_worker("prepare-target")
                 if entries:
                     self.assertEqual(result, 1)
                     data.chmod.assert_not_called()
+                    chown.assert_not_called()
                 else:
                     self.assertEqual(result, 0)
-                    data.chmod.assert_called_once_with(0o777)
+                    data.chmod.assert_called_once_with(0o700)
+                    chown.assert_called_once_with(data, 999, 999)
 
     def test_snapshot_volume_collisions_and_foreign_labels_block_writable_mount(self):
         owner = "a" * 32

@@ -476,9 +476,10 @@ def _worker_command(
         ):
             raise ColdRedisError("preparation requires only a new owned target volume")
         # The pinned image's default unprivileged UID cannot chmod a new
-        # root-owned Docker volume. Root is confined to this empty owned target,
-        # with all capabilities dropped and no original volume mounted.
-        command += ["--user=0:0"]
+        # root-owned Docker volume. Only CHOWN is restored, exclusively for
+        # transferring this empty owned target to the fixed Redis copy UID.
+        # No original volume is mounted and every other capability stays dropped.
+        command += ["--user=0:0", "--cap-add=CHOWN"]
     if source:
         command += ["--mount", f"type=volume,src={source},dst=/source,readonly"]
     if target:
@@ -579,7 +580,8 @@ def _copy_worker(mode: str) -> int:
                 raise ColdRedisError(
                     "new owned target must be empty before preparation"
                 )
-            data.chmod(0o777)
+            data.chmod(0o700)
+            os.chown(data, 999, 999)
             print(
                 json.dumps({"state": "COPY_VERIFIED", "prepared": True}, sort_keys=True)
             )
