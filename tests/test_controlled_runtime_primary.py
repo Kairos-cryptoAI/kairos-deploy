@@ -6,7 +6,8 @@ import io
 import json
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
 from unittest import mock
 
 from scripts import controlled_runtime_primary as primary
@@ -233,6 +234,68 @@ class PrimaryAdmissionTests(unittest.TestCase):
                 ["exec", primary.fresh.SOURCE, "test", "!", "-L", "/tmp/owned.sql"],
             ],
         )
+
+    def test_signature_verification_uses_posix_file_arguments_and_exact_signer(self):
+        executable = self.root / "fixture-gpg"
+        executable.write_bytes(b"not executed")
+        receipt = self.root / "receipt.json"
+        signature = self.root / "receipt.json.asc"
+        status = self.root / "clone-gpg-verify.stdout"
+        status.write_text(
+            "[GNUPG:] VALIDSIG "
+            + primary.SIGNER
+            + " 2026-10-10 0 0 4 0 22 8 00 "
+            + primary.SIGNER
+            + "\n",
+            encoding="utf-8",
+        )
+        controller = SimpleNamespace(work=self.root, process=mock.Mock())
+        with mock.patch.object(primary, "GPG", executable):
+            primary._verify_signature(controller, receipt, signature, "clone")
+        calls = controller.process.call_args_list
+        self.assertEqual(len(calls), 2)
+        import_args, verify_args = calls[0].args[1], calls[1].args[1]
+        self.assertEqual(
+            import_args[1], primary._gpg_file_arg(self.root / "gpg-home-clone")
+        )
+        self.assertEqual(import_args[-1], primary._gpg_file_arg(primary.TRUSTED_KEY))
+        self.assertEqual(
+            verify_args[-2:],
+            [primary._gpg_file_arg(signature), primary._gpg_file_arg(receipt)],
+        )
+        self.assertIn("--no-auto-key-retrieve", verify_args)
+        self.assertIn("--no-autostart", import_args)
+        self.assertIn("--no-autostart", verify_args)
+        self.assertTrue(all("\\" not in value for value in import_args + verify_args))
+
+        # A valid signature from any other primary fingerprint is not accepted.
+        (self.root / "other-gpg-verify.stdout").write_text(
+            status.read_text().replace(primary.SIGNER, "F" * 40)
+        )
+        with (
+            mock.patch.object(primary, "GPG", executable),
+            self.assertRaisesRegex(primary.fresh.Rejected, "SIGNER_MISMATCH"),
+        ):
+            primary._verify_signature(controller, receipt, signature, "other")
+
+    def test_gpg_file_paths_map_local_drives_and_reject_relative_or_unc(self):
+        self.assertEqual(
+            primary._gpg_file_arg(PureWindowsPath("D:/Kairos/receipt.json")),
+            "/d/Kairos/receipt.json",
+        )
+        self.assertEqual(
+            primary._gpg_file_arg(PurePosixPath("/tmp/receipt.json")),
+            "/tmp/receipt.json",
+        )
+        for path in (
+            PureWindowsPath("receipt.json"),
+            PureWindowsPath("//server/share/receipt.json"),
+        ):
+            with (
+                self.subTest(path=str(path)),
+                self.assertRaises(primary.fresh.Rejected),
+            ):
+                primary._gpg_file_arg(path)
 
 
 if __name__ == "__main__":

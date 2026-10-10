@@ -52,6 +52,110 @@ class _FakeConnection:
 
 
 class ColdRedisAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def _git_results(
+        *,
+        revision: str = "a" * 40,
+        branch: str = "main",
+        signature: int = 0,
+        tracked: int = 0,
+        unchanged: int = 0,
+    ) -> list[mock.Mock]:
+        return [
+            mock.Mock(returncode=0, stdout=revision + "\n"),
+            mock.Mock(returncode=0, stdout=branch + "\n"),
+            mock.Mock(returncode=signature, stdout=""),
+            mock.Mock(returncode=tracked, stdout=""),
+            mock.Mock(returncode=unchanged, stdout=""),
+        ]
+
+    def _verify_git_results(self, results: list[mock.Mock]) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            scripts = repository / "scripts"
+            scripts.mkdir(parents=True)
+            script = scripts / "cold_redis_acceptance.py"
+            script.write_text("committed source", encoding="utf-8")
+            with (
+                mock.patch.object(cold, "__file__", str(script)),
+                mock.patch.object(cold.subprocess, "run", side_effect=results),
+            ):
+                cold._verify_deploy_head("a" * 40)
+
+    def test_deploy_verification_uses_one_exact_git_prefix_and_sanitized_env(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repo"
+            scripts = repository / "scripts"
+            scripts.mkdir(parents=True)
+            script = scripts / "cold_redis_acceptance.py"
+            script.write_text("committed source", encoding="utf-8")
+            environment = {
+                "SYSTEMROOT": "system-root",
+                "WINDIR": "windows-root",
+                "TEMP": "temp-dir",
+                "TMP": "tmp-dir",
+                "PATH": cold.os.environ.get("PATH", ""),
+                "HOME": "must-not-be-inherited",
+                "GIT_CONFIG_GLOBAL": "must-not-be-inherited",
+            }
+            with (
+                mock.patch.object(cold, "__file__", str(script)),
+                mock.patch.dict(cold.os.environ, environment, clear=True),
+                mock.patch.object(
+                    cold.subprocess,
+                    "run",
+                    side_effect=self._git_results(),
+                ) as run,
+            ):
+                cold._verify_deploy_head("a" * 40)
+
+            expected_prefix = cold._git_command_prefix(repository)
+            self.assertEqual(run.call_count, 5)
+            for call in run.call_args_list:
+                arguments = call.args[0]
+                self.assertEqual(arguments[: len(expected_prefix)], expected_prefix)
+                self.assertEqual(call.kwargs["cwd"], repository.resolve())
+                self.assertEqual(
+                    call.kwargs["env"],
+                    {
+                        key: value
+                        for key, value in environment.items()
+                        if key in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATH"}
+                    },
+                )
+                self.assertFalse(call.kwargs["shell"])
+            self.assertIn(
+                f"safe.directory={repository.resolve().as_posix()}", expected_prefix
+            )
+            self.assertTrue(
+                any(item.startswith("gpg.program=") for item in expected_prefix)
+            )
+            if cold.os.name == "nt":
+                self.assertEqual(expected_prefix[0], str(cold.WINDOWS_GIT))
+                self.assertEqual(
+                    expected_prefix[-1], f"gpg.program={cold.WINDOWS_GPG.as_posix()}"
+                )
+            else:
+                self.assertFalse(
+                    any("Program Files" in item for item in expected_prefix)
+                )
+
+    def test_deploy_verification_rejects_bad_signature_branch_revision_and_source(
+        self,
+    ) -> None:
+        cases = (
+            ("signature", self._git_results(signature=1)),
+            ("branch", self._git_results(branch="feature")),
+            ("revision", self._git_results(revision="b" * 40)),
+            ("untracked", self._git_results(tracked=1)),
+            ("changed", self._git_results(unchanged=1)),
+        )
+        for label, results in cases:
+            with self.subTest(label=label), self.assertRaises(cold.ColdRedisError):
+                self._verify_git_results(results)
+
     def test_script_snapshot_change_blocks_native_work_before_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

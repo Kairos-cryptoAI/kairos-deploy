@@ -64,6 +64,8 @@ REDIS_RUN_ID = re.compile(r"^[0-9a-f]{40}$")
 STREAM_ID = re.compile(r"^[0-9]{1,20}-[0-9]{1,10}$")
 TOPIC = re.compile(r"^[A-Za-z0-9._:-]{1,250}$")
 MESSAGE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,512}$")
+WINDOWS_GIT = Path(r"C:\Program Files\Git\cmd\git.exe")
+WINDOWS_GPG = Path(r"C:\Program Files\Git\usr\bin\gpg.exe")
 
 
 class ColdRedisError(RuntimeError):
@@ -1246,6 +1248,7 @@ def _remove_owned(
 
 def _verify_deploy_head(expected_revision: str) -> None:
     repository = Path(__file__).resolve().parents[1]
+    git_prefix = _git_command_prefix(repository)
     command_env = {
         key: value
         for key, value in os.environ.items()
@@ -1253,7 +1256,7 @@ def _verify_deploy_head(expected_revision: str) -> None:
     }
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [*git_prefix, "rev-parse", "HEAD"],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1265,7 +1268,7 @@ def _verify_deploy_head(expected_revision: str) -> None:
             env=command_env,
         )
         branch = subprocess.run(
-            ["git", "branch", "--show-current"],
+            [*git_prefix, "branch", "--show-current"],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1277,7 +1280,7 @@ def _verify_deploy_head(expected_revision: str) -> None:
             env=command_env,
         )
         signature = subprocess.run(
-            ["git", "verify-commit", "HEAD"],
+            [*git_prefix, "verify-commit", "HEAD"],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1302,7 +1305,7 @@ def _verify_deploy_head(expected_revision: str) -> None:
     relative_source = "scripts/cold_redis_acceptance.py"
     try:
         tracked = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", relative_source],
+            [*git_prefix, "ls-files", "--error-unmatch", "--", relative_source],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1313,7 +1316,7 @@ def _verify_deploy_head(expected_revision: str) -> None:
             env=command_env,
         )
         unchanged = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--", relative_source],
+            [*git_prefix, "diff", "--quiet", "HEAD", "--", relative_source],
             cwd=repository,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1331,6 +1334,28 @@ def _verify_deploy_head(expected_revision: str) -> None:
         raise ColdRedisError(
             "cold-clone implementation is not the exact committed Deploy source"
         )
+
+
+def _git_command_prefix(repository: Path) -> list[str]:
+    """Pin Git/GPG on Windows and scope safe.directory to this exact checkout."""
+    resolved_repository = repository.resolve(strict=True).as_posix()
+    if os.name == "nt":
+        git_executable, gpg_executable = WINDOWS_GIT, WINDOWS_GPG
+        if not git_executable.is_file() or not gpg_executable.is_file():
+            raise ColdRedisError("pinned Windows Git/GPG executables are unavailable")
+    else:
+        git_found, gpg_found = shutil.which("git"), shutil.which("gpg")
+        if git_found is None or gpg_found is None:
+            raise ColdRedisError("Git/GPG executables are unavailable")
+        git_executable = Path(git_found).resolve(strict=True)
+        gpg_executable = Path(gpg_found).resolve(strict=True)
+    return [
+        str(git_executable),
+        "-c",
+        f"safe.directory={resolved_repository}",
+        "-c",
+        f"gpg.program={gpg_executable.as_posix()}",
+    ]
 
 
 def execute(

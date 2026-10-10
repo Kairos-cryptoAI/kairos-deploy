@@ -512,6 +512,19 @@ def _rooted(path: Path, parent: Path) -> Path:
     return resolved
 
 
+def _gpg_file_arg(path: Path) -> str:
+    """Git's MSYS GPG expects /d/... instead of native Windows drive paths."""
+    if not path.is_absolute():
+        raise fresh.Rejected("ABSOLUTE_GPG_FILE_PATH_REQUIRED")
+    value = path.as_posix()
+    drive = re.fullmatch(r"([A-Za-z]):/(.+)", value)
+    if drive:
+        return "/" + drive[1].lower() + "/" + drive[2]
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    raise fresh.Rejected("LOCAL_GPG_FILE_PATH_REQUIRED")
+
+
 def _verify_signature(
     controller: fresh.Controller, receipt: Path, signature: Path, label: str
 ) -> None:
@@ -529,11 +542,12 @@ def _verify_signature(
         resolved_gpg,
         [
             "--homedir",
-            str(home),
+            _gpg_file_arg(home),
             "--batch",
             "--no-options",
+            "--no-autostart",
             "--import",
-            str(TRUSTED_KEY),
+            _gpg_file_arg(TRUSTED_KEY),
         ],
         15,
         label=label + "-gpg-import",
@@ -542,14 +556,15 @@ def _verify_signature(
         resolved_gpg,
         [
             "--homedir",
-            str(home),
+            _gpg_file_arg(home),
             "--batch",
             "--no-options",
+            "--no-autostart",
             "--no-auto-key-retrieve",
             "--status-fd=1",
             "--verify",
-            str(signature),
-            str(receipt),
+            _gpg_file_arg(signature),
+            _gpg_file_arg(receipt),
         ],
         20,
         label=label + "-gpg-verify",
