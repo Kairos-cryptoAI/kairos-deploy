@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from scripts import controlled_runtime_transition as current
 from scripts import prepare_controlled_runtime_wheels as wheels
@@ -43,7 +44,12 @@ class CurrentControlledTransitionTests(unittest.TestCase):
                     }
                 )
             value = {"schema_version": 1, "packages": packages}
-            self.assertEqual(current.require_manifest(value, directory), value)
+            # The fixed Windows native adapter is tested separately. Only
+            # manifest policy and owned fixture bytes are under test here.
+            with mock.patch.object(
+                current.fresh, "safe", side_effect=lambda path: path.absolute()
+            ):
+                self.assertEqual(current.require_manifest(value, directory), value)
             for bad in (
                 value | {"authority": "LIVE"},
                 value | {"schema_version": 2},

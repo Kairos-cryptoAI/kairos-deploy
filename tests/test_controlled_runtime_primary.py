@@ -31,6 +31,18 @@ class PrimaryAdmissionTests(unittest.TestCase):
         self.wheelhouse.mkdir()
         self.old_root = primary.current.ROOT
         primary.current.ROOT = self.clone_root
+        # Host-native admission keeps its fixed Windows paths. These tests
+        # exercise signed-document policy using only owned temporary fixtures.
+        self.path_patch = mock.patch.object(
+            primary.fresh, "safe", side_effect=lambda path: path.absolute()
+        )
+        self.path_patch.start()
+        self.addCleanup(self.path_patch.stop)
+        self.repo_patch = mock.patch.object(
+            primary.fresh, "REPO", Path(primary.__file__).resolve().parent.parent
+        )
+        self.repo_patch.start()
+        self.addCleanup(self.repo_patch.stop)
 
     def tearDown(self):
         primary.current.ROOT = self.old_root

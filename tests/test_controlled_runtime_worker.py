@@ -126,7 +126,7 @@ class WorkerPlanTests(unittest.TestCase):
 
     def test_private_artifacts_are_create_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp).resolve(strict=True)
             if os.name != "nt":
                 directory.chmod(0o700)
             safe = worker._safe_directory(directory)
@@ -256,7 +256,7 @@ class RestoredPrimaryVerificationTests(unittest.IsolatedAsyncioTestCase):
             "schema_fingerprint_sha256": "c" * 64,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp).resolve(strict=True)
             if os.name != "nt":
                 directory.chmod(0o700)
             manifest_sha = "d" * 64
@@ -295,7 +295,7 @@ class RestoredPrimaryVerificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_refuses_mismatched_restored_history(self) -> None:
         plan = _plan()
         with tempfile.TemporaryDirectory() as tmp:
-            directory = Path(tmp)
+            directory = Path(tmp).resolve(strict=True)
             if os.name != "nt":
                 directory.chmod(0o700)
             worker._write_private_json(
