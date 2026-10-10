@@ -6,8 +6,8 @@ import contextlib
 import hashlib
 import io
 import json
-import tempfile
 import tarfile
+import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +17,60 @@ from scripts import fresh_runtime_recovery as recovery
 
 
 class FreshRuntimeRecoveryTests(unittest.TestCase):
+    def table_fixture(self):
+        tables = [f"fixture_{number:02d}" for number in range(27)]
+        rows = [{"table": table, "count": 0, "sha256": "a" * 64} for table in tables]
+        return tables, rows
+
+    def test_all_table_fingerprints_are_required_and_exactly_bound(self):
+        tables, rows = self.table_fixture()
+        encoded = "\n".join(json.dumps(row) for row in rows)
+        self.assertEqual(recovery.parse_table_digests(encoded, tables), rows)
+        for bad in (
+            [],
+            rows[:-1],
+            rows + rows[:1],
+            [rows[0]] * 27,
+            list(reversed(rows)),
+            [{**row, "count": True} for row in rows],
+            [{**row, "count": -1} for row in rows],
+            [{**row, "sha256": "not-a-hash"} for row in rows],
+            [{**row, "extra": 1} for row in rows],
+        ):
+            with self.subTest(bad=bad), self.assertRaises(recovery.Rejected):
+                recovery.parse_table_digests(
+                    "\n".join(json.dumps(row) for row in bad), tables
+                )
+
+    def test_one_result_select_covers_all_tables_in_one_connection(self):
+        tables, _ = self.table_fixture()
+        query = recovery.full_table_query(tables)
+        self.assertEqual(query.count(" UNION ALL "), 26)
+        self.assertEqual(query.count(";"), 1)
+        self.assertTrue(query.startswith("SELECT fingerprint FROM ("))
+        self.assertNotIn("COMMIT", query)
+        for bad in (tables[:-1], [tables[0]] * 27, [*tables[:-1], 'unsafe"; DROP']):
+            with self.subTest(tables=bad), self.assertRaises(recovery.Rejected):
+                recovery.full_table_query(bad)
+        controller = object.__new__(recovery.Controller)
+        controller.owned = {"isolated": []}
+        calls = []
+        controller.docker = lambda args, **kwargs: calls.append((args, kwargs)) or ""
+        controller.sql("isolated", "clone", ["BEGIN;", query, "COMMIT;"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            [arg for arg in calls[0][0] if arg.startswith("--command=")],
+            ["--command=BEGIN;", "--command=" + query, "--command=COMMIT;"],
+        )
+
+    def test_linux_watchdog_has_fixed_own_pid1_target(self):
+        self.assertEqual(recovery.WATCHDOG, "(sleep 1500; kill -TERM 1) &\n")
+        self.assertEqual(recovery.SECONDS, 1500)
+
+    def test_cold_fingerprint_rejects_upstream_pipeline_errors(self):
+        self.assertTrue(recovery.FINGERPRINT.startswith("set -eu\nset -o pipefail\n"))
+        self.assertIn("cluster_state=$(pg_controldata", recovery.FINGERPRINT)
+
     def test_copy_directory_times_are_restored_deepest_first(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.tar"

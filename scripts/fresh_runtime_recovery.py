@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tarfile
 import time
 import uuid
@@ -32,6 +33,12 @@ ROOT = REPO / "backups/fresh-runtime-recovery-20261010"
 PRIOR_DIAGNOSTIC = ROOT / "run-4a577cdff7594788bbf41c96c6c3653e/receipt.json"
 PRIOR_COPY_DIAGNOSTIC = ROOT / "run-aebef6e118d94b289a92b685fc22e4fe/receipt.json"
 PRIOR_COPY_SHA = "63531497e9f13d9c1721a81b021a999aebd7891b68c8d702609141139cd3444a"
+PRIOR_INTERRUPTION = Path(
+    "D:/Kairos/runtime/archive-clone-20261010/interrupted-21182aa7d47e406980908ea62e120700/receipt.json"
+)
+PRIOR_INTERRUPTION_SHA = (
+    "b5b315bf06fecb53615f267bc3a7e08e0698b32d39b2db7385fa27efed0ae074"
+)
 SOURCE = "kairos-paper-gate-timescaledb-1"
 VOLUME = "kairos-paper-gate_paper-ts-data"
 NETWORK = "kairos-paper-gate_paper-data"
@@ -85,6 +92,7 @@ MIGRATIONS = [
     "012_outbox_producer_order.sql",
 ]
 SECONDS = 1500
+WATCHDOG = f"(sleep {SECONDS}; kill -TERM 1) &\n"
 VIEW = (
     '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},'
     '"state":{{json .State}},"labels":{{json .Config.Labels}},'
@@ -110,13 +118,21 @@ PG = [
     "timescaledb.telemetry_level=off",
 ]
 FINGERPRINT = r"""set -eu
+set -o pipefail
 cd "$fingerprint_root"
-[ "$(stat -c %u .)" = "$(id -u)" ]
-[ -z "$(find . -type l -print -quit)" ]
-[ -z "$(find . ! -type d ! -type f -print -quit)" ]
+source_uid=$(stat -c %u .)
+own_uid=$(id -u)
+[ "$source_uid" = "$own_uid" ]
+links=$(find . -type l -print -quit)
+special=$(find . ! -type d ! -type f -print -quit)
+[ -z "$links" ]
+[ -z "$special" ]
 [ ! -e postmaster.pid ]
-[ -f PG_VERSION ] && [ "$(cat PG_VERSION)" = 16 ]
-[ "$(pg_controldata . | sed -n 's/^Database cluster state: *//p')" = 'shut down' ]
+[ -f PG_VERSION ]
+version=$(cat PG_VERSION)
+[ "$version" = 16 ]
+cluster_state=$(pg_controldata . | sed -n 's/^Database cluster state: *//p')
+[ "$cluster_state" = 'shut down' ]
 find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum
 find . -print0 | sort -z | xargs -0 stat -c '%n|%a|%u|%g|%Y' | sha256sum
 find . -type f -print0 | xargs -0 stat -c %s | awk '{total+=$1} END {printf "%.0f\n",total}'
@@ -170,6 +186,45 @@ def digest(value) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def full_table_query(tables: list[str]) -> str:
+    if (
+        len(tables) != 27
+        or len(set(tables)) != 27
+        or any(not re.fullmatch(r"[a-z_][a-z0-9_]*", table) for table in tables)
+    ):
+        raise Rejected("EXACT_LEGACY_TABLE_CATALOG_REQUIRED")
+    queries = [
+        f"SELECT json_build_object('table','{table}','count',count(*),'sha256',encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex')) FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha FROM public.\"{table}\" t) r"
+        for table in tables
+    ]
+    return (
+        "SELECT fingerprint FROM ("
+        + " UNION ALL ".join(queries)
+        + ") AS records(fingerprint) ORDER BY fingerprint->>'table';"
+    )
+
+
+def parse_table_digests(raw: str, tables: list[str]) -> list[dict]:
+    try:
+        rows = [json.loads(line) for line in raw.splitlines()]
+    except (ValueError, TypeError) as error:
+        raise Rejected("FULL_TABLE_DIGEST_SHAPE_REQUIRED") from error
+    if len(rows) != len(tables) or len(tables) != 27 or len(set(tables)) != 27:
+        raise Rejected("FULL_TABLE_DIGEST_COVERAGE_REQUIRED")
+    for table, row in zip(sorted(tables), rows, strict=True):
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"table", "count", "sha256"}
+            or row["table"] != table
+            or type(row["count"]) is not int
+            or row["count"] < 0
+            or not isinstance(row["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+        ):
+            raise Rejected("FULL_TABLE_DIGEST_SHAPE_REQUIRED")
+    return rows
 
 
 def safe(path: Path) -> Path:
@@ -360,7 +415,7 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v3.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v4.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
@@ -475,6 +530,10 @@ class Controller:
                 raise Rejected("UNKNOWN_PRIMARY_MOUNT")
         for identifier in self.docker(["ps", "-q"]).splitlines():
             running = self.inspect(identifier)
+            if (running["labels"] or {}).get("com.kairos.recovery.scope") == SCOPE and (
+                running["labels"] or {}
+            ).get(OWNER_LABEL) != self.owner:
+                raise Rejected("OTHER_FRESH_RECOVERY_ALREADY_RUNNING")
             for mount in running["mounts"]:
                 if mount.get("Name") == VOLUME and not (
                     running["name"].lstrip("/") in self.owned
@@ -610,7 +669,12 @@ class Controller:
         mounts = ["type=volume,src=" + VOLUME + ",dst=/source,readonly"]
         if copy:
             mounts += ["type=bind,src=" + str(self.work) + ",dst=/evidence"]
-        self.create(name, mounts=mounts, entrypoint="/bin/sh", command=["-c", script])
+        self.create(
+            name,
+            mounts=mounts,
+            entrypoint="/usr/bin/timeout",
+            command=["-s", "KILL", "170", "/bin/sh", "-c", script],
+        )
         exit_code = self.docker(["wait", name], seconds=180)
         lines = self.docker(["logs", name]).splitlines()
         save(
@@ -649,7 +713,10 @@ class Controller:
                 "--no-align",
                 "--quiet",
                 "--set=ON_ERROR_STOP=1",
-                "--command=" + query,
+                *[
+                    "--command=" + item
+                    for item in ([query] if isinstance(query, str) else query)
+                ],
             ],
             seconds=seconds,
         )
@@ -692,11 +759,6 @@ class Controller:
             not re.fullmatch(r"[a-z_][a-z0-9_]*", t) for t in rows
         ):
             raise Rejected("EXACT_LEGACY_TABLE_CATALOG_REQUIRED")
-        queries = []
-        for table in rows:
-            queries.append(
-                f"SELECT json_build_object('table','{table}','count',count(*),'sha256',encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex')) FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha FROM public.\"{table}\" t) r;"
-            )
         sequence_names = self.sql(
             name,
             database,
@@ -705,15 +767,16 @@ class Controller:
         for seq in sequence_names:
             if not re.fullmatch(r"[a-z_][a-z0-9_]*", seq):
                 raise Rejected("UNSAFE_SEQUENCE_NAME")
-        transaction = (
-            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL timezone='UTC'; SET LOCAL statement_timeout='180s'; "
-            + "\n".join(queries)
-            + " COMMIT;"
-        )
-        data = [
-            json.loads(line)
-            for line in self.sql(name, database, transaction, seconds=240).splitlines()
+        # One result-producing SELECT, one connection and one MVCC snapshot.
+        # Never accept equally empty output as proof of full-table equality.
+        transaction = [
+            "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET LOCAL timezone='UTC'; SET LOCAL statement_timeout='360s';",
+            full_table_query(rows),
+            "COMMIT;",
         ]
+        data = parse_table_digests(
+            self.sql(name, database, transaction, seconds=480), rows
+        )
         schema = json.loads(self.sql(name, database, SCHEMA))
         sequences = {
             seq: self.sql(
@@ -828,7 +891,11 @@ class Controller:
             name,
             mounts=["type=bind,src=" + str(dump) + ",dst=/archive.dump,readonly"],
             database=database,
-            command=PG,
+            entrypoint="/bin/sh",
+            command=[
+                "-c",
+                WATCHDOG + "exec /usr/local/bin/docker-entrypoint.sh " + shlex.join(PG),
+            ],
         )
         self.ready(name, database)
         self.sql(
@@ -893,7 +960,15 @@ class Controller:
             + FINGERPRINT
             + '\n}\nactual=$(fingerprint)\nprintf \'%s\\n\' "$actual"\n[ "$actual" = '
             + shlex.quote(expected)
-            + " ] || exit 91\nprintf '%s\\n' \"$actual\" > /tmp/cold-verified\nprintf 'local all all trust\\nhost all all 127.0.0.1/32 trust\\n' > /tmp/recovery-hba.conf\nexec postgres "
+            + " ] || exit 91\nprintf '%s\\n' \"$actual\" > /tmp/cold-verified\nprintf 'local all all trust\\nhost all all 127.0.0.1/32 trust\\n' > /tmp/recovery-hba.conf\n"
+        )
+        # Cold extraction itself has an independent hard bound; the PG PID1
+        # watchdog persists even if the Windows parent is interrupted.
+        script = (
+            WATCHDOG
+            + "/usr/bin/timeout -s KILL 170 /bin/sh -c "
+            + shlex.quote(script)
+            + " || exit 92\nexec postgres "
         )
         script += shlex.join(
             PG[1:]
@@ -1050,6 +1125,7 @@ class Controller:
             "native_operations": self.native.operations,
             "code_sha256": sha(Path(__file__)),
             "maximum_seconds": SECONDS,
+            "linux_pid1_watchdog_seconds": SECONDS,
             "source_database_started": False,
             "primary_mutations": 0,
             "consumer_restart_permitted": False,
@@ -1082,12 +1158,133 @@ class Controller:
         return 0 if success and cleanup else 1
 
 
+def supervise(args) -> int:
+    """Detached hidden root owns a bounded Windows child tree, not the primary."""
+    directory = Path(args.supervisor_directory or "")
+    if (
+        directory.parent != ROOT
+        or not re.fullmatch(r"supervisor-[0-9a-f]{32}", directory.name)
+        or not safe(directory).is_dir()
+        or any(
+            item.name not in {"outer.stdout", "outer.stderr"}
+            for item in directory.iterdir()
+        )
+    ):
+        raise Rejected("FRESH_PRIVATE_SUPERVISOR_DIRECTORY_REQUIRED")
+    job = bounded._job_module().WindowsProcessJob()
+    child = None
+    error = None
+    proof = None
+    started = time.monotonic()
+    stdout, stderr = directory / "child.stdout", directory / "child.stderr"
+    try:
+        with stdout.open("xb") as out, stderr.open("xb") as err:
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    str(Path(__file__).absolute()),
+                    "--execute",
+                    "--confirmation",
+                    CONFIRM,
+                    "--expected-revision",
+                    args.expected_revision,
+                    "--prior-diagnostic-sha256",
+                    args.prior_diagnostic_sha256,
+                ],
+                cwd=REPO,
+                env={
+                    key: value
+                    for key, value in os.environ.items()
+                    if key.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
+                },
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=err,
+                shell=False,
+                creationflags=job.creation_flags,
+            )
+            job.attach_and_resume(child)
+            save(
+                directory / "started.json",
+                {
+                    "supervisor_pid": os.getpid(),
+                    "child_pid": child.pid,
+                    "reviewed_deploy_revision": args.expected_revision,
+                    "maximum_seconds": SECONDS + 90,
+                    "assigned_before_resume": True,
+                },
+            )
+            while child.poll() is None:
+                if time.monotonic() - started >= SECONDS + 90:
+                    raise Rejected("SUPERVISOR_TOTAL_DEADLINE_EXCEEDED")
+                if max(stdout.stat().st_size, stderr.stat().st_size) > 256 * 1024:
+                    raise Rejected("SUPERVISOR_CHILD_OUTPUT_BOUND_EXCEEDED")
+                time.sleep(0.1)
+    except BaseException as caught:  # noqa: BLE001 -- owned child cancellation is fail-closed
+        error = str(caught) if isinstance(caught, Rejected) else type(caught).__name__
+    finally:
+        try:
+            proof = job.finish(child, cancel=child is None or child.poll() is None)
+            require_tree_proof(proof)
+        finally:
+            job.close()
+    child_result = None
+    receipt_hash = None
+    if not error and child is not None and child.returncode == 0:
+        try:
+            child_result = json.loads(stdout.read_text(encoding="utf-8").strip())
+            receipt = Path(child_result["receipt"])
+            if (
+                receipt.name != "receipt.json"
+                or receipt.parent.parent != ROOT
+                or not re.fullmatch(r"run-[0-9a-f]{32}", receipt.parent.name)
+            ):
+                raise Rejected("CHILD_RECEIPT_LOCATION_REJECTED")
+            value = json.loads(safe(receipt).read_text(encoding="utf-8"))
+            if (
+                value.get("result") != "PASS_FRESH_BACKUP_TWO_ISOLATED_RESTORES"
+                or value.get("cleanup_verified") is not True
+                or value.get("proofs", {}).get("reviewed_deploy_revision")
+                != args.expected_revision
+            ):
+                raise Rejected("CHILD_RESTORE_NOT_ACCEPTED")
+            receipt_hash = sha(receipt)
+        except (Rejected, ValueError, OSError, KeyError, TypeError) as caught:
+            error = (
+                str(caught) if isinstance(caught, Rejected) else type(caught).__name__
+            )
+    else:
+        error = error or "CHILD_RESTORE_FAILED"
+    value = {
+        "kind": "fresh-runtime-recovery-hidden-supervisor-v1",
+        "result": "PASS" if not error else "FAILED_CLOSED",
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "cli_tree": proof,
+        "child_result": child_result,
+        "child_receipt_sha256": receipt_hash,
+        "error_category": error,
+        "primary_mutations": 0,
+        "consumers_started": 0,
+        "linux_pid1_watchdog_seconds": SECONDS,
+    }
+    save(directory / "receipt.json", value)
+    print(
+        json.dumps(
+            {"result": value["result"], "receipt": str(directory / "receipt.json")}
+        )
+    )
+    return 0 if not error else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirmation")
     parser.add_argument("--expected-revision")
     parser.add_argument("--prior-diagnostic-sha256")
+    parser.add_argument("--supervise", action="store_true")
+    parser.add_argument("--supervisor-directory")
     args = parser.parse_args(argv)
     if not args.execute:
         print(
@@ -1178,12 +1375,29 @@ def main(argv=None):
         or "official_backup" in prior_copy.get("proofs", {})
     ):
         raise Rejected("PRIOR_COPY_CLEANUP_UNPROVEN")
+    if sha(PRIOR_INTERRUPTION) != PRIOR_INTERRUPTION_SHA:
+        raise Rejected("PRESERVED_INTERRUPTION_DIAGNOSTIC_CHANGED")
+    interrupted = json.loads(PRIOR_INTERRUPTION.read_text())
+    if (
+        interrupted.get("owner") != "21182aa7d47e406980908ea62e120700"
+        or interrupted.get("result")
+        != "FAILED_CLOSED_INTERRUPTED_BEFORE_OFFICIAL_BACKUP"
+        or interrupted.get("cleanup_verified") is not True
+        or interrupted.get("lease_adopted") is not False
+        or interrupted.get("lease_removed") is not False
+    ):
+        raise Rejected("PRIOR_INTERRUPTION_CLEANUP_UNPROVEN")
+    if args.supervise:
+        return supervise(args)
     controller = Controller()
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision
     controller.proofs["preserved_prebackup_diagnostic_sha256"] = (
         args.prior_diagnostic_sha256
     )
     controller.proofs["preserved_copy_diagnostic_sha256"] = PRIOR_COPY_SHA
+    controller.proofs["preserved_interruption_diagnostic_sha256"] = (
+        PRIOR_INTERRUPTION_SHA
+    )
     try:
         controller.run()
     except BaseException as error:  # noqa: BLE001 -- interrupts must also clean only owned clones
