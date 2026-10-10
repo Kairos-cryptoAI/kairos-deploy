@@ -342,6 +342,89 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
         self.assertIn("no", args[args.index("--aof-load-truncated") + 1])
         self.assertIn("0", args[args.index("--auto-aof-rewrite-percentage") + 1])
 
+    def test_preparation_root_is_confined_to_owned_target_without_original_mount(self):
+        target = "kairos-cold-redis-data-" + "a" * 12
+        command = cold._worker_command("prepare-target", target=target)
+        self.assertIn("--user=0:0", command)
+        self.assertIn("--cap-drop=ALL", command)
+        self.assertIn("--network=none", command)
+        self.assertIn("--read-only", command)
+        self.assertIn(f"type=volume,src={target},dst=/data", command)
+        self.assertTrue(all("dst=/source" not in value for value in command))
+        self.assertNotIn(cold.SOURCE_VOLUME, " ".join(command))
+        for kwargs in (
+            {},
+            {"source": cold.SOURCE_VOLUME, "target": target},
+            {"target": cold.SOURCE_VOLUME},
+            {"target": "foreign-volume"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(cold.ColdRedisError):
+                cold._worker_command("prepare-target", **kwargs)
+
+    def test_target_preparation_refuses_nonempty_volume_before_chmod(self):
+        for entries in ([], ["existing.rdb"]):
+            with self.subTest(entries=entries):
+                data = mock.Mock()
+                data.iterdir.return_value = iter(entries)
+                with (
+                    mock.patch.object(cold, "Path", return_value=data),
+                    mock.patch("builtins.print"),
+                ):
+                    result = cold._copy_worker("prepare-target")
+                if entries:
+                    self.assertEqual(result, 1)
+                    data.chmod.assert_not_called()
+                else:
+                    self.assertEqual(result, 0)
+                    data.chmod.assert_called_once_with(0o777)
+
+    def test_snapshot_volume_collisions_and_foreign_labels_block_writable_mount(self):
+        owner = "a" * 32
+        name = "kairos-cold-redis-data-" + owner[:12]
+        attempted = set()
+        docker = mock.Mock()
+        docker.call.return_value = name
+        with self.assertRaises(cold.ColdRedisError):
+            cold._create_new_owned_volume(docker, name, owner, attempted)
+        self.assertFalse(attempted)
+        self.assertEqual(docker.call.call_count, 1)
+        self.assertEqual(docker.call.call_args.args[0][:2], ["volume", "ls"])
+
+        for labels, options in (
+            ({cold.OWNER_LABEL: owner, cold.SCOPE_LABEL: cold.SCOPE}, {}),
+            ({cold.OWNER_LABEL: "b" * 32, cold.SCOPE_LABEL: cold.SCOPE}, {}),
+            ({}, {}),
+            (
+                {cold.OWNER_LABEL: owner, cold.SCOPE_LABEL: cold.SCOPE},
+                {"device": "foreign"},
+            ),
+        ):
+            docker = mock.Mock()
+            docker.call.side_effect = [
+                "",
+                name,
+                "|".join(
+                    [
+                        name,
+                        "local",
+                        "local",
+                        "2026-10-10",
+                        json.dumps(labels),
+                        json.dumps(options),
+                    ]
+                ),
+            ]
+            attempted = set()
+            if labels.get(cold.OWNER_LABEL) == owner and not options:
+                cold._create_new_owned_volume(docker, name, owner, attempted)
+            else:
+                with self.assertRaises(cold.ColdRedisError):
+                    cold._create_new_owned_volume(docker, name, owner, attempted)
+            self.assertEqual(attempted, {"volume"})
+            self.assertTrue(
+                all(call.args[0][0] == "volume" for call in docker.call.call_args_list)
+            )
+
     def test_persistence_inventory_requires_complete_multipart_aof_manifest(
         self,
     ) -> None:

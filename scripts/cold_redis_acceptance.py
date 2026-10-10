@@ -468,6 +468,17 @@ def _worker_command(
         "--entrypoint",
         "python",
     ]
+    if mode == "prepare-target":
+        if (
+            source is not None
+            or not isinstance(target, str)
+            or not re.fullmatch(r"kairos-cold-redis-data-[0-9a-f]{12}", target)
+        ):
+            raise ColdRedisError("preparation requires only a new owned target volume")
+        # The pinned image's default unprivileged UID cannot chmod a new
+        # root-owned Docker volume. Root is confined to this empty owned target,
+        # with all capabilities dropped and no original volume mounted.
+        command += ["--user=0:0"]
     if source:
         command += ["--mount", f"type=volume,src={source},dst=/source,readonly"]
     if target:
@@ -479,6 +490,44 @@ def _worker_command(
     ]
     command += [RUNNER_IMAGE, "-B", "/work/cold_redis_acceptance.py", "--worker", mode]
     return command
+
+
+def _create_new_owned_volume(
+    docker: BoundedDocker, name: str, owner: str, attempted: set[str]
+) -> dict[str, Any]:
+    """Refuse collisions and verify the new volume before any writable mount."""
+    if not re.fullmatch(r"[0-9a-f]{32}", owner) or name != (
+        "kairos-cold-redis-data-" + owner[:12]
+    ):
+        raise ColdRedisError("new snapshot volume identity is invalid")
+    existing = docker.call(
+        ["volume", "ls", "--format", "{{.Name}}", "--filter", "name=^" + name + "$"]
+    )
+    if existing.strip():
+        raise ColdRedisError("snapshot volume name already exists; never adopt it")
+    attempted.add("volume")
+    created = docker.call(
+        [
+            "volume",
+            "create",
+            "--label",
+            f"{OWNER_LABEL}={owner}",
+            "--label",
+            f"{SCOPE_LABEL}={SCOPE}",
+            name,
+        ]
+    )
+    metadata = _volume_metadata(docker, name)
+    if (
+        created.strip() != name
+        or metadata["name"] != name
+        or metadata["driver"] != "local"
+        or metadata["scope"] != "local"
+        or metadata["options"]
+        or metadata["labels"] != {OWNER_LABEL: owner, SCOPE_LABEL: SCOPE}
+    ):
+        raise ColdRedisError("new snapshot volume ownership is unverified")
+    return metadata
 
 
 def _run_worker(
@@ -526,6 +575,10 @@ def _copy_worker(mode: str) -> int:
         if mode == "prepare-target":
             data = Path("/data")
             data.mkdir(parents=True, exist_ok=True)
+            if any(data.iterdir()):
+                raise ColdRedisError(
+                    "new owned target must be empty before preparation"
+                )
             data.chmod(0o777)
             print(
                 json.dumps({"state": "COPY_VERIFIED", "prepared": True}, sort_keys=True)
@@ -1454,18 +1507,7 @@ def execute(
             raise ColdRedisError(
                 "cached observer runner image differs from the pinned digest"
             )
-        attempted.add("volume")
-        docker.call(
-            [
-                "volume",
-                "create",
-                "--label",
-                f"{OWNER_LABEL}={owner}",
-                "--label",
-                f"{SCOPE_LABEL}={SCOPE}",
-                names["volume"],
-            ]
-        )
+        _create_new_owned_volume(docker, names["volume"], owner, attempted)
         created.add("volume")
         prepare = _worker_command(
             "prepare-target", target=names["volume"], script_path=script_snapshot

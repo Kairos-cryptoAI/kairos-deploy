@@ -257,25 +257,31 @@ class PrimaryAdmissionTests(unittest.TestCase):
         controller = SimpleNamespace(work=self.root, process=mock.Mock())
         with (
             mock.patch.object(primary, "GPG", executable),
+            mock.patch.object(primary, "GPGV", executable),
             mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
             mock.patch.object(primary, "TRUSTED_KEY_SHA256", trusted_key_sha256),
         ):
             primary._verify_signature(controller, receipt, signature, "clone")
         calls = controller.process.call_args_list
         self.assertEqual(len(calls), 2)
-        import_args, verify_args = calls[0].args[1], calls[1].args[1]
+        dearmor_args, verify_args = calls[0].args[1], calls[1].args[1]
         self.assertEqual(
-            import_args[1], primary._gpg_file_arg(self.root / "gpg-home-clone")
+            dearmor_args[1], primary._gpg_file_arg(self.root / "gpg-home-clone")
         )
-        self.assertEqual(import_args[-1], primary._gpg_file_arg(trusted_key))
+        self.assertEqual(dearmor_args[-1], primary._gpg_file_arg(trusted_key))
+        self.assertIn("--dearmor", dearmor_args)
+        self.assertNotIn("--import", dearmor_args)
+        self.assertEqual(
+            verify_args[verify_args.index("--keyring") + 1],
+            primary._gpg_file_arg(self.root / "gpg-home-clone/trusted-signer.gpg"),
+        )
         self.assertEqual(
             verify_args[-2:],
             [primary._gpg_file_arg(signature), primary._gpg_file_arg(receipt)],
         )
-        self.assertIn("--no-auto-key-retrieve", verify_args)
-        self.assertIn("--no-autostart", import_args)
-        self.assertIn("--no-autostart", verify_args)
-        self.assertTrue(all("\\" not in value for value in import_args + verify_args))
+        self.assertIn("--no-autostart", dearmor_args)
+        self.assertNotIn("--import", verify_args)
+        self.assertTrue(all("\\" not in value for value in dearmor_args + verify_args))
 
         # A valid signature from any other primary fingerprint is not accepted.
         (self.root / "other-gpg-verify.stdout").write_text(
@@ -283,6 +289,7 @@ class PrimaryAdmissionTests(unittest.TestCase):
         )
         with (
             mock.patch.object(primary, "GPG", executable),
+            mock.patch.object(primary, "GPGV", executable),
             mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
             mock.patch.object(primary, "TRUSTED_KEY_SHA256", trusted_key_sha256),
             self.assertRaisesRegex(primary.fresh.Rejected, "SIGNER_MISMATCH"),

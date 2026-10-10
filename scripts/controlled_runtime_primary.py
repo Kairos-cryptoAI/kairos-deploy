@@ -37,6 +37,11 @@ GPG = (
     if os.name == "nt"
     else Path("/usr/bin/gpg")
 )
+GPGV = (
+    Path(r"C:\Program Files\Git\usr\bin\gpgv.exe")
+    if os.name == "nt"
+    else Path("/usr/bin/gpgv")
+)
 MAX_SECONDS = 1800
 MAX_PRIVATE_SQL_BYTES = 64 * 1024
 MAX_PRIMARY_TEMP_BYTES = 256 * 1024 * 1024
@@ -530,14 +535,21 @@ def _verify_signature(
 ) -> None:
     if fresh.sha(TRUSTED_KEY) != TRUSTED_KEY_SHA256:
         raise fresh.Rejected("PINNED_TRUSTED_SIGNER_KEY_CHANGED")
-    if not GPG.is_absolute() or not GPG.is_file():
+    if any(not exe.is_absolute() or not exe.is_file() for exe in (GPG, GPGV)):
         raise fresh.Rejected("DIRECT_GPG_UNAVAILABLE")
     try:
         resolved_gpg = GPG.resolve(strict=True)
+        resolved_gpgv = GPGV.resolve(strict=True)
     except OSError:
         raise fresh.Rejected("DIRECT_GPG_UNAVAILABLE") from None
     home = controller.work / ("gpg-home-" + label)
     home.mkdir(mode=0o700)
+    # Public-key dearmoring and gpgv never need an agent or a trust database.
+    # Importing with gpg still probes its agent socket even with no-autostart;
+    # MSYS rejects that socket on the long, owner-bound acceptance paths.
+    # gpgv uses only this hash-pinned keyring; exact primary signer checks below
+    # remain mandatory. Never use the user's keyring or fetch additional keys.
+    keyring = home / "trusted-signer.gpg"
     controller.process(
         resolved_gpg,
         [
@@ -546,23 +558,22 @@ def _verify_signature(
             "--batch",
             "--no-options",
             "--no-autostart",
-            "--import",
+            "--dearmor",
+            "--output",
+            _gpg_file_arg(keyring),
             _gpg_file_arg(TRUSTED_KEY),
         ],
         15,
-        label=label + "-gpg-import",
+        label=label + "-gpg-dearmor",
     )
     controller.process(
-        resolved_gpg,
+        resolved_gpgv,
         [
             "--homedir",
             _gpg_file_arg(home),
-            "--batch",
-            "--no-options",
-            "--no-autostart",
-            "--no-auto-key-retrieve",
+            "--keyring",
+            _gpg_file_arg(keyring),
             "--status-fd=1",
-            "--verify",
             _gpg_file_arg(signature),
             _gpg_file_arg(receipt),
         ],
