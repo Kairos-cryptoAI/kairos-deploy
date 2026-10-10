@@ -30,6 +30,117 @@ probe = _load_probe()
 
 
 class ProbeBoundaryTests(unittest.TestCase):
+    def test_duplicate_delivery_does_not_create_an_extra_audit_row(self) -> None:
+        counts = {
+            "outbox_rows": 2,
+            "inbox_rows": 2,
+            "audit_rows": 2,
+            "execution_orders": 0,
+        }
+        probe.require_fixture_counts(counts)
+        for change in (
+            {"audit_rows": 3},
+            {"execution_orders": 1},
+            {"outbox_rows": 1},
+            {"execution_orders": False},
+        ):
+            with self.subTest(change=change), self.assertRaises(probe.ProbeError):
+                probe.require_fixture_counts({**counts, **change})
+
+    def test_each_durable_bus_uses_the_explicit_short_fixture_settings(self) -> None:
+        tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "DurableMessageBus"
+        ]
+        self.assertEqual(len(calls), 3)
+        for call in calls:
+            settings = [
+                keyword.value for keyword in call.keywords if keyword.arg == "settings"
+            ]
+            self.assertEqual(len(settings), 1)
+            self.assertIsInstance(settings[0], ast.Name)
+            self.assertEqual(settings[0].id, "runtime_settings")
+
+    def test_fixture_wire_payload_has_required_durable_metadata(self) -> None:
+        from datetime import datetime
+
+        for phase, suffix in (
+            ("committed-delivery", "success"),
+            ("publish-db-ack-loss", "ack-loss"),
+        ):
+            with self.subTest(phase=phase):
+                value = probe.fixture_payload("012345abcdef", "a" * 32, phase)
+                self.assertEqual(
+                    value["message_id"], "probe-" + "a" * 32 + "-" + suffix
+                )
+                self.assertEqual(value["source"], "probe-producer-012345abcdef")
+                self.assertEqual(value["schema_version"], "1.0")
+                self.assertEqual(
+                    datetime.fromisoformat(value["produced_at"].replace("Z", "+00:00"))
+                    .utcoffset()
+                    .total_seconds(),
+                    0,
+                )
+                self.assertIs(value["synthetic_fixture"], True)
+        with self.assertRaises(probe.ProbeError):
+            probe.fixture_payload("012345abcdef", "a" * 32, "unreviewed-phase")
+
+    def test_operator_privileges_are_sql_tokens_not_comma_joined_characters(
+        self,
+    ) -> None:
+        statements = probe.operator_control_grant_sql(
+            "kairos_probe_runtime_012345abcdef"
+        )
+        self.assertEqual(
+            statements,
+            (
+                (
+                    "GRANT SELECT ON TABLE operator_controls,operator_control_commands,"
+                    "operator_control_admissions,operator_control_dispatch_claims "
+                    'TO "kairos_probe_runtime_012345abcdef"'
+                ),
+                (
+                    "GRANT INSERT ON TABLE operator_control_admissions,"
+                    'operator_control_dispatch_claims TO "kairos_probe_runtime_012345abcdef"'
+                ),
+            ),
+        )
+        with self.assertRaises(probe.ProbeError):
+            probe.operator_control_grant_sql("kairos")
+
+    def test_jsonb_text_and_decoded_object_have_the_same_canonical_payload(
+        self,
+    ) -> None:
+        import json
+
+        value = {"message_id": "synthetic-only", "fixture": True}
+        expected = '{"fixture":true,"message_id":"synthetic-only"}'
+        self.assertEqual(probe.canonical_database_payload(value), expected)
+        self.assertEqual(probe.canonical_database_payload(json.dumps(value)), expected)
+        for invalid in ("invalid JSON", '"JSON string"', "[]", [], None):
+            with self.subTest(value=invalid), self.assertRaises(probe.ProbeError):
+                probe.canonical_database_payload(invalid)
+
+    def test_failure_diagnostic_never_contains_exception_strings(self) -> None:
+        diagnostic = probe.failure_diagnostic(
+            TypeError("secret credential or backend SQL"), {"stage": "BUS_START"}
+        )
+        self.assertEqual(diagnostic, {"error_type": "TypeError", "stage": "BUS_START"})
+        self.assertNotIn("secret", str(diagnostic))
+
+    def test_unknown_exception_type_and_untrusted_stage_are_not_emitted(self) -> None:
+        unknown = type("SensitiveSecretException", (Exception,), {})
+        self.assertEqual(
+            probe.failure_diagnostic(unknown("private"), {"stage": "private SQL"}),
+            {"error_type": "OTHER", "stage": "ADMISSION"},
+        )
+        with self.assertRaises(probe.ProbeError):
+            probe._stage({}, "private SQL")
+
     def test_only_explicit_owner_scoped_probe_database_is_accepted(self) -> None:
         name, owner = probe.require_database_name("kairos_runtime_probe_012345abcdef")
         self.assertEqual(name, "kairos_runtime_probe_012345abcdef")
@@ -221,7 +332,7 @@ class EvidenceResolutionProbeTests(unittest.IsolatedAsyncioTestCase):
             "producer": "probe-producer-012345abcdef",
             "message_id": payload["message_id"],
             "topic": "kairos.runtime.probe.012345abcdef.0123456789abcdef.ambiguous",
-            "payload": payload,
+            "payload": json.dumps(payload),
             "payload_sha256": payload_sha,
             "publish_attempts": 1,
             "reconciliation_id": "reconcile-probe-only",

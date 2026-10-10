@@ -43,6 +43,61 @@ FAILURE_CATEGORIES = frozenset(
         "OPERATION_FAILED",
     }
 )
+PROBE_STAGES = frozenset(
+    {
+        "ADMISSION",
+        "IMPORTS",
+        "ADMIN_CONNECT",
+        "EMPTY_DATABASE",
+        "SCHEMA_MIGRATE",
+        "SCHEMA_VERIFY",
+        "ROLE_PROVISION",
+        "RUNTIME_SETTINGS",
+        "OBSERVER_CONNECT",
+        "REDIS_EMPTY",
+        "BUS_START",
+        "GROUP_CREATION",
+        "COMMITTED_DELIVERY",
+        "DUPLICATE_SUPPRESSION",
+        "UNKNOWN_QUARANTINE",
+        "BUS_RESTART",
+        "REDIS_EVIDENCE_RESOLUTION",
+        "FIXTURE_COUNTS",
+        "EVIDENCE_WRITE",
+    }
+)
+SAFE_ERROR_TYPES = frozenset(
+    {
+        "ProbeError",
+        "AttributeError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "DatatypeMismatchError",
+        "FeatureNotSupportedError",
+        "ImportError",
+        "IndeterminateDatatypeError",
+        "InsufficientPrivilegeError",
+        "InvalidAuthorizationSpecificationError",
+        "InvalidCatalogNameError",
+        "InvalidParameterValueError",
+        "InvalidPasswordError",
+        "InvalidSchemaNameError",
+        "InvalidTextRepresentationError",
+        "KeyError",
+        "ModuleNotFoundError",
+        "ObjectNotInPrerequisiteStateError",
+        "PostgresSyntaxError",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "UndefinedFunctionError",
+        "UndefinedTableError",
+        "UniqueViolationError",
+        "ValidationError",
+        "ValueError",
+    }
+)
 BASE_RUNTIME_TABLE_GRANTS = (
     ("schema_migrations", ("SELECT",)),
     ("event_audit", ("SELECT", "INSERT")),
@@ -124,6 +179,79 @@ def _write_evidence(path: Path, payload: dict[str, Any]) -> None:
         raise ProbeError("EVIDENCE_DIRECTORY_INVALID") from None
 
 
+def failure_diagnostic(exc: Exception, diagnostics: dict[str, str]) -> dict[str, str]:
+    """Only fixed stage/type names; never exception strings, SQL or payloads."""
+    error_type = type(exc).__name__
+    stage = diagnostics.get("stage")
+    return {
+        "error_type": error_type if error_type in SAFE_ERROR_TYPES else "OTHER",
+        "stage": stage if stage in PROBE_STAGES else "ADMISSION",
+    }
+
+
+def _stage(diagnostics: dict[str, str], value: str) -> None:
+    if value not in PROBE_STAGES:
+        raise ProbeError("OPERATION_FAILED")
+    diagnostics["stage"] = value
+
+
+def canonical_database_payload(value: object) -> str:
+    """asyncpg's default JSONB codec returns text, not a decoded object."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            raise ProbeError("OPERATION_FAILED") from None
+    if not isinstance(value, dict):
+        raise ProbeError("OPERATION_FAILED")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def operator_control_grant_sql(runtime_role: str) -> tuple[str, ...]:
+    if RUNTIME_ROLE_PATTERN.fullmatch(runtime_role) is None:
+        raise ProbeError("INVALID_TARGET")
+    quoted_runtime = _identifier(runtime_role)
+    return tuple(
+        f"GRANT {privilege} ON TABLE {','.join(tables)} TO {quoted_runtime}"
+        for privilege, tables in OPERATOR_CONTROL_MINIMUM_GRANTS
+    )
+
+
+def fixture_payload(owner12: str, run_id: str, phase: str) -> dict[str, Any]:
+    if (
+        re.fullmatch(r"[0-9a-f]{12}", owner12) is None
+        or re.fullmatch(r"[0-9a-f]{32}", run_id) is None
+    ):
+        raise ProbeError("INVALID_TARGET")
+    suffix = {"committed-delivery": "success", "publish-db-ack-loss": "ack-loss"}.get(
+        phase
+    )
+    if suffix is None:
+        raise ProbeError("INVALID_TARGET")
+    return {
+        "message_id": f"probe-{run_id}-{suffix}",
+        "source": f"probe-producer-{owner12}",
+        "schema_version": "1.0",
+        "produced_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "probe_namespace": owner12,
+        "probe_phase": phase,
+        "synthetic_fixture": True,
+    }
+
+
+def require_fixture_counts(value: dict[str, Any]) -> None:
+    # Two durable identities create two audit rows. Re-delivery has the same
+    # (produced_at, message_id) and must not manufacture a third audit event.
+    expected = {
+        "outbox_rows": 2,
+        "inbox_rows": 2,
+        "audit_rows": 2,
+        "execution_orders": 0,
+    }
+    if value != expected or any(type(count) is not int for count in value.values()):
+        raise ProbeError("FIXTURE_DATA_BOUNDARY_INVALID")
+
+
 async def _provision_probe_roles(admin: Any, database_name: str, owner12: str) -> str:
     from kairos_persistence.operator_control import OperatorControlRefused
 
@@ -187,10 +315,8 @@ async def _provision_probe_roles(admin: Any, database_name: str, owner12: str) -
     await admin.pool.execute(
         f"GRANT USAGE,SELECT ON SEQUENCE message_outbox_id_seq TO {quoted_runtime}"
     )
-    for privileges, tables in OPERATOR_CONTROL_MINIMUM_GRANTS:
-        await admin.pool.execute(
-            f"GRANT {','.join(privileges)} ON TABLE {','.join(tables)} TO {quoted_runtime}"
-        )
+    for statement in operator_control_grant_sql(runtime_role):
+        await admin.pool.execute(statement)
 
     runtime_url = database_url(database_name, runtime_role)
     from kairos_persistence import Database, MigrationProfile, PersistenceSettings
@@ -368,9 +494,7 @@ async def _resolve_redis_acceptance(
         payload_sha256=row["payload_sha256"],
         publish_attempts=row["publish_attempts"],
     )
-    canonical_payload = json.dumps(
-        row["payload"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    canonical_payload = canonical_database_payload(row["payload"])
     payload_sha256 = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
     if payload_sha256 != identity.payload_sha256 or identity.topic != topic:
         raise ProbeError("OPERATION_FAILED")
@@ -458,7 +582,13 @@ async def _wait_ack_count(witness: AckWitnessRedis, topic: str, count: int) -> N
     await _wait_for(current)
 
 
-async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str, Any]:
+async def _probe(
+    database_name: str,
+    owner12: str,
+    directory: Path,
+    diagnostics: dict[str, str],
+) -> dict[str, Any]:
+    _stage(diagnostics, "IMPORTS")
     from kairos_core.bus.redis_streams import RedisStreamsBus
     from kairos_persistence import (
         Database,
@@ -468,6 +598,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
     )
     from kairos_persistence.database_target import connect_verified_database
 
+    _stage(diagnostics, "ADMIN_CONNECT")
     admin_settings = PersistenceSettings(
         database_url=database_url(database_name),
         _env_file=None,
@@ -487,11 +618,16 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
     raw_redis = None
     consume_tasks: list[asyncio.Task] = []
     try:
+        _stage(diagnostics, "EMPTY_DATABASE")
         await _check_empty_target(admin, database_name)
+        _stage(diagnostics, "SCHEMA_MIGRATE")
         await admin.migrate()
+        _stage(diagnostics, "SCHEMA_VERIFY")
         await admin.verify_schema()
+        _stage(diagnostics, "ROLE_PROVISION")
         await _provision_probe_roles(admin, database_name, owner12)
 
+        _stage(diagnostics, "RUNTIME_SETTINGS")
         runtime_role = f"kairos_probe_runtime_{owner12}"
         runtime_url = database_url(database_name, runtime_role)
         runtime_settings = PersistenceSettings(
@@ -507,6 +643,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
             outbox_retry_max_s=0.05,
             shutdown_timeout_s=1.0,
         )
+        _stage(diagnostics, "OBSERVER_CONNECT")
         observer = Database(
             runtime_settings,
             migration_profile=MigrationProfile.CONTROLLED_RUNTIME,
@@ -517,6 +654,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         if await observer.pool.fetchval("SELECT count(*) FROM event_audit") != 0:
             raise ProbeError("DATABASE_NOT_EMPTY")
 
+        _stage(diagnostics, "REDIS_EMPTY")
         raw_redis = RedisStreamsBus(REDIS_URL)
         await raw_redis._redis.ping()
         if await raw_redis._redis.dbsize() != 0:
@@ -536,6 +674,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         consumer = DurableMessageBus(
             witness,
             service_name=consumer_service,
+            settings=runtime_settings,
             database=consumer_db,
             verify_schema_only=True,
             required_migration_profile=MigrationProfile.CONTROLLED_RUNTIME,
@@ -546,10 +685,12 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         producer = DurableMessageBus(
             raw_redis,
             service_name=producer_service,
+            settings=runtime_settings,
             database=producer_db,
             verify_schema_only=True,
             required_migration_profile=MigrationProfile.CONTROLLED_RUNTIME,
         )
+        _stage(diagnostics, "BUS_START")
         await consumer.start()
         await producer.start()
 
@@ -562,6 +703,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
                 delivered[topic] += 1
                 await consumer.ack(topic, envelope, group=group)
 
+        _stage(diagnostics, "GROUP_CREATION")
         consume_tasks = [
             asyncio.create_task(consume(success_topic)),
             asyncio.create_task(consume(ambiguous_topic)),
@@ -573,13 +715,9 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
 
             await _wait_for(group_exists)
 
-        success_id = f"probe-{run_id}-success"
-        success_payload = {
-            "message_id": success_id,
-            "probe_namespace": owner12,
-            "probe_phase": "committed-delivery",
-            "synthetic_fixture": True,
-        }
+        _stage(diagnostics, "COMMITTED_DELIVERY")
+        success_payload = fixture_payload(owner12, run_id, "committed-delivery")
+        success_id = success_payload["message_id"]
         await producer.publish(success_topic, success_payload)
         success_row = await _wait_outbox(
             observer,
@@ -599,18 +737,15 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         # A second Redis entry with the same durable identity must be skipped
         # by the already-COMPLETED inbox row and acknowledged without re-running
         # the handler. This duplicate is injected through real XADD via the bus.
+        _stage(diagnostics, "DUPLICATE_SUPPRESSION")
         await raw_redis.publish(success_topic, success_payload)
         await _wait_ack_count(witness, success_topic, 2)
         if delivered[success_topic] != 1:
             raise ProbeError("DUPLICATE_NOT_SUPPRESSED")
 
-        ambiguous_id = f"probe-{run_id}-ack-loss"
-        ambiguous_payload = {
-            "message_id": ambiguous_id,
-            "probe_namespace": owner12,
-            "probe_phase": "publish-db-ack-loss",
-            "synthetic_fixture": True,
-        }
+        _stage(diagnostics, "UNKNOWN_QUARANTINE")
+        ambiguous_payload = fixture_payload(owner12, run_id, "publish-db-ack-loss")
+        ambiguous_id = ambiguous_payload["message_id"]
 
         async def lose_ack_before_commit(_record, _worker_id):
             raise RuntimeError("FIXTURE_ACK_COMMIT_RESPONSE_LOST")
@@ -640,12 +775,14 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         if ambiguous_xlen != 1:
             raise ProbeError("AMBIGUOUS_PUBLISH_RETRIED")
 
+        _stage(diagnostics, "BUS_RESTART")
         await producer.close()
         producer = None
         await asyncio.sleep(runtime_settings.outbox_lease_s * 2 + 0.1)
         restarted_producer = DurableMessageBus(
             RedisStreamsBus(REDIS_URL),
             service_name=producer_service,
+            settings=runtime_settings,
             database=Database(
                 runtime_settings, migration_profile=MigrationProfile.CONTROLLED_RUNTIME
             ),
@@ -670,6 +807,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
             raise ProbeError("AMBIGUOUS_PUBLISH_RETRIED")
         if after_restart["reconciliation_state"] != "PUBLISH_OUTCOME_UNKNOWN":
             raise ProbeError("OPERATION_FAILED")
+        _stage(diagnostics, "REDIS_EVIDENCE_RESOLUTION")
         resolution = await _resolve_redis_acceptance(
             admin,
             restarted_producer.transport,
@@ -679,6 +817,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
             f"probe-{run_id}",
         )
 
+        _stage(diagnostics, "FIXTURE_COUNTS")
         fixture_counts = await observer.pool.fetchrow(
             """SELECT (SELECT count(*) FROM message_outbox) AS outbox_rows,
                       (SELECT count(*) FROM message_inbox) AS inbox_rows,
@@ -688,13 +827,7 @@ async def _probe(database_name: str, owner12: str, directory: Path) -> dict[str,
         fixture_counts["execution_orders"] = await admin.pool.fetchval(
             "SELECT count(*) FROM execution_orders"
         )
-        if (
-            fixture_counts["outbox_rows"] != 2
-            or fixture_counts["inbox_rows"] != 2
-            or fixture_counts["audit_rows"] != 3
-            or fixture_counts["execution_orders"] != 0
-        ):
-            raise ProbeError("FIXTURE_DATA_BOUNDARY_INVALID")
+        require_fixture_counts(fixture_counts)
         return {
             "schema_version": 1,
             "classification": "ISOLATED_CONTROLLED_RUNTIME_DELIVERY_ENGINEERING_ONLY",
@@ -770,15 +903,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     evidence_path: Path | None = None
     owner12: str | None = None
+    diagnostics = {"stage": "ADMISSION"}
     try:
         database_name, owner12 = require_database_name(args.database)
         directory = require_evidence_directory(args.directory)
         evidence_path = _evidence_file(directory, owner12)
         evidence = asyncio.run(
             asyncio.wait_for(
-                _probe(database_name, owner12, directory), timeout=PROBE_TIMEOUT_S
+                _probe(database_name, owner12, directory, diagnostics),
+                timeout=PROBE_TIMEOUT_S,
             )
         )
+        _stage(diagnostics, "EVIDENCE_WRITE")
         _write_evidence(evidence_path, evidence)
     except ProbeError as exc:
         if evidence_path is not None and owner12 is not None:
@@ -791,14 +927,36 @@ def main(argv: list[str] | None = None) -> int:
                         "database": args.database,
                         "status": "FAILED",
                         "failure_category": exc.category,
+                        **failure_diagnostic(exc, diagnostics),
                     },
                 )
             except ProbeError:
                 pass
         print(f"CONTROLLED_RUNTIME_DELIVERY_PROBE_FAILED {exc.category}")
         return 1
-    except Exception:  # noqa: BLE001 -- sanitize backend and filesystem exceptions
-        print("CONTROLLED_RUNTIME_DELIVERY_PROBE_FAILED OPERATION_FAILED")
+    except Exception as exc:  # noqa: BLE001 -- sanitize backend and filesystem exceptions
+        diagnostic = failure_diagnostic(exc, diagnostics)
+        if evidence_path is not None and owner12 is not None:
+            try:
+                _write_evidence(
+                    evidence_path,
+                    {
+                        "schema_version": 1,
+                        "classification": "ISOLATED_CONTROLLED_RUNTIME_DELIVERY_ENGINEERING_ONLY",
+                        "database": args.database,
+                        "status": "FAILED",
+                        "failure_category": "OPERATION_FAILED",
+                        **diagnostic,
+                    },
+                )
+            except ProbeError:
+                pass
+        print(
+            "CONTROLLED_RUNTIME_DELIVERY_PROBE_FAILED OPERATION_FAILED "
+            + diagnostic["stage"]
+            + " "
+            + diagnostic["error_type"]
+        )
         return 1
     print(f"CONTROLLED_RUNTIME_DELIVERY_PROBE_PASS {evidence_path.name}")
     return 0
