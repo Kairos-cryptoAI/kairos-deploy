@@ -58,7 +58,9 @@ MAX_XRANGE_ENTRIES = 20_000
 MAX_XRANGE_BYTES = 32 * 1024**2
 XRANGE_PAGE_SIZE = 500
 MAX_STDOUT = 256 * 1024
-WORKER_REJECTION_FIELDS = frozenset({"state", "error", "stage", "exception_class"})
+WORKER_REJECTION_FIELDS = frozenset(
+    {"state", "error", "stage", "exception_class", "error_code", "diagnostic"}
+)
 WORKER_REJECTION_ERROR = "bounded read-only copy check failed"
 WORKER_REJECTION_STAGES = frozenset(
     {
@@ -99,6 +101,23 @@ WORKER_EXCEPTION_CLASSES = frozenset(
     }
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+PERSISTENCE_ERROR_CODES = frozenset(
+    {
+        "MANIFEST_INVENTORY_UNSUPPORTED",
+        "MANIFEST_TOO_LARGE",
+        "MANIFEST_NON_ASCII",
+        "MANIFEST_ENTRY_UNSUPPORTED",
+        "MANIFEST_SEQUENCE_TYPE_CONFLICT",
+        "COMPONENT_MISSING",
+        "BASE_CARDINALITY",
+        "UNREFERENCED_COMPONENT",
+        "ORPHANED_APPENDONLYDIR",
+        "NO_PERSISTENCE_IMAGE",
+    }
+)
+PERSISTENCE_FILENAME = re.compile(
+    r"^appendonly\.aof\.[0-9]{1,10}\.(?:base\.rdb|incr\.aof)$"
+)
 REVISION = re.compile(r"^[0-9a-f]{40}$")
 REDIS_RUN_ID = re.compile(r"^[0-9a-f]{40}$")
 STREAM_ID = re.compile(r"^[0-9]{1,20}-[0-9]{1,10}$")
@@ -110,6 +129,54 @@ WINDOWS_GPG = Path(r"C:\Program Files\Git\usr\bin\gpg.exe")
 
 class ColdRedisError(RuntimeError):
     """Sanitized fail-closed operational error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | None = None,
+        diagnostic: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = (
+            error_code
+            if isinstance(error_code, str) and error_code in PERSISTENCE_ERROR_CODES
+            else None
+        )
+        self.diagnostic = diagnostic if self.error_code is not None else None
+
+
+def _validate_persistence_diagnostic(value: object) -> dict[str, Any] | None:
+    """Accept only bounded metadata, never arbitrary worker-provided strings."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or len(value) > 6:
+        raise ColdRedisError("bounded persistence diagnostic is invalid")
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "manifest_sha256":
+            if not isinstance(item, str) or SHA256.fullmatch(item) is None:
+                raise ColdRedisError("bounded persistence diagnostic is invalid")
+            result[key] = item
+        elif key in {"entry_count", "recognized_file_count", "sequence"}:
+            maximum = 9_999_999_999 if key == "sequence" else MAX_SOURCE_FILES
+            if type(item) is not int or not 0 <= item <= maximum:
+                raise ColdRedisError("bounded persistence diagnostic is invalid")
+            result[key] = item
+        elif key == "filename":
+            if (
+                not isinstance(item, str)
+                or PERSISTENCE_FILENAME.fullmatch(item) is None
+            ):
+                raise ColdRedisError("bounded persistence diagnostic is invalid")
+            result[key] = item
+        elif key == "component_type":
+            if not isinstance(item, str) or item not in {"base", "incremental"}:
+                raise ColdRedisError("bounded persistence diagnostic is invalid")
+            result[key] = item
+        else:
+            raise ColdRedisError("bounded persistence diagnostic is invalid")
+    return result
 
 
 def _canonical(value: object) -> bytes:
@@ -450,13 +517,24 @@ class BoundedDocker:
                 or rejection.get("stage") not in WORKER_REJECTION_STAGES
                 or not isinstance(rejection.get("exception_class"), str)
                 or rejection.get("exception_class") not in WORKER_EXCEPTION_CLASSES
+                or rejection.get("error_code") is not None
+                and (
+                    not isinstance(rejection.get("error_code"), str)
+                    or rejection.get("error_code") not in PERSISTENCE_ERROR_CODES
+                )
             ):
+                raise ColdRedisError("bounded worker rejection record is invalid")
+            diagnostic = _validate_persistence_diagnostic(rejection.get("diagnostic"))
+            if rejection.get("error_code") is None and diagnostic is not None:
                 raise ColdRedisError("bounded worker rejection record is invalid")
             raise ColdRedisError(
                 "WORKER_REJECTED:"
                 + rejection["stage"]
                 + ":"
                 + rejection["exception_class"]
+                + (":" + rejection["error_code"] if rejection["error_code"] else ""),
+                error_code=rejection["error_code"],
+                diagnostic=diagnostic,
             )
         return output
 
@@ -754,6 +832,15 @@ def _copy_worker(mode: str) -> int:
         exception_class = type(exc).__name__
         if exception_class not in WORKER_EXCEPTION_CLASSES:
             exception_class = "OtherError"
+        error_code = getattr(exc, "error_code", None)
+        if error_code not in PERSISTENCE_ERROR_CODES:
+            error_code = None
+        try:
+            diagnostic = _validate_persistence_diagnostic(
+                getattr(exc, "diagnostic", None) if error_code else None
+            )
+        except ColdRedisError:
+            error_code, diagnostic = None, None
         print(
             json.dumps(
                 {
@@ -761,6 +848,8 @@ def _copy_worker(mode: str) -> int:
                     "error": WORKER_REJECTION_ERROR,
                     "stage": stage,
                     "exception_class": exception_class,
+                    "error_code": error_code,
+                    "diagnostic": diagnostic,
                 }
             )
         )
@@ -824,33 +913,62 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
     manifests = sorted(path for path in relative_files if path.endswith(".manifest"))
     multipart: list[str] = []
     manifest_sha256 = None
+    recognized_count = sum(
+        PERSISTENCE_FILENAME.fullmatch(Path(path).name) is not None
+        for path in relative_files
+    )
+
+    def reject(code: str, message: str, **metadata: Any) -> None:
+        diagnostic: dict[str, Any] = {
+            "recognized_file_count": min(recognized_count, MAX_SOURCE_FILES),
+            **metadata,
+        }
+        if manifest_sha256 is not None:
+            diagnostic["manifest_sha256"] = manifest_sha256
+        raise ColdRedisError(message, error_code=code, diagnostic=diagnostic)
+
     if manifests:
         if manifests != ["appendonlydir/appendonly.aof.manifest"]:
-            raise ColdRedisError(
-                "Redis AOF manifest inventory is ambiguous or unsupported"
+            reject(
+                "MANIFEST_INVENTORY_UNSUPPORTED",
+                "Redis AOF manifest inventory is ambiguous or unsupported",
             )
         manifest_path = root / manifests[0]
         if manifest_path.stat().st_size > 1024 * 1024:
-            raise ColdRedisError("Redis AOF manifest exceeds its metadata bound")
+            reject(
+                "MANIFEST_TOO_LARGE", "Redis AOF manifest exceeds its metadata bound"
+            )
         with _open_noatime(manifest_path) as stream:
             raw = stream.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
-            raise ColdRedisError("Redis AOF manifest exceeds its metadata bound")
+            reject(
+                "MANIFEST_TOO_LARGE", "Redis AOF manifest exceeds its metadata bound"
+            )
         manifest_sha256 = _sha256_bytes(raw)
         try:
             lines = raw.decode("ascii").splitlines()
         except UnicodeDecodeError:
-            raise ColdRedisError("Redis AOF manifest metadata is not ASCII") from None
+            reject(
+                "MANIFEST_NON_ASCII",
+                "Redis AOF manifest metadata is not ASCII",
+                entry_count=0,
+            )
         seen_sequences: set[tuple[int, str]] = set()
+        entry_count = 0
         for line in lines:
             if not line.strip():
                 continue
+            entry_count += 1
             match = re.fullmatch(
                 r"file (appendonly\.aof\.(\d+)\.(base\.rdb|incr\.aof)) seq (\d+) type ([bi])",
                 line,
             )
             if match is None:
-                raise ColdRedisError("Redis AOF manifest entry is unsupported")
+                reject(
+                    "MANIFEST_ENTRY_UNSUPPORTED",
+                    "Redis AOF manifest entry is unsupported",
+                    entry_count=min(entry_count, MAX_SOURCE_FILES),
+                )
             filename, filename_sequence, kind, sequence_text, entry_type = (
                 match.groups()
             )
@@ -861,23 +979,41 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
                 or filename_sequence != sequence_text
                 or (sequence, entry_type) in seen_sequences
             ):
-                raise ColdRedisError("Redis AOF manifest sequence or type conflicts")
+                reject(
+                    "MANIFEST_SEQUENCE_TYPE_CONFLICT",
+                    "Redis AOF manifest sequence or type conflicts",
+                    entry_count=min(entry_count, MAX_SOURCE_FILES),
+                    filename=filename,
+                    component_type="base" if entry_type == "b" else "incremental",
+                    sequence=min(sequence, 9_999_999_999),
+                )
             seen_sequences.add((sequence, entry_type))
             relative = "appendonlydir/" + filename
             if relative not in relative_files:
-                raise ColdRedisError(
-                    "Redis AOF manifest references a missing persistence file"
+                reject(
+                    "COMPONENT_MISSING",
+                    "Redis AOF manifest references a missing persistence file",
+                    entry_count=min(entry_count, MAX_SOURCE_FILES),
+                    filename=filename,
+                    component_type="base" if kind == "base.rdb" else "incremental",
+                    sequence=min(sequence, 9_999_999_999),
                 )
             multipart.append(relative)
         if not multipart or sum(path.endswith(".base.rdb") for path in multipart) != 1:
-            raise ColdRedisError("Redis multipart AOF manifest has no unique base file")
+            reject(
+                "BASE_CARDINALITY",
+                "Redis multipart AOF manifest has no unique base file",
+                entry_count=min(entry_count, MAX_SOURCE_FILES),
+            )
         listed = set(multipart) | set(manifests)
         aof_named = {
             path for path in relative_files if path.startswith("appendonlydir/")
         }
         if aof_named != listed:
-            raise ColdRedisError(
-                "Redis multipart AOF directory has unreferenced persistence files"
+            reject(
+                "UNREFERENCED_COMPONENT",
+                "Redis multipart AOF directory has unreferenced persistence files",
+                entry_count=min(entry_count, MAX_SOURCE_FILES),
             )
         mode = "REDIS_MULTIPART_AOF"
     else:
@@ -886,8 +1022,9 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
             path for path in relative_files if path.startswith("appendonlydir/")
         ]
         if appendonly_files:
-            raise ColdRedisError(
-                "Redis appendonlydir files have no controlling manifest"
+            reject(
+                "ORPHANED_APPENDONLYDIR",
+                "Redis appendonlydir files have no controlling manifest",
             )
         if legacy:
             mode = "REDIS_LEGACY_AOF"
@@ -895,7 +1032,10 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
         elif "dump.rdb" in relative_files:
             mode = "REDIS_RDB_FALLBACK"
         else:
-            raise ColdRedisError("Redis volume has no recognized persistence image")
+            reject(
+                "NO_PERSISTENCE_IMAGE",
+                "Redis volume has no recognized persistence image",
+            )
     return {
         "format": mode,
         "aof_manifest_sha256": manifest_sha256,
@@ -1613,6 +1753,7 @@ def execute(
     copy_proof: dict[str, Any] | None = None
     observation: dict[str, Any] | None = None
     error_category = None
+    error_diagnostic: dict[str, Any] | None = None
     try:
         runner_image_id = docker.call(
             ["image", "inspect", "--format", "{{.Id}}", RUNNER_IMAGE]
@@ -1760,6 +1901,11 @@ def execute(
         error_category = (
             exc.args[0] if isinstance(exc, ColdRedisError) else type(exc).__name__
         )
+        if (
+            isinstance(exc, ColdRedisError)
+            and exc.error_code in PERSISTENCE_ERROR_CODES
+        ):
+            error_diagnostic = _validate_persistence_diagnostic(exc.diagnostic)
     finally:
         docker.begin_cleanup()
         cleanup_ok = True
@@ -1861,6 +2007,7 @@ def execute(
         "publisher_calls": 0,
         "automatic_resolution": False,
         "error_category": error_category,
+        "error_diagnostic": error_diagnostic,
     }
     result["receipt_sha256"] = _sha256_bytes(_canonical(result))
     (revision_dir / "receipt.json").write_bytes(

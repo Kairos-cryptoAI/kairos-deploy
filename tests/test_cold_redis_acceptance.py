@@ -67,6 +67,8 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
                 "error": cold.WORKER_REJECTION_ERROR,
                 "stage": stage,
                 "exception_class": exception_class,
+                "error_code": None,
+                "diagnostic": None,
                 **extra,
             }
         )
@@ -325,6 +327,82 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
                         docker.call(start, allow_worker_rejection=True)
                     self.assertNotIn("secret", str(raised.exception).lower())
                     self.assertNotIn("PRIVATE_PAYLOAD", str(raised.exception))
+
+    def test_worker_persistence_reason_round_trips_only_safe_metadata(self) -> None:
+        diagnostic = {
+            "recognized_file_count": 0,
+            "entry_count": 1,
+            "filename": "appendonly.aof.7.base.rdb",
+            "component_type": "base",
+            "sequence": 7,
+            "manifest_sha256": "a" * 64,
+        }
+        rejection = json.loads(
+            self._worker_rejection(
+                stage="copy_persistence_before",
+                exception_class="ColdRedisError",
+                error_code="COMPONENT_MISSING",
+                diagnostic=diagnostic,
+            )
+        )
+        native = mock.Mock()
+        native.call.return_value = (1, json.dumps(rejection))
+        with tempfile.TemporaryDirectory() as temporary:
+            docker = cold.BoundedDocker(
+                Path(temporary), cold.time.monotonic() + 30, native
+            )
+            with self.assertRaises(cold.ColdRedisError) as raised:
+                docker.call(
+                    [
+                        "start",
+                        "--attach",
+                        "--interactive",
+                        "kairos-cold-redis-copy-" + "a" * 12,
+                    ],
+                    allow_worker_rejection=True,
+                )
+        self.assertEqual(raised.exception.error_code, "COMPONENT_MISSING")
+        self.assertEqual(raised.exception.diagnostic, diagnostic)
+        self.assertIn("COMPONENT_MISSING", str(raised.exception))
+        self.assertNotIn("PRIVATE", str(raised.exception))
+
+    def test_copy_worker_persistence_error_never_emits_manifest_body(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            target = Path(temporary) / "target"
+            source.mkdir()
+            target.mkdir()
+            (source / "appendonlydir").mkdir()
+            (source / "appendonlydir" / "appendonly.aof.manifest").write_text(
+                "PRIVATE MANIFEST BODY", encoding="ascii"
+            )
+            output = io.StringIO()
+            with (
+                mock.patch.object(cold, "Path", side_effect=[source, target]),
+                mock.patch.object(
+                    cold,
+                    "_manifest_tree",
+                    return_value={"file_count": 1, "total_bytes": 1},
+                ),
+                mock.patch.object(
+                    cold,
+                    "_persistence_layout",
+                    side_effect=cold.ColdRedisError(
+                        "sanitized failure",
+                        error_code="MANIFEST_ENTRY_UNSUPPORTED",
+                        diagnostic={"entry_count": 1, "recognized_file_count": 0},
+                    ),
+                ),
+                redirect_stdout(output),
+            ):
+                result = cold._copy_worker("copy-hash")
+        rejection = json.loads(output.getvalue())
+        self.assertEqual(result, 1)
+        self.assertEqual(rejection["error_code"], "MANIFEST_ENTRY_UNSUPPORTED")
+        self.assertEqual(rejection["stage"], "copy_persistence_before")
+        self.assertEqual(rejection["diagnostic"]["entry_count"], 1)
+        self.assertNotIn("PRIVATE", output.getvalue())
+        self.assertNotIn("BODY", output.getvalue())
 
     def test_nonzero_success_json_never_passes_and_nonworker_call_cannot_opt_in(
         self,
@@ -613,6 +691,81 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
             (appendonly / "appendonly.aof.1.incr.aof").unlink()
             with self.assertRaises(cold.ColdRedisError):
                 cold._persistence_layout(root)
+
+    def test_persistence_lineage_failures_emit_only_allowlisted_diagnostics(
+        self,
+    ) -> None:
+        def make_root(
+            parent: Path,
+            name: str,
+            manifest: str | None,
+            files: dict[str, bytes],
+        ):
+            root = parent / name
+            directory = root / "appendonlydir"
+            directory.mkdir(parents=True)
+            if manifest is not None:
+                (directory / "appendonly.aof.manifest").write_text(
+                    manifest, encoding="ascii"
+                )
+            for filename, body in files.items():
+                (directory / filename).write_bytes(body)
+            return root
+
+        cases = (
+            (
+                "malformed",
+                "PRIVATE BODY TOKEN",
+                {},
+                "MANIFEST_ENTRY_UNSUPPORTED",
+            ),
+            (
+                "missing",
+                "file appendonly.aof.7.base.rdb seq 7 type b\n",
+                {},
+                "COMPONENT_MISSING",
+            ),
+            (
+                "base",
+                "file appendonly.aof.1.incr.aof seq 1 type i\n",
+                {"appendonly.aof.1.incr.aof": b"PRIVATE AOF BODY"},
+                "BASE_CARDINALITY",
+            ),
+            (
+                "unreferenced",
+                "file appendonly.aof.1.base.rdb seq 1 type b\n",
+                {
+                    "appendonly.aof.1.base.rdb": b"PRIVATE RDB BODY",
+                    "appendonly.aof.2.incr.aof": b"PRIVATE AOF BODY",
+                },
+                "UNREFERENCED_COMPONENT",
+            ),
+            ("no-image", None, {}, "NO_PERSISTENCE_IMAGE"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            # The no-image case has no appendonlydir, so use a direct empty root.
+            for name, manifest, files, expected_code in cases:
+                with self.subTest(name=name):
+                    root = parent / name
+                    if name == "no-image":
+                        root.mkdir()
+                    else:
+                        root = make_root(parent, name, manifest, files)
+                    output = io.StringIO()
+                    with (
+                        redirect_stdout(output),
+                        self.assertRaises(cold.ColdRedisError) as raised,
+                    ):
+                        cold._persistence_layout(root)
+                    self.assertEqual(raised.exception.error_code, expected_code)
+                    diagnostic = cold._validate_persistence_diagnostic(
+                        raised.exception.diagnostic
+                    )
+                    serialized = json.dumps(diagnostic) + output.getvalue()
+                    self.assertNotIn("PRIVATE", serialized)
+                    self.assertNotIn("BODY", serialized)
+                    self.assertNotIn("/", diagnostic.get("filename", ""))
 
     def test_unique_complete_exact_match_is_positive_and_payload_free(self) -> None:
         payload = {"message_id": "target-2", "value": "must-not-leak"}
