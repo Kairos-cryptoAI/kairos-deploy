@@ -42,6 +42,12 @@ PRIOR_INTERRUPTION_SHA = (
 PRIOR_STORAGE = ROOT / "run-c02b4b44dab048a0b7abdc437f93249f/receipt.json"
 PRIOR_STORAGE_SHA = "f30fc5eb0befc5615cfbab4a3368accbb29ffa636b6293daf0df86424d79b66c"
 SOURCE = "kairos-paper-gate-timescaledb-1"
+PRIOR_COMPOSE = ROOT / "run-caffd376f0874b70b9aae4d7cbdf2c76/receipt.json"
+PRIOR_COMPOSE_SHA = "b8128193eb68ba9e711b558cf991b2c8895af49848d5409dba726c0c56a3ba56"
+COMPOSE_PLUGIN = Path(
+    "C:/Program Files/Docker/Docker/resources/cli-plugins/docker-compose.exe"
+)
+COMPOSE_PLUGIN_SHA = "c03de806bec942713b23233146f937c595c5a7342c5dc3328ac924ef9f5900ea"
 VOLUME = "kairos-paper-gate_paper-ts-data"
 NETWORK = "kairos-paper-gate_paper-data"
 SOURCE_ID = "dfe9c96b3307f07c7f88bb6cdae46dba903ebb1e7243c2534199da2843229774"
@@ -209,6 +215,10 @@ def supervisor_environment() -> dict[str, str]:
         "USERDOMAIN",
     }
     return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+
+
+def auth_free_docker_config() -> dict:
+    return {"cliPluginsExtraDirs": [COMPOSE_PLUGIN.parent.as_posix()]}
 
 
 def full_table_query(tables: list[str]) -> str:
@@ -438,11 +448,12 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v5.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v6.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
         (self.work / "docker-config").mkdir()
+        save(self.work / "docker-config/config.json", auth_free_docker_config())
         self.owned = {}
         self.phase = "ADMISSION"
         self.proofs = {}
@@ -479,11 +490,7 @@ class Controller:
                 process = subprocess.Popen(
                     [str(exe), *args],
                     cwd=REPO,
-                    env={
-                        k: v
-                        for k, v in os.environ.items()
-                        if k.upper() in {"SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
-                    },
+                    env=supervisor_environment(),
                     stdin=subprocess.DEVNULL,
                     stdout=out,
                     stderr=err,
@@ -954,6 +961,18 @@ class Controller:
 
     def run(self):
         self.protect_backup_directory()
+        if sha(COMPOSE_PLUGIN) != COMPOSE_PLUGIN_SHA:
+            raise Rejected("PINNED_INSTALLED_COMPOSE_PLUGIN_CHANGED")
+        compose_version = self.docker(["compose", "version", "--short"])
+        if not re.fullmatch(
+            r"v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?", compose_version
+        ):
+            raise Rejected("ISOLATED_COMPOSE_PLUGIN_PREFLIGHT_FAILED")
+        self.proofs["compose_plugin"] = {
+            "sha256": COMPOSE_PLUGIN_SHA,
+            "version": compose_version,
+            "auth_free_configuration": True,
+        }
         self.phase = "COLD_READONLY_BACKUP"
         before = self.source()
         save(self.work / "source-before.json", before)
@@ -1109,6 +1128,8 @@ class Controller:
         save(self.work / "source-after.json", after)
         if after != before or self.helper() != cold:
             raise Rejected("PRIMARY_IDENTITY_OR_CONTENT_CHANGED")
+        if sha(COMPOSE_PLUGIN) != COMPOSE_PLUGIN_SHA:
+            raise Rejected("COMPOSE_PLUGIN_CHANGED_DURING_RESTORE")
         self.proofs.update(
             primary_source_sha256=digest(before),
             primary_content_sha256=cold["files_sha256"],
@@ -1421,9 +1442,25 @@ def main(argv=None):
         or "official_backup" in prior_storage.get("proofs", {})
     ):
         raise Rejected("PRIOR_STORAGE_CLEANUP_OR_NO_BACKUP_UNPROVEN")
+    if sha(PRIOR_COMPOSE) != PRIOR_COMPOSE_SHA:
+        raise Rejected("PRESERVED_COMPOSE_DIAGNOSTIC_CHANGED")
+    prior_compose = json.loads(PRIOR_COMPOSE.read_text())
+    compose_journal = PRIOR_COMPOSE.parent / "backup-native-journal"
+    complete = json.loads((compose_journal / "native-001.complete.json").read_text())
+    if (
+        prior_compose.get("cleanup_verified") is not True
+        or prior_compose.get("result") != "FAILED_CLOSED"
+        or {item.name for item in compose_journal.iterdir()}
+        != {"native-001.start.json", "native-001.complete.json"}
+        or complete.get("owner") != "caffd376f0874b70b9aae4d7cbdf2c76"
+        or complete.get("category") != "COMPOSE_PS"
+        or complete.get("return_code") != 125
+    ):
+        raise Rejected("PRIOR_COMPOSE_TERMINAL_NO_DUMP_OR_CLEANUP_UNPROVEN")
     if args.supervise:
         return supervise(args)
     controller = Controller()
+    controller.proofs["preserved_compose_diagnostic_sha256"] = PRIOR_COMPOSE_SHA
     controller.proofs["preserved_storage_diagnostic_sha256"] = PRIOR_STORAGE_SHA
     controller.proofs["reviewed_deploy_revision"] = args.expected_revision
     controller.proofs["preserved_prebackup_diagnostic_sha256"] = (

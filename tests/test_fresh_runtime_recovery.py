@@ -88,6 +88,16 @@ class FreshRuntimeRecoveryTests(unittest.TestCase):
                 {"USERPROFILE": "fixture-profile", "PATH": "fixture-bin"},
             )
 
+    def test_public_compose_plugin_config_contains_no_auth_or_shared_context(self):
+        self.assertEqual(
+            recovery.auth_free_docker_config(),
+            {
+                "cliPluginsExtraDirs": [
+                    "C:/Program Files/Docker/Docker/resources/cli-plugins"
+                ]
+            },
+        )
+
     def test_copy_directory_times_are_restored_deepest_first(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "fixture.tar"
