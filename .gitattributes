@@ -5,3 +5,4 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 Dockerfile text eol=lf
+scripts/controlled_runtime_build-constraints.txt text eol=lf
