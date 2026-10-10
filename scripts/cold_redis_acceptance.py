@@ -108,6 +108,7 @@ PERSISTENCE_ERROR_CODES = frozenset(
         "MANIFEST_NON_ASCII",
         "MANIFEST_ENTRY_UNSUPPORTED",
         "MANIFEST_SEQUENCE_TYPE_CONFLICT",
+        "MANIFEST_OFFSETS_INVALID",
         "COMPONENT_MISSING",
         "BASE_CARDINALITY",
         "UNREFERENCED_COMPONENT",
@@ -959,8 +960,15 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
             if not line.strip():
                 continue
             entry_count += 1
+            # Redis 8.2.2 src/aof.c aofInfoFormat/loadAppendOnlyManifest permits
+            # optional incremental replication offsets; no payload is exposed.
+            # https://raw.githubusercontent.com/redis/redis/8.2.2/src/aof.c
             match = re.fullmatch(
-                r"file (appendonly\.aof\.(\d+)\.(base\.rdb|incr\.aof)) seq (\d+) type ([bi])",
+                r"file (appendonly\.aof\."
+                r"(?P<filename_sequence>\d+)\.(?P<kind>base\.rdb|incr\.aof)) "
+                r"seq (?P<sequence>\d+) type (?P<entry_type>[bi])"
+                r"(?: startoffset (?P<startoffset>0|[1-9][0-9]{0,18})"
+                r"(?: endoffset (?P<endoffset>0|[1-9][0-9]{0,18}))?)?",
                 line,
             )
             if match is None:
@@ -969,9 +977,9 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
                     "Redis AOF manifest entry is unsupported",
                     entry_count=min(entry_count, MAX_SOURCE_FILES),
                 )
-            filename, filename_sequence, kind, sequence_text, entry_type = (
-                match.groups()
-            )
+            filename, filename_sequence, kind = match.group(1, 2, 3)
+            sequence_text = match.group("sequence")
+            entry_type = match.group("entry_type")
             sequence = int(sequence_text)
             expected_type = "b" if kind == "base.rdb" else "i"
             if (
@@ -988,6 +996,27 @@ def _persistence_layout(root: Path) -> dict[str, Any]:
                     sequence=min(sequence, 9_999_999_999),
                 )
             seen_sequences.add((sequence, entry_type))
+            startoffset = match.group("startoffset")
+            endoffset = match.group("endoffset")
+            if startoffset is not None:
+                start_value = int(startoffset)
+                end_value = int(endoffset) if endoffset is not None else None
+                if (
+                    entry_type != "i"
+                    or start_value > 9_223_372_036_854_775_807
+                    or end_value is not None
+                    and (
+                        end_value > 9_223_372_036_854_775_807 or end_value < start_value
+                    )
+                ):
+                    reject(
+                        "MANIFEST_OFFSETS_INVALID",
+                        "Redis AOF manifest offset metadata conflicts",
+                        entry_count=min(entry_count, MAX_SOURCE_FILES),
+                        filename=filename,
+                        component_type="base" if entry_type == "b" else "incremental",
+                        sequence=min(sequence, 9_999_999_999),
+                    )
             relative = "appendonlydir/" + filename
             if relative not in relative_files:
                 reject(

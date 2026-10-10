@@ -692,6 +692,107 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
             with self.assertRaises(cold.ColdRedisError):
                 cold._persistence_layout(root)
 
+    def test_persistence_manifest_accepts_canonical_incremental_offsets(self) -> None:
+        layouts = []
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            for name, suffix in (
+                ("no-offsets", ""),
+                ("start-only", " startoffset 0"),
+                (
+                    "start-end",
+                    " startoffset 9223372036854775806 endoffset 9223372036854775807",
+                ),
+            ):
+                with self.subTest(name=name):
+                    root = parent / name
+                    appendonly = root / "appendonlydir"
+                    appendonly.mkdir(parents=True)
+                    manifest = (
+                        "file appendonly.aof.1.base.rdb seq 1 type b"
+                        + chr(10)
+                        + "file appendonly.aof.2.incr.aof seq 2 type i"
+                        + suffix
+                        + chr(10)
+                    )
+                    manifest_path = appendonly / "appendonly.aof.manifest"
+                    manifest_path.write_text(manifest, encoding="ascii")
+                    (appendonly / "appendonly.aof.1.base.rdb").write_bytes(b"base")
+                    (appendonly / "appendonly.aof.2.incr.aof").write_bytes(b"incr")
+                    layout = cold._persistence_layout(root)
+                    self.assertEqual(layout["format"], "REDIS_MULTIPART_AOF")
+                    self.assertEqual(
+                        layout["aof_manifest_sha256"],
+                        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                    )
+                    serialized = json.dumps(layout)
+                    self.assertNotIn("startoffset", serialized)
+                    self.assertNotIn("endoffset", serialized)
+                    self.assertNotIn("9223372036854775806", serialized)
+                    self.assertNotIn("9223372036854775807", serialized)
+                    layouts.append(layout)
+        self.assertEqual(layouts[0]["aof_file_hashes"], layouts[1]["aof_file_hashes"])
+        self.assertEqual(layouts[1]["aof_file_hashes"], layouts[2]["aof_file_hashes"])
+
+    def test_persistence_manifest_rejects_noncanonical_or_unsafe_offsets(self) -> None:
+        invalid_lines = (
+            "file appendonly.aof.2.incr.aof seq 2 type i endoffset 9",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 1 startoffset 2",
+            (
+                "file appendonly.aof.2.incr.aof seq 2 type i "
+                "startoffset 1 endoffset 2 endoffset 3"
+            ),
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset -1",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 1.5",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 01",
+            (
+                "file appendonly.aof.2.incr.aof seq 2 type i "
+                "startoffset 9223372036854775808"
+            ),
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 10 endoffset 9",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 1 endoffset -1",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 1 endoffset 1.5",
+            (
+                "file appendonly.aof.2.incr.aof seq 2 type i "
+                "startoffset 1 endoffset 9223372036854775808"
+            ),
+            "file appendonly.aof.3.base.rdb seq 3 type b startoffset 1",
+            "file appendonly.aof.2.incr.aof seq 2 type i startoffset 1 arbitrary value",
+            "file appendonly.aof.2.incr.aof seq 2 type h",
+            "file ../appendonly.aof.2.incr.aof seq 2 type i startoffset 1",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            for index, line in enumerate(invalid_lines):
+                with self.subTest(line=line):
+                    root = parent / str(index)
+                    appendonly = root / "appendonlydir"
+                    appendonly.mkdir(parents=True)
+                    manifest = (
+                        "file appendonly.aof.1.base.rdb seq 1 type b"
+                        + chr(10)
+                        + line
+                        + chr(10)
+                    )
+                    (appendonly / "appendonly.aof.manifest").write_text(
+                        manifest, encoding="ascii"
+                    )
+                    (appendonly / "appendonly.aof.1.base.rdb").write_bytes(b"base")
+                    (appendonly / "appendonly.aof.2.incr.aof").write_bytes(b"incr")
+                    with self.assertRaises(cold.ColdRedisError) as raised:
+                        cold._persistence_layout(root)
+                    self.assertIn(
+                        raised.exception.error_code,
+                        {
+                            "MANIFEST_ENTRY_UNSUPPORTED",
+                            "MANIFEST_OFFSETS_INVALID",
+                        },
+                    )
+                    public = json.dumps(raised.exception.diagnostic)
+                    self.assertNotIn("startoffset", public)
+                    self.assertNotIn("endoffset", public)
+                    self.assertNotIn("9223372036854775808", public)
+
     def test_persistence_lineage_failures_emit_only_allowlisted_diagnostics(
         self,
     ) -> None:
