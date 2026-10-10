@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tarfile
@@ -44,6 +45,10 @@ PRIOR_STORAGE_SHA = "f30fc5eb0befc5615cfbab4a3368accbb29ffa636b6293daf0df86424d7
 SOURCE = "kairos-paper-gate-timescaledb-1"
 PRIOR_DISCOVERY = ROOT / "run-27b78621945747edb9e0d88f85dea906/receipt.json"
 PRIOR_DISCOVERY_SHA = "2669484db4668d958c532c94c3a4a74d8abc478e22ac934b60016f582c923eaf"
+PRIOR_COPY_EXPORT = ROOT / "run-2f6b64bd09d74fa9befee48e59700db2/receipt.json"
+PRIOR_COPY_EXPORT_SHA = (
+    "9e9e101a741873e8fe40ee48681d9eb5859db73c86a20429449397d27c22d7de"
+)
 PRIOR_COMPOSE = ROOT / "run-caffd376f0874b70b9aae4d7cbdf2c76/receipt.json"
 PRIOR_COMPOSE_SHA = "b8128193eb68ba9e711b558cf991b2c8895af49848d5409dba726c0c56a3ba56"
 COMPOSE_PLUGIN = Path(
@@ -103,6 +108,7 @@ MIGRATIONS = [
 ]
 SECONDS = 1500
 MEMORY_BYTES = 4 * 1024**3
+SCRATCH_BYTES = 128 * 1024**2
 WATCHDOG = f"(sleep {SECONDS}; kill -TERM 1) &\n"
 VIEW = (
     '{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},'
@@ -241,7 +247,6 @@ def source_copy_compose(owner: str, name: str, directory: Path, script: str) -> 
                 "tmpfs": [
                     "/var/lib/postgresql/data:rw,nosuid,nodev,size=3g,uid=70,gid=70,mode=0700",
                     "/var/run/postgresql:rw,nosuid,nodev,size=8m,uid=70,gid=70",
-                    "/tmp:rw,nosuid,nodev,size=128m,uid=70,gid=70",
                 ],
                 "volumes": [
                     {
@@ -249,7 +254,13 @@ def source_copy_compose(owner: str, name: str, directory: Path, script: str) -> 
                         "source": str(directory),
                         "target": "/cold",
                         "read_only": True,
-                    }
+                    },
+                    {
+                        "type": "bind",
+                        "source": str(directory / (name + "-scratch")),
+                        "target": "/tmp",
+                        "read_only": False,
+                    },
                 ],
                 "entrypoint": "/bin/sh",
                 # Compose interpolation must render the original shell dollars.
@@ -258,6 +269,32 @@ def source_copy_compose(owner: str, name: str, directory: Path, script: str) -> 
             }
         }
     }
+
+
+def scratch_bytes(directories: list[Path]) -> int:
+    """Observed disk scratch ceiling; never follow links or read file values."""
+    total = 0
+    for directory in directories:
+        for item in (directory, *directory.rglob("*")):
+            try:
+                metadata = item.lstat()
+            except FileNotFoundError:
+                # The unchanged official finally may unlink its own dump while
+                # this observer scans. Missing root ownership is not accepted.
+                if item == directory:
+                    raise Rejected("OWN_SCRATCH_DIRECTORY_MISSING") from None
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or (
+                getattr(metadata, "st_file_attributes", 0) & 0x400
+            ):
+                raise Rejected("SCRATCH_LINK_REJECTED")
+            if stat.S_ISREG(metadata.st_mode):
+                total += metadata.st_size
+            elif not stat.S_ISDIR(metadata.st_mode):
+                raise Rejected("SCRATCH_SPECIAL_FILE_REJECTED")
+    if total > SCRATCH_BYTES:
+        raise Rejected("OWN_DISK_SCRATCH_BYTE_CEILING_EXCEEDED")
+    return total
 
 
 def full_table_query(tables: list[str]) -> str:
@@ -487,13 +524,14 @@ class Controller:
         self.work = ROOT / ("run-" + self.owner)
         self.work.mkdir()
         # The pre-backup capacity admission failure is preserved, not adopted.
-        self.lease = ROOT / "fresh-recovery-v7.execution.lock"
+        self.lease = ROOT / "fresh-recovery-v8.execution.lock"
         write(self.lease, self.owner.encode())
         self.deadline = time.monotonic() + SECONDS
         self.native = bounded.Native(self.work)
         (self.work / "docker-config").mkdir()
         save(self.work / "docker-config/config.json", auth_free_docker_config())
         self.owned = {}
+        self.scratch_directories = []
         self.phase = "ADMISSION"
         self.proofs = {}
         self.cleanup_deadline = None
@@ -513,9 +551,21 @@ class Controller:
 
     def docker(self, args, seconds=20, allow_failure=False):
         end = self.cleanup_deadline or self.deadline
-        return self.native.call(
+        if self.cleanup_deadline is None:
+            self.check_scratch()
+        result = self.native.call(
             args, end, seconds=seconds, allow_failure=allow_failure
         )[1]
+        if self.cleanup_deadline is None:
+            self.check_scratch()
+        return result
+
+    def check_scratch(self):
+        amount = scratch_bytes(getattr(self, "scratch_directories", []))
+        self.proofs["disk_scratch_peak_observed_bytes"] = max(
+            amount, self.proofs.get("disk_scratch_peak_observed_bytes", 0)
+        )
+        self.proofs["disk_scratch_observed_ceiling_bytes"] = SCRATCH_BYTES
 
     def process(self, exe, args, seconds, label="official"):
         outpath, errpath = (
@@ -539,6 +589,7 @@ class Controller:
                 job.attach_and_resume(process)
                 end = min(time.monotonic() + seconds, self.deadline - 10)
                 while process.poll() is None:
+                    self.check_scratch()
                     if (
                         time.monotonic() >= end
                         or outpath.stat().st_size > 256 * 1024
@@ -546,6 +597,7 @@ class Controller:
                     ):
                         raise Rejected("OFFICIAL_BACKUP_BOUND_EXCEEDED")
                     time.sleep(0.05)
+                self.check_scratch()
                 if process.returncode != 0:
                     raise Rejected("OFFICIAL_BACKUP_FAILED_PRIVATE_DIAGNOSTIC")
         finally:
@@ -627,13 +679,27 @@ class Controller:
         return normalize_source(value)
 
     def create(
-        self, name, *, mounts=(), labels=(), command=(), entrypoint=None, database=None
+        self,
+        name,
+        *,
+        mounts=(),
+        labels=(),
+        command=(),
+        entrypoint=None,
+        database=None,
+        disk_scratch=False,
     ):
         if name in self.owned or not name.startswith(
             "kairos-recovery-" + self.owner[:12] + "-"
         ):
             raise Rejected("FRESH_OWNED_NAME_REQUIRED")
-        self.owned[name] = list(mounts)
+        mounts = list(mounts)
+        if disk_scratch:
+            directory = safe(self.work / (name + "-scratch"))
+            directory.mkdir()
+            self.scratch_directories.append(directory)
+            mounts.append("type=bind,src=" + str(directory) + ",dst=/tmp")
+        self.owned[name] = mounts
         args = [
             "create",
             "--pull=never",
@@ -656,9 +722,9 @@ class Controller:
             "/var/lib/postgresql/data:rw,nosuid,nodev,size=3g,uid=70,gid=70,mode=0700",
             "--tmpfs",
             "/var/run/postgresql:rw,nosuid,nodev,size=8m,uid=70,gid=70",
-            "--tmpfs",
-            "/tmp:rw,nosuid,nodev,size=128m,uid=70,gid=70",
         ]
+        if not disk_scratch:
+            args += ["--tmpfs", "/tmp:rw,nosuid,nodev,size=128m,uid=70,gid=70"]
         for mount in mounts:
             args += ["--mount", mount]
         for label in labels:
@@ -958,6 +1024,7 @@ class Controller:
             name,
             mounts=["type=bind,src=" + str(dump) + ",dst=/archive.dump,readonly"],
             database=database,
+            disk_scratch=True,
             entrypoint="/bin/sh",
             command=[
                 "-c",
@@ -1086,6 +1153,7 @@ class Controller:
             name,
             mounts=["type=bind,src=" + str(self.work) + ",dst=/cold,readonly"],
             labels=labels,
+            disk_scratch=True,
             entrypoint="/bin/sh",
             command=["-c", script],
         )
@@ -1543,9 +1611,30 @@ def main(argv=None):
         or list(PRIOR_DISCOVERY.parent.glob("*.dump*"))
     ):
         raise Rejected("PRIOR_DISCOVERY_TERMINAL_NO_DUMP_OR_CLEANUP_UNPROVEN")
+    if sha(PRIOR_COPY_EXPORT) != PRIOR_COPY_EXPORT_SHA:
+        raise Rejected("PRESERVED_COPY_EXPORT_DIAGNOSTIC_CHANGED")
+    export_failure = json.loads(PRIOR_COPY_EXPORT.read_text())
+    export_journal = PRIOR_COPY_EXPORT.parent / "backup-native-journal"
+    export_copy = json.loads((export_journal / "native-025.complete.json").read_text())
+    export_cleanup = json.loads(
+        (export_journal / "native-026.complete.json").read_text()
+    )
+    if (
+        export_failure.get("result") != "FAILED_CLOSED"
+        or export_failure.get("cleanup_verified") is not True
+        or export_failure.get("owner") != "2f6b64bd09d74fa9befee48e59700db2"
+        or export_copy.get("category") != "OWN_BACKUP_COPY"
+        or export_copy.get("return_code") != 1
+        or export_cleanup.get("category") != "OWN_SCRATCH_CLEANUP"
+        or export_cleanup.get("return_code") != 0
+        or len(list(export_journal.iterdir())) != 52
+        or list(PRIOR_COPY_EXPORT.parent.glob("*.dump*"))
+    ):
+        raise Rejected("PRIOR_COPY_EXPORT_TERMINAL_OR_CLEANUP_UNPROVEN")
     if args.supervise:
         return supervise(args)
     controller = Controller()
+    controller.proofs["preserved_copy_export_diagnostic_sha256"] = PRIOR_COPY_EXPORT_SHA
     controller.proofs["preserved_discovery_diagnostic_sha256"] = PRIOR_DISCOVERY_SHA
     controller.proofs["preserved_compose_diagnostic_sha256"] = PRIOR_COMPOSE_SHA
     controller.proofs["preserved_storage_diagnostic_sha256"] = PRIOR_STORAGE_SHA

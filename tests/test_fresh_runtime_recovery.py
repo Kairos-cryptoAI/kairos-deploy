@@ -111,7 +111,39 @@ class FreshRuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(service["memswap_limit"], "4g")
         self.assertEqual(service["command"], ["-c", "exec postgres $$public_setting"])
         self.assertTrue(service["volumes"][0]["read_only"])
+        self.assertEqual(len(service["volumes"]), 2)
+        self.assertEqual(service["volumes"][1]["target"], "/tmp")
+        self.assertFalse(service["volumes"][1]["read_only"])
+        self.assertTrue(
+            service["volumes"][1]["source"]
+            .replace("\\", "/")
+            .endswith("/isolated-copy-scratch")
+        )
+        self.assertFalse(any(item.startswith("/tmp:") for item in service["tmpfs"]))
         self.assertNotIn("environment", service)
+
+    def test_owned_disk_scratch_ceiling_is_observed_without_file_value_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "public.fixture").write_bytes(b"abc")
+            self.assertEqual(recovery.scratch_bytes([path]), 3)
+            with (
+                patch.object(recovery, "SCRATCH_BYTES", 2),
+                self.assertRaisesRegex(recovery.Rejected, "CEILING_EXCEEDED"),
+            ):
+                recovery.scratch_bytes([path])
+        with self.assertRaisesRegex(recovery.Rejected, "DIRECTORY_MISSING"):
+            recovery.scratch_bytes([path])
+
+    def test_recovery_cleanup_is_not_blocked_by_exceeded_scratch_ceiling(self):
+        controller = object.__new__(recovery.Controller)
+        controller.cleanup_deadline = 123
+        controller.deadline = 456
+        controller.native = type(
+            "Native", (), {"call": lambda *args, **kwargs: (0, "owned-cleanup")}
+        )()
+        controller.check_scratch = lambda: self.fail("cleanup must remain available")
+        self.assertEqual(controller.docker(["rm", "-f", "owned"]), "owned-cleanup")
 
     def test_copy_directory_times_are_restored_deepest_first(self):
         with tempfile.TemporaryDirectory() as directory:
