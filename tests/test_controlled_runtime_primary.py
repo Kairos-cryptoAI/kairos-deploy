@@ -236,10 +236,11 @@ class PrimaryAdmissionTests(unittest.TestCase):
         )
 
     def test_signature_verification_uses_posix_file_arguments_and_exact_signer(self):
-        trusted_key = (
-            Path(__file__).resolve().parents[1]
-            / "tests/offline_outbox_reconciliation/trusted-signer.asc"
-        )
+        # This is an argument/status parser unit fixture, not a GPG acceptance.
+        # Do not bind it to a particular checkout's key-file line endings.
+        trusted_key = self.root / "trusted-signer.asc"
+        trusted_key.write_bytes(b"public-key unit fixture, never imported")
+        trusted_key_sha256 = primary.fresh.sha(trusted_key)
         executable = self.root / "fixture-gpg"
         executable.write_bytes(b"not executed")
         receipt = self.root / "receipt.json"
@@ -257,6 +258,7 @@ class PrimaryAdmissionTests(unittest.TestCase):
         with (
             mock.patch.object(primary, "GPG", executable),
             mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
+            mock.patch.object(primary, "TRUSTED_KEY_SHA256", trusted_key_sha256),
         ):
             primary._verify_signature(controller, receipt, signature, "clone")
         calls = controller.process.call_args_list
@@ -282,9 +284,20 @@ class PrimaryAdmissionTests(unittest.TestCase):
         with (
             mock.patch.object(primary, "GPG", executable),
             mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
+            mock.patch.object(primary, "TRUSTED_KEY_SHA256", trusted_key_sha256),
             self.assertRaisesRegex(primary.fresh.Rejected, "SIGNER_MISMATCH"),
         ):
             primary._verify_signature(controller, receipt, signature, "other")
+
+        trusted_key.write_bytes(b"changed public-key unit fixture")
+        with (
+            mock.patch.object(primary, "TRUSTED_KEY", trusted_key),
+            mock.patch.object(primary, "TRUSTED_KEY_SHA256", trusted_key_sha256),
+            self.assertRaisesRegex(
+                primary.fresh.Rejected, "TRUSTED_SIGNER_KEY_CHANGED"
+            ),
+        ):
+            primary._verify_signature(controller, receipt, signature, "changed-key")
 
     def test_gpg_file_paths_map_local_drives_and_reject_relative_or_unc(self):
         self.assertEqual(
