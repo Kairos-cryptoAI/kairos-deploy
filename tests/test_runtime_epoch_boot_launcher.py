@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,61 @@ INSTALLER = REPO_ROOT / "scripts" / "Install-NonTradingEpochBootTask.ps1"
 
 
 class RuntimeEpochBootLauncherTests(unittest.TestCase):
+    def test_native_job_launches_python_with_exact_quoted_arguments(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Native suspended Windows process/job requires Windows")
+        executable = shutil.which("powershell") or shutil.which("pwsh")
+        if executable is None:
+            self.skipTest("PowerShell is not installed")
+        from scripts import runtime_epoch_boot as boot
+
+        interpreter = boot.PYTHON if boot.PYTHON.is_file() else Path(sys.executable)
+        expected = ["space value", 'embedded"quote', "trailing\\path\\\\"]
+        probe = "import sys; raise SystemExit(sys.argv[1:] != " + repr(expected) + ")"
+        arguments = ["-I", "-c", probe, *expected]
+        quoted = ",".join("'" + value.replace("'", "''") + "'" for value in arguments)
+        command = (
+            "$ErrorActionPreference='Stop'; $tokens=$null; $errors=$null; "
+            f"$ast=[Management.Automation.Language.Parser]::ParseFile('{LAUNCHER.as_posix()}',"
+            "[ref]$tokens,[ref]$errors); "
+            "$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] "
+            "-and $node.Name -eq 'ConvertTo-WindowsCommandLineArgument'},$false) "
+            "| ForEach-Object {Invoke-Expression $_.Extent.Text}; "
+            "$typeBlock=@($ast.EndBlock.Statements | Where-Object "
+            "{$_.Extent.Text.StartsWith(\"if (-not ('KairosEpochBootProcessJob'\")}); "
+            "if($typeBlock.Count -ne 1){throw 'Exact native type required'}; "
+            "Invoke-Expression $typeBlock[0].Extent.Text; "
+            f"$application='{interpreter.as_posix()}'; $probeArguments=@({quoted}); "
+            "$commandLine=(@((ConvertTo-WindowsCommandLineArgument -Value $application))+"
+            "@($probeArguments | ForEach-Object {ConvertTo-WindowsCommandLineArgument -Value $_})) -join ' '; "
+            "$launch=$null; try { "
+            "$launch=[KairosEpochBootProcessJob]::StartSuspendedInKillOnCloseJob("
+            f"$application,$commandLine,'{REPO_ROOT.as_posix()}'); "
+            "if(-not [KairosEpochBootProcessJob]::WaitForExit($launch.ProcessHandle,10000)){"
+            "[KairosEpochBootProcessJob]::TerminateJob($launch.JobHandle,1);throw 'Bounded native probe timeout'}; "
+            "if([KairosEpochBootProcessJob]::ExitCode($launch.ProcessHandle) -ne 0){throw 'Native argv mismatch'}; "
+            "Write-Output 'NATIVE_PYTHON_QUOTED_ARGV_PASS' "
+            "} finally {if($null -ne $launch){[KairosEpochBootProcessJob]::Close($launch.JobHandle);"
+            "[KairosEpochBootProcessJob]::Close($launch.ProcessHandle)}}"
+        )
+        result = subprocess.run(
+            [
+                executable,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("NATIVE_PYTHON_QUOTED_ARGV_PASS", result.stdout)
+
     def test_launcher_is_scoped_to_the_single_authorized_epoch(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
 

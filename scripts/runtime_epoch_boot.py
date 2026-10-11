@@ -31,7 +31,10 @@ PARENT = epoch.ROOT / ("run-" + OWNER)
 SERVE_WORK = PARENT / "continuation-05"
 SCOPE = "kairos-nontrading-runtime-epoch-boot-v1"
 PYTHON = Path(
-    "C:/Users/loval/AppData/Roaming/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe"
+    # Task Scheduler runs outside Codex's packaged AppData virtualization.
+    # Pin the physical installation, not its in-app Roaming alias.
+    "C:/Users/loval/AppData/Local/Packages/OpenAI.Codex_2p2nqsd0c76g0/"
+    "LocalCache/Roaming/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe"
 )
 PARENT_RECEIPT_SHA256 = (
     "9e5b66868c4e01d1b047d3603eba6fc9673419e838da34e1bd54d579fa70ec4b"

@@ -492,6 +492,8 @@ exact signed, clean `main` revision, private input hashes and three existing
 container IDs. Docker restart policies stay `no`; the task runs once after the
 current user's Windows logon, waits for the local Linux engine, and never starts
 Docker Desktop or changes its settings. This is not a headless host-boot service.
+The interpreter binding uses the physical installation path, not Codex's
+virtualized AppData alias, which is unavailable to an ordinary Windows task.
 
 After an outage it checks completed publication/inbox identities, all 32 public
 tables, sequences, five contiguous bar chains and the original immutable prefix.
