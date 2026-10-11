@@ -104,6 +104,24 @@ CONTINUATION_02_LOG_SHA256 = (
 CONTINUATION_02_ATTEMPT_01_EVIDENCE_SHA256 = (
     "1a38840e1a5eed71b620de8f95bfc7f306a822f56e228a3dbc154145c87716cb"
 )
+CONTINUATION_03_FAILURE_SHA256 = (
+    "af99f442f9d5f09ec233665e69f6ee7d99b4e48abf73bfbeccc9b3f94934f568"
+)
+CONTINUATION_03_DUMP_SHA256 = (
+    "9b71fd227deae40a2521d8424647d1565436b13b2bc3cc283ad6b5453f89057f"
+)
+CONTINUATION_03_STATUS_SHA256 = (
+    "a4882f83b1b1ff2cf5db1bb612f1a3e1e742bb44b7c2d4e250de85dc76848637"
+)
+CONTINUATION_03_RESTORE_CONTAINER_ID = (
+    "69d9629d1c9e613452a270dce33cf12bb3936813ce0b1bc50c64c81d3597c499"
+)
+CONTINUATION_03_VERIFY_WORKER_ID = (
+    "1bd8970eba840961a8082da61cca91e051f23ec097305bb49171dc8f18965512"
+)
+CONTINUATION_03_OPERATOR_SHA256 = (
+    "5077a33c6a97eebc8859c995846ab3ffedea03d14ce6c509b9e02750a2983341"
+)
 QUANT_REPO = Path("D:/Kairos/kairos-quant-scouts")
 QUANT_REVISION = "77c3d3e813faeb042661dacecd148226d8a25834"
 CORE_REVISION = "6937eb4773fc00afaf5ba4e020b28b689f48e377"
@@ -143,6 +161,18 @@ def resource_names(owner: str) -> dict[str, str]:
         "redis": prefix + "-redis",
         "serve": prefix + "-serve",
     }
+
+
+def continuation_worker_name(owner: str, attempt: str) -> str:
+    if attempt not in {"01", "02", "03", "04"}:
+        raise Rejected("EXACT_CONTINUATION_ATTEMPT_REQUIRED")
+    return (
+        "kairos-epoch-"
+        + owner_name(owner)[:12]
+        + "-continue-"
+        + attempt
+        + "-verify-restore-precontinuation"
+    )
 
 
 def validate_worker_config(value: object, *, mode: str) -> dict:
@@ -1602,6 +1632,13 @@ class EpochController:
         expected_owned = {self.names["target_pg"], self.names["redis"], failed_worker}
         if failed_initializer:
             expected_owned.add(failed_initializer)
+        if self.continuation_attempt == "04":
+            expected_owned.update(
+                {
+                    continuation_worker_name(self.owner, "03"),
+                    self.names["restore_pg"],
+                }
+            )
         if set(all_owned) != expected_owned:
             raise Rejected("EXACT_FAILED_EPOCH_RESOURCE_SET_REQUIRED")
         continuation_prefix = (
@@ -1704,6 +1741,65 @@ class EpochController:
                 str(AUX_WHEELHOUSE): ("/aux-wheels", False),
             },
         )
+        if self.continuation_attempt == "04":
+            old_verify = continuation_worker_name(self.owner, "03")
+            verify = self.inspect_container(old_verify)
+            verify_exit_code = (verify.get("state") or {}).get("ExitCode")
+            if (
+                (verify.get("state") or {}).get("Status") != "exited"
+                or type(verify_exit_code) is not int
+                or verify_exit_code == 0
+                or verify.get("name") != "/" + old_verify
+                or (verify.get("labels") or {}).get(EPOCH_LABEL) != self.owner
+                or (verify.get("labels") or {}).get("com.kairos.runtime-epoch.scope")
+                != EPOCH_SCOPE
+                or verify.get("id") != CONTINUATION_03_VERIFY_WORKER_ID
+                or verify.get("image")
+                not in {
+                    WORKER_IMAGE,
+                    WORKER_IMAGE.split("@", 1)[-1],
+                    "sha256:" + WORKER_IMAGE.rsplit("sha256:", 1)[-1],
+                }
+                or verify.get("ports")
+                or verify.get("readonly") is not True
+                or verify.get("caps") != ["ALL"]
+                or verify.get("privileged") is not False
+                or verify.get("memory") != 512 * 1024**2
+                or verify.get("swap") != 512 * 1024**2
+                or verify.get("cpus") != 1_000_000_000
+            ):
+                raise Rejected("EXACT_STOPPED_ATTEMPT_03_VERIFY_WORKER_REQUIRED")
+            attempt03_work = source_work / "continuation-03"
+            if (
+                (attempt03_work / "operator.zip").is_symlink()
+                or not (attempt03_work / "operator.zip").is_file()
+                or _sha(attempt03_work / "operator.zip")
+                != CONTINUATION_03_OPERATOR_SHA256
+            ):
+                raise Rejected("PINNED_ATTEMPT_03_OPERATOR_ARCHIVE_REQUIRED")
+            self.require_mount_set(
+                old_verify,
+                {
+                    str(
+                        attempt03_work / "config-verify-restore-precontinuation.json"
+                    ): (
+                        CONFIG_PATH_IN_CONTAINER,
+                        False,
+                    ),
+                    str(attempt03_work / "output-verify-restore-precontinuation"): (
+                        "/output",
+                        True,
+                    ),
+                    str(attempt03_work / "operator"): ("/operator", False),
+                    str(attempt03_work / "runtime-wheelhouse"): (
+                        "/wheelhouse",
+                        False,
+                    ),
+                    str(attempt03_work / "quant"): ("/quant", False),
+                    str(AUX_WHEELHOUSE): ("/aux-wheels", False),
+                },
+            )
+            self.assert_attempt_03_restore_clone(source_work=source_work)
         volume_names = (
             self.names["target_volume"],
             self.names["restore_volume"],
@@ -1751,17 +1847,119 @@ class EpochController:
             for item in (network.get("Containers") or {}).values()
             if isinstance(item, dict)
         }
-        if not {self.names["target_pg"], self.names["redis"]}.issubset(
-            endpoints
-        ) or endpoints - {
+        allowed_endpoints = {
             self.names["target_pg"],
             self.names["redis"],
             failed_worker,
-        }:
+        }
+        if self.continuation_attempt == "04":
+            allowed_endpoints.update(
+                {
+                    continuation_worker_name(self.owner, "03"),
+                    self.names["restore_pg"],
+                }
+            )
+        if (
+            not {self.names["target_pg"], self.names["redis"]}.issubset(endpoints)
+            or endpoints - allowed_endpoints
+        ):
             raise Rejected("EXACT_EXISTING_EPOCH_BRIDGE_ENDPOINTS_REQUIRED")
         self.proofs["precontinuation_legacy"] = before
         self.proofs["existing_epoch_identity_verified"] = True
         return before
+
+    def assert_attempt_03_restore_clone(self, *, source_work: Path) -> dict:
+        """Validate the exact failed disposable restore clone without changing it."""
+        attempt03_work = source_work / "continuation-03"
+        view = self.inspect_container(self.names["restore_pg"])
+        labels = view.get("labels") or {}
+        restore_exit_code = (view.get("state") or {}).get("ExitCode")
+        if (
+            view.get("id") != CONTINUATION_03_RESTORE_CONTAINER_ID
+            or view.get("name") != "/" + self.names["restore_pg"]
+            or view.get("image")
+            not in {
+                PG_IMAGE,
+                PG_IMAGE.split("@", 1)[-1],
+                "sha256:" + PG_IMAGE.rsplit("sha256:", 1)[-1],
+            }
+            or (view.get("state") or {}).get("Status") != "exited"
+            or type(restore_exit_code) is not int
+            or restore_exit_code != 0
+            or view.get("network") != self.names["network"]
+            or view.get("ports")
+            or view.get("readonly") is not True
+            or view.get("caps") != ["ALL"]
+            or view.get("privileged") is not False
+            or view.get("memory") != 4 * 1024**3
+            or view.get("swap") != 4 * 1024**3
+            or view.get("cpus") != 1_000_000_000
+            or labels.get(EPOCH_LABEL) != self.owner
+            or labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+        ):
+            raise Rejected("EXACT_STOPPED_ATTEMPT_03_RESTORE_CLONE_REQUIRED")
+        secret = attempt03_work / "restore-admin-password-precontinuation"
+        dump = attempt03_work / "epoch-history-precontinuation.dump"
+        if (
+            secret.is_symlink()
+            or not secret.is_file()
+            or dump.is_symlink()
+            or not dump.is_file()
+            or dump.stat().st_size != 20_692_780
+            or _sha(dump) != CONTINUATION_03_DUMP_SHA256
+        ):
+            raise Rejected("PINNED_ATTEMPT_03_RESTORE_INPUTS_REQUIRED")
+        self.require_mount_set(
+            self.names["restore_pg"],
+            {
+                self.names["restore_volume"]: ("/var/lib/postgresql/data", True),
+                str(secret): ("/run/secrets/epoch_admin_password", False),
+                str(dump): ("/archive.dump", False),
+            },
+        )
+        return fresh.digest(view)
+
+    def archive_and_remove_attempt_03_restore_clone(self, *, source_work: Path) -> dict:
+        view = self.inspect_container(self.names["restore_pg"])
+        metadata = self.assert_attempt_03_restore_clone(source_work=source_work)
+        path = self.work / "attempt-03-restore-clone-before-cleanup.json"
+        fresh.save(
+            path, {"owner": self.owner, "metadata_sha256": metadata, "view": view}
+        )
+        volume = json.loads(
+            self.docker(
+                [
+                    "volume",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    self.names["restore_volume"],
+                ]
+            )
+        )
+        volume_labels = volume.get("Labels") or {}
+        if (
+            volume.get("Name") != self.names["restore_volume"]
+            or volume_labels.get(EPOCH_LABEL) != self.owner
+            or volume_labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+        ):
+            raise Rejected("EXACT_OWNED_ATTEMPT_03_RESTORE_VOLUME_REQUIRED")
+        # No force: the pinned stopped clone was verified above; only its exact
+        # container and owner-labelled disposable volume are removed.
+        self.docker(["rm", self.names["restore_pg"]])
+        self.docker(["volume", "rm", self.names["restore_volume"]])
+        self.create_volume(self.names["restore_volume"])
+        self.initialize_volume(self.names["restore_volume"], uid=70)
+        self.proofs["attempt_03_restore_clone_cleanup"] = {
+            "container_id": CONTINUATION_03_RESTORE_CONTAINER_ID,
+            "metadata_sha256": metadata,
+            "archive_sha256": _sha(path),
+            "volume": self.names["restore_volume"],
+            "removed_only_after_exact_metadata": True,
+            "replacement_volume_owner_verified": True,
+            "replacement_volume_uid70_initialized": True,
+        }
+        return self.proofs["attempt_03_restore_clone_cleanup"]
 
     def stream_private_pg_dump(self, *, backup: Path, database: str) -> dict:
         """Stream pg_dump bytes into a private exclusive file under a bounded job."""
@@ -2136,6 +2334,7 @@ class EpochController:
         rotated_history: str,
         attempt01_work: Path | None = None,
         attempt02_work: Path | None = None,
+        attempt03_work: Path | None = None,
     ) -> dict:
         """Continue the pinned zero-append failure without adopting its worker."""
         owner = self.owner
@@ -2143,7 +2342,8 @@ class EpochController:
         source_work = ROOT / ("run-" + owner)
         failed_initializer = None
         attempt02_artifacts = None
-        if self.continuation_attempt in {"02", "03"} and attempt01_work is None:
+        attempt03_artifacts = None
+        if self.continuation_attempt in {"02", "03", "04"} and attempt01_work is None:
             raise Rejected("ATTEMPT_01_FAILURE_EVIDENCE_REQUIRED")
         if self.continuation_attempt == "02":
             failed_initializer = "kairos-epoch-" + self.owner[:12] + "-volume-init-70"
@@ -2156,6 +2356,21 @@ class EpochController:
                 expected_sha256=CONTINUATION_02_FAILURE_SHA256,
             )
             self.proofs["attempt_02_backup_failure"] = attempt02_artifacts
+        if self.continuation_attempt == "04":
+            if attempt02_work is None or attempt03_work is None:
+                raise Rejected("ATTEMPT_03_FAILURE_EVIDENCE_REQUIRED")
+            attempt02_artifacts = validate_attempt_02_backup_failure(
+                owner=owner,
+                attempt02_work=attempt02_work,
+                expected_sha256=CONTINUATION_02_FAILURE_SHA256,
+            )
+            attempt03_artifacts = validate_attempt_03_fresh_schema_failure(
+                owner=owner,
+                attempt03_work=attempt03_work,
+                expected_sha256=CONTINUATION_03_FAILURE_SHA256,
+            )
+            self.proofs["attempt_02_backup_failure"] = attempt02_artifacts
+            self.proofs["attempt_03_fresh_schema_failure"] = attempt03_artifacts
         before = self.assert_existing_epoch(
             source_work=source_work, failed_initializer=failed_initializer
         )
@@ -2168,6 +2383,11 @@ class EpochController:
         elif self.continuation_attempt == "01":
             # The original epoch already initialized this owned restore volume.
             self.initialize_volume(self.names["restore_volume"], uid=70)
+        elif self.continuation_attempt == "04":
+            cleanup = self.archive_and_remove_attempt_03_restore_clone(
+                source_work=source_work
+            )
+            self.proofs["attempt_03_restore_clone_cleanup"] = cleanup
         elif self.continuation_attempt != "03":
             raise Rejected("EXACT_CONTINUATION_ATTEMPT_REQUIRED")
         pre_backup_hash = self.backup_and_verify(
@@ -2323,7 +2543,7 @@ class EpochController:
             or ACTIVE_LEASE.read_text(encoding="ascii") != owner + "\n"
         ):
             raise Rejected("PRESERVED_FAILED_EPOCH_EVIDENCE_CHANGED")
-        if self.continuation_attempt in {"02", "03"}:
+        if self.continuation_attempt in {"02", "03", "04"}:
             attempt01_failure = attempt01_work / "runtime-epoch-failure.json"
             attempt01_stderr = attempt01_work / "cli-017.stderr"
             if (
@@ -2339,6 +2559,22 @@ class EpochController:
             )
             if current_attempt02_artifacts != attempt02_artifacts:
                 raise Rejected("PRESERVED_ATTEMPT_02_FAILURE_CHANGED")
+        if self.continuation_attempt == "04":
+            current_attempt02_artifacts = validate_attempt_02_backup_failure(
+                owner=owner,
+                attempt02_work=attempt02_work,
+                expected_sha256=CONTINUATION_02_FAILURE_SHA256,
+            )
+            current_attempt03_artifacts = validate_attempt_03_fresh_schema_failure(
+                owner=owner,
+                attempt03_work=attempt03_work,
+                expected_sha256=CONTINUATION_03_FAILURE_SHA256,
+            )
+            if (
+                current_attempt02_artifacts != attempt02_artifacts
+                or current_attempt03_artifacts != attempt03_artifacts
+            ):
+                raise Rejected("PRESERVED_ATTEMPT_03_FAILURE_CHANGED")
         self.proofs["legacy_after"] = after
         self.proofs["serve_restart_status"] = restarted
         self.proofs["continuation_attempt"] = self.continuation_attempt
@@ -2847,6 +3083,45 @@ def validate_attempt_02_backup_failure(
     }
 
 
+def validate_attempt_03_fresh_schema_failure(
+    *, owner: str, attempt03_work: Path, expected_sha256: str
+) -> dict:
+    """Admit only the frozen fresh-schema inventory mismatch from attempt 03."""
+    failure = attempt03_work / "runtime-epoch-failure.json"
+    dump = attempt03_work / "epoch-history-precontinuation.dump"
+    status = attempt03_work / "output-verify-restore-precontinuation" / "status.json"
+    if (
+        owner != CONTINUATION_OWNER
+        or expected_sha256 != CONTINUATION_03_FAILURE_SHA256
+        or attempt03_work.is_symlink()
+        or not attempt03_work.is_dir()
+        or failure.is_symlink()
+        or not failure.is_file()
+        or _sha(failure) != CONTINUATION_03_FAILURE_SHA256
+        or dump.is_symlink()
+        or not dump.is_file()
+        or dump.stat().st_size != 20_692_780
+        or _sha(dump) != CONTINUATION_03_DUMP_SHA256
+        or status.is_symlink()
+        or not status.is_file()
+        or _sha(status) != CONTINUATION_03_STATUS_SHA256
+    ):
+        raise Rejected("EXACT_ATTEMPT_03_FRESH_SCHEMA_FAILURE_REQUIRED")
+    operator_archive = attempt03_work / "operator.zip"
+    if (
+        operator_archive.is_symlink()
+        or not operator_archive.is_file()
+        or _sha(operator_archive) != CONTINUATION_03_OPERATOR_SHA256
+    ):
+        raise Rejected("PINNED_ATTEMPT_03_OPERATOR_ARCHIVE_REQUIRED")
+    return {
+        "failure_sha256": CONTINUATION_03_FAILURE_SHA256,
+        "worker_status_sha256": CONTINUATION_03_STATUS_SHA256,
+        "precontinuation_dump_sha256": CONTINUATION_03_DUMP_SHA256,
+        "precontinuation_dump_bytes": 20_692_780,
+    }
+
+
 def _verify_source_signature(work: Path) -> None:
     """Use the already-pinned local signer/keyring path; never fetch keys."""
 
@@ -3158,8 +3433,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--continue-failed-catchup", action="store_true")
     parser.add_argument("--continue-initializer-repair", action="store_true")
     parser.add_argument("--continue-backup-stream-repair", action="store_true")
+    parser.add_argument("--continue-fresh-schema-repair", action="store_true")
     parser.add_argument("--expected-attempt-01-failure-sha256")
     parser.add_argument("--expected-attempt-02-failure-sha256")
+    parser.add_argument("--expected-attempt-03-failure-sha256")
     parser.add_argument("--owner")
     parser.add_argument("--expected-parent-revision")
     parser.add_argument("--expected-parent-operator-sha256")
@@ -3178,6 +3455,8 @@ def main(argv: list[str] | None = None) -> int:
                     "result": "PLAN_ONLY",
                     "operation": "same-owner attempt-02 initializer repair"
                     if args.continue_initializer_repair
+                    else "same-owner attempt-04 fresh-schema repair"
+                    if args.continue_fresh_schema_repair
                     else "same-owner attempt-03 binary backup stream repair"
                     if args.continue_backup_stream_repair
                     else "same-owner failed-catchup continuation"
@@ -3200,6 +3479,100 @@ def main(argv: list[str] | None = None) -> int:
     private_ready = False
     try:
         _validate_admission(args)
+        if args.continue_fresh_schema_repair:
+            owner = args.owner
+            if (
+                args.continue_failed_catchup
+                or args.continue_initializer_repair
+                or args.continue_backup_stream_repair
+                or args.end_exclusive_ms is not None
+            ):
+                raise Rejected("FRESH_SCHEMA_REPAIR_FLAGS_EXCLUSIVE_REQUIRED")
+            if args.owner != CONTINUATION_OWNER:
+                raise Rejected("EXACT_FAILED_EPOCH_OWNER_REQUIRED")
+            _verify_parent_revision(args.expected_parent_revision or "")
+            source_work = fresh.safe(ROOT / ("run-" + args.owner))
+            seed_value, old_private, _old_catchup = validate_continuation_artifacts(
+                owner=args.owner,
+                parent_revision=args.expected_parent_revision,
+                parent_operator_sha256=args.expected_parent_operator_sha256 or "",
+                parent_operator=source_work / "operator.zip",
+                lease=ACTIVE_LEASE,
+                failure=source_work / "runtime-epoch-failure.json",
+                seed=source_work / "output-seed" / "seed.json",
+                original_private=source_work / "epoch-private.json",
+                original_catchup_config=source_work / "config-catchup-01.json",
+            )
+            attempt01 = source_work / "continuation-01"
+            validate_attempt_01_initializer_failure(
+                owner=args.owner,
+                receipt_path=attempt01 / "runtime-epoch-failure.json",
+                expected_sha256=args.expected_attempt_01_failure_sha256 or "",
+            )
+            attempt01_stderr = attempt01 / "cli-017.stderr"
+            if (
+                attempt01_stderr.is_symlink()
+                or not attempt01_stderr.is_file()
+                or _sha(attempt01_stderr) != CONTINUATION_01_LOG_SHA256
+            ):
+                raise Rejected("PINNED_ATTEMPT_01_DIAGNOSTIC_REQUIRED")
+            attempt02 = source_work / "continuation-02"
+            validate_attempt_02_backup_failure(
+                owner=args.owner,
+                attempt02_work=attempt02,
+                expected_sha256=args.expected_attempt_02_failure_sha256 or "",
+            )
+            attempt03 = source_work / "continuation-03"
+            validate_attempt_03_fresh_schema_failure(
+                owner=args.owner,
+                attempt03_work=attempt03,
+                expected_sha256=args.expected_attempt_03_failure_sha256 or "",
+            )
+            attempt = "04"
+            work = fresh.safe(source_work / ("continuation-" + attempt))
+            if work.exists() or work.is_symlink():
+                raise Rejected("CREATE_ONLY_ATTEMPT_04_REQUIRED")
+            _private_directory(work)
+            private_ready = True
+            _verify_source_signature(work)
+            controller = EpochController(
+                args.owner,
+                expected_revision=args.expected_revision,
+                wheelhouse=args.wheelhouse,
+                deadline=time.monotonic() + MAX_SECONDS,
+                workdir=work,
+                continuation_attempt=attempt,
+            )
+            controller.prepare_snapshots()
+            continuation_history = secrets.token_hex(32)
+            fresh.save(
+                work / "continuation-private.json",
+                {"owner": args.owner, "history_password": continuation_history},
+            )
+            result = controller.run_continuation(
+                seed=seed_value,
+                old_private=old_private,
+                rotated_history=continuation_history,
+                attempt01_work=attempt01,
+                attempt02_work=attempt02,
+                attempt03_work=attempt03,
+            )
+            receipt = work / "runtime-epoch-continuation-receipt.json"
+            fresh.save(receipt, result)
+            print(
+                json.dumps(
+                    {
+                        "result": result["result"],
+                        "owner": owner,
+                        "attempt": attempt,
+                        "receipt": str(receipt),
+                        "secrets": "private-file-only",
+                        "native_operations": "bounded-owner-only",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.continue_backup_stream_repair:
             owner = args.owner
             if (
@@ -3434,6 +3807,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.expected_parent_operator_sha256,
                 args.expected_attempt_01_failure_sha256,
                 args.expected_attempt_02_failure_sha256,
+                args.expected_attempt_03_failure_sha256,
             )
         ):
             raise Rejected("CONTINUATION_FLAGS_REQUIRE_CONTINUATION_MODE")

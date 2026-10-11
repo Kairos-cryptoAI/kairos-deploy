@@ -158,6 +158,40 @@ class WorkerConfigTests(unittest.TestCase):
             worker.required_bars(events, 1_000_001)
 
 
+class EpochTableInventoryTests(unittest.TestCase):
+    def test_fresh_controlled_inventory_is_exact_sorted_32(self):
+        tables = list(worker.CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        self.assertEqual(len(tables), 32)
+        self.assertEqual(tables, sorted(set(tables)))
+        worker.validate_epoch_table_inventory(tables)
+
+    def test_equal_count_cannot_admit_wrong_table(self):
+        tables = list(worker.CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        tables[-1] = "unexpected_legacy_table"
+        with self.assertRaisesRegex(
+            worker.EpochError, "EXACT_EPOCH_TABLE_INVENTORY_REQUIRED"
+        ):
+            worker.validate_epoch_table_inventory(sorted(tables))
+
+    def test_missing_duplicate_extra_and_legacy_39_are_refused(self):
+        tables = list(worker.CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        invalid = (
+            tables[:-1],
+            tables[:-1] + [tables[0]],
+            tables + ["unexpected_table"],
+            tables + [f"legacy_extra_{number}" for number in range(7)],
+            list(reversed(tables)),
+        )
+        for value in invalid:
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    worker.EpochError, "EXACT_EPOCH_TABLE_INVENTORY_REQUIRED"
+                ),
+            ):
+                worker.validate_epoch_table_inventory(value)
+
+
 class HistorySnapshotTests(unittest.TestCase):
     @staticmethod
     def anchors():

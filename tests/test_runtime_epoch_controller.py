@@ -973,6 +973,215 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                 )
             self.assertEqual(events, ["existing", "prebackup"])
 
+    def test_attempt_03_inventory_failure_is_pinned_to_exact_status_dump_and_archive(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            attempt03 = Path(directory) / "continuation-03"
+            status_dir = attempt03 / "output-verify-restore-precontinuation"
+            status_dir.mkdir(parents=True)
+            failure = attempt03 / "runtime-epoch-failure.json"
+            dump = attempt03 / "epoch-history-precontinuation.dump"
+            status = status_dir / "status.json"
+            operator = attempt03 / "operator.zip"
+            for path in (failure, status, operator):
+                path.write_bytes(b"synthetic evidence")
+            with dump.open("wb") as stream:
+                stream.truncate(20_692_780)
+            hashes = {
+                failure: epoch.CONTINUATION_03_FAILURE_SHA256,
+                dump: epoch.CONTINUATION_03_DUMP_SHA256,
+                status: epoch.CONTINUATION_03_STATUS_SHA256,
+                operator: epoch.CONTINUATION_03_OPERATOR_SHA256,
+            }
+            with patch.object(epoch, "_sha", side_effect=lambda path: hashes[path]):
+                result = epoch.validate_attempt_03_fresh_schema_failure(
+                    owner=epoch.CONTINUATION_OWNER,
+                    attempt03_work=attempt03,
+                    expected_sha256=epoch.CONTINUATION_03_FAILURE_SHA256,
+                )
+                self.assertEqual(result["precontinuation_dump_bytes"], 20_692_780)
+                with self.assertRaisesRegex(
+                    epoch.Rejected, "EXACT_ATTEMPT_03_FRESH_SCHEMA_FAILURE_REQUIRED"
+                ):
+                    epoch.validate_attempt_03_fresh_schema_failure(
+                        owner=epoch.CONTINUATION_OWNER,
+                        attempt03_work=attempt03,
+                        expected_sha256="0" * 64,
+                    )
+
+    def test_attempt_04_restore_cleanup_archives_then_removes_only_pinned_clone(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempt03 = root / "continuation-03"
+            attempt03.mkdir()
+            secret = attempt03 / "restore-admin-password-precontinuation"
+            dump = attempt03 / "epoch-history-precontinuation.dump"
+            secret.write_text("synthetic", encoding="ascii")
+            with dump.open("wb") as stream:
+                stream.truncate(20_692_780)
+            controller = object.__new__(epoch.EpochController)
+            controller.owner = epoch.CONTINUATION_OWNER
+            controller.names = epoch.resource_names(controller.owner)
+            controller.work = root / "continuation-04"
+            controller.work.mkdir()
+            controller.proofs = {}
+            events = []
+            view = {
+                "id": epoch.CONTINUATION_03_RESTORE_CONTAINER_ID,
+                "name": "/" + controller.names["restore_pg"],
+                "image": epoch.PG_IMAGE,
+                "state": {"Status": "exited", "ExitCode": 0},
+                "network": controller.names["network"],
+                "ports": [],
+                "readonly": True,
+                "caps": ["ALL"],
+                "privileged": False,
+                "memory": 4 * 1024**3,
+                "swap": 4 * 1024**3,
+                "cpus": 1_000_000_000,
+                "labels": {
+                    epoch.EPOCH_LABEL: controller.owner,
+                    "com.kairos.runtime-epoch.scope": epoch.EPOCH_SCOPE,
+                },
+            }
+            controller.inspect_container = lambda _name: view
+            controller.require_mount_set = lambda *_args: None
+
+            def docker(args, **_kwargs):
+                events.append(tuple(args))
+                if args[0] == "volume" and args[1] == "inspect":
+                    return json.dumps(
+                        {
+                            "Name": controller.names["restore_volume"],
+                            "Labels": {
+                                epoch.EPOCH_LABEL: controller.owner,
+                                "com.kairos.runtime-epoch.scope": epoch.EPOCH_SCOPE,
+                            },
+                        }
+                    )
+                return ""
+
+            controller.docker = docker
+            controller.create_volume = lambda _name: events.append("create-volume")
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "initialize-volume"
+            )
+            with patch.object(
+                epoch,
+                "_sha",
+                side_effect=lambda path: (
+                    epoch.CONTINUATION_03_DUMP_SHA256 if path == dump else "a" * 64
+                ),
+            ):
+                proof = controller.archive_and_remove_attempt_03_restore_clone(
+                    source_work=root
+                )
+            self.assertEqual(
+                events[-5:],
+                [
+                    (
+                        "volume",
+                        "inspect",
+                        "--format",
+                        "{{json .}}",
+                        controller.names["restore_volume"],
+                    ),
+                    ("rm", controller.names["restore_pg"]),
+                    ("volume", "rm", controller.names["restore_volume"]),
+                    "create-volume",
+                    "initialize-volume",
+                ],
+            )
+            self.assertEqual(events[-1], "initialize-volume")
+            self.assertTrue(proof["removed_only_after_exact_metadata"])
+            self.assertTrue(proof["replacement_volume_uid70_initialized"])
+
+    def test_attempt_04_restore_cleanup_rejects_wrong_clone_before_delete(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempt03 = root / "continuation-03"
+            attempt03.mkdir()
+            (attempt03 / "restore-admin-password-precontinuation").write_text(
+                "synthetic", encoding="ascii"
+            )
+            (attempt03 / "epoch-history-precontinuation.dump").write_bytes(b"x")
+            controller = object.__new__(epoch.EpochController)
+            controller.owner = epoch.CONTINUATION_OWNER
+            controller.names = epoch.resource_names(controller.owner)
+            controller.work = root / "continuation-04"
+            controller.work.mkdir()
+            events = []
+            controller.inspect_container = lambda _name: {
+                "id": "0" * 64,
+                "name": "/" + controller.names["restore_pg"],
+            }
+            controller.docker = lambda args, **_kwargs: events.append(args)
+            with self.assertRaisesRegex(
+                epoch.Rejected, "EXACT_STOPPED_ATTEMPT_03_RESTORE_CLONE_REQUIRED"
+            ):
+                controller.archive_and_remove_attempt_03_restore_clone(source_work=root)
+            self.assertEqual(events, [])
+
+    def test_attempt_04_prebackup_failure_stops_before_history_rotation(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            controller.continuation_attempt = "04"
+            controller.work = Path(directory) / "continuation-04"
+            controller.work.mkdir()
+            attempt01 = Path(directory) / "continuation-01"
+            attempt02 = Path(directory) / "continuation-02"
+            attempt03 = Path(directory) / "continuation-03"
+            for path in (attempt01, attempt02, attempt03):
+                path.mkdir()
+            events = []
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing-resources") or {"state": "verified"}
+            )
+            controller.archive_and_remove_attempt_03_restore_clone = lambda **_kwargs: (
+                events.append("archive-and-clean-exact-clone")
+                or {"removed_only_after_exact_metadata": True}
+            )
+
+            def fail_backup(**_kwargs):
+                events.append("fresh-precontinuation-backup")
+                raise epoch.Rejected("BACKUP_PROOF_MISMATCH")
+
+            controller.backup_and_verify = fail_backup
+            with (
+                patch.object(
+                    epoch,
+                    "validate_attempt_02_backup_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_02_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_03_fresh_schema_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_03_FAILURE_SHA256
+                    },
+                ),
+                self.assertRaisesRegex(epoch.Rejected, "BACKUP_PROOF_MISMATCH"),
+            ):
+                controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                    attempt01_work=attempt01,
+                    attempt02_work=attempt02,
+                    attempt03_work=attempt03,
+                )
+            self.assertEqual(
+                events,
+                [
+                    "existing-resources",
+                    "archive-and-clean-exact-clone",
+                    "fresh-precontinuation-backup",
+                ],
+            )
+
     def test_catchup_end_is_global_cap_safe_for_five_symbols_and_exact_resume(self):
         seed = seed_receipt()
         target = 1_791_680_280_000

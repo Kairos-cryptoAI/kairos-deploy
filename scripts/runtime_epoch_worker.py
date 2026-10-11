@@ -28,6 +28,42 @@ MAX_STATUS_BYTES = 32_768
 SOURCE = "kairos-quant-scouts"
 SOURCE_DUMP_SHA256 = "2408db1335dc856122750e4604f14a436184f54a7f4ffab22bc35eb69747a7bc"
 DB_ROLES = ("kairos_epoch_history", "kairos_epoch_producer", "kairos_epoch_consumer")
+# Fresh CONTROLLED_RUNTIME at the pinned Persistence source: its 31 migration
+# tables plus schema_migrations. Legacy primary extras must never be admitted.
+CONTROLLED_RUNTIME_PUBLIC_TABLES = (
+    "account_equity_state",
+    "account_snapshots",
+    "campaign_source_budgets",
+    "event_audit",
+    "execution_effect_events",
+    "execution_effects",
+    "execution_mutation_budget_scopes",
+    "execution_mutation_reservations",
+    "execution_orders",
+    "execution_recovery_state",
+    "execution_runtime_health",
+    "execution_trade_events",
+    "execution_trades",
+    "message_inbox",
+    "message_outbox",
+    "operator_control_admissions",
+    "operator_control_commands",
+    "operator_control_dispatch_claims",
+    "operator_controls",
+    "paper_canary_arms",
+    "paper_canary_attempts",
+    "paper_canary_database_identity",
+    "paper_canary_dispatch_claims",
+    "paper_canary_sessions",
+    "paper_readonly_receipts",
+    "paper_readonly_runs",
+    "paper_readonly_samples",
+    "position_snapshots",
+    "public_execution_events",
+    "schema_migrations",
+    "source_cursors",
+    "source_usage_reservations",
+)
 MODES = (
     "prepare",
     "seed",
@@ -387,6 +423,11 @@ def validate_history_snapshot(
         raise EpochError("EXTRA_OR_MISSING_EPOCH_AUDIT_HISTORY")
 
 
+def validate_epoch_table_inventory(tables: list[str]) -> None:
+    if tuple(tables) != CONTROLLED_RUNTIME_PUBLIC_TABLES:
+        raise EpochError("EXACT_EPOCH_TABLE_INVENTORY_REQUIRED")
+
+
 async def verify_restore(config: dict) -> dict:
     import asyncpg
     from controlled_runtime_worker import Budget, _table_digest
@@ -415,8 +456,7 @@ async def verify_restore(config: dict) -> dict:
                     "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relispartition ORDER BY c.relname"
                 )
             ]
-            if len(tables) != 39:
-                raise EpochError("EXACT_EPOCH_TABLE_INVENTORY_REQUIRED")
+            validate_epoch_table_inventory(tables)
             budget = Budget()
             for table in tables:
                 result[table] = await _table_digest(connection, table, budget)
@@ -467,7 +507,7 @@ async def verify_restore(config: dict) -> dict:
             raise EpochError("EPOCH_RESTORE_FULL_HISTORY_CONFLICT")
         return {
             "state": "PASS_ISOLATED_EPOCH_RESTORE",
-            "matched_public_tables": 39,
+            "matched_public_tables": len(CONTROLLED_RUNTIME_PUBLIC_TABLES),
             **first,
         }
     finally:
