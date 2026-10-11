@@ -60,6 +60,10 @@ def config(mode: str, **overrides: object) -> dict:
             "end_exclusive_ms": 1_791_680_280_000,
             "maximum_bars": epoch.MAX_CATCHUP_BARS,
         },
+        "rotate-history": {
+            "admin_password": HEX_SECRET,
+            "history_password": "d" * 64,
+        },
         "verify-restore": {
             "admin_password": HEX_SECRET,
             "restore_host": "kairos-epoch-0123456789ab-restore",
@@ -102,6 +106,7 @@ class RuntimeEpochControllerTests(unittest.TestCase):
             "prepare",
             "seed",
             "catchup",
+            "rotate-history",
             "verify-restore",
             "qualify",
             "serve",
@@ -150,6 +155,328 @@ class RuntimeEpochControllerTests(unittest.TestCase):
         self.assertTrue(all("password" not in arg.lower() for arg in argv))
         with self.assertRaises(epoch.Rejected):
             epoch.build_worker_argv("serve", "/tmp/secret.json", "/tmp/output")
+
+    def test_worker_tmpfs_keeps_only_runtime_libraries_executable(self):
+        options = {
+            "/tmp": "rw,nosuid,nodev,noexec,size=64m",
+            "/runtime-libs": "rw,nosuid,nodev,exec,size=128m",
+        }
+        self.assertEqual(epoch.validate_worker_tmpfs(options), options)
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_tmpfs(
+                {**options, "/tmp": "rw,nosuid,nodev,exec,size=64m"}
+            )
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_tmpfs(
+                {**options, "/runtime-libs": "rw,nosuid,nodev,noexec,size=128m"}
+            )
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_tmpfs({**options, "/extra": "rw,exec"})
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_config(
+                {**config("rotate-history"), "history_password": "x" * 40},
+                mode="rotate-history",
+            )
+
+    def test_continuation_is_bound_to_exact_failed_epoch_artifacts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_operator = root / "operator.zip"
+            lease = root / "runtime-epoch.active"
+            failure = root / "runtime-epoch-failure.json"
+            seed = root / "seed.json"
+            private = root / "epoch-private.json"
+            config_path = root / "config-catchup-01.json"
+            parent_operator.write_bytes(b"archive")
+            lease.write_text(epoch.CONTINUATION_OWNER + "\n", encoding="ascii")
+            failure.write_text(
+                json.dumps(
+                    {
+                        "owner": epoch.CONTINUATION_OWNER,
+                        "phase": "catchup-01",
+                        "error_category": "WORKER_MODE_FAILED_CATCHUP",
+                        "preserved_forensics": True,
+                        "active_lease_preserved": True,
+                        "trading_started": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            seed_value = {
+                "owner": epoch.CONTINUATION_OWNER,
+                "state": "VERIFIED_HISTORY_SEEDED_AUDIT_ONLY",
+                "rows": 173_164,
+                "ordered_digest_sha256": epoch.CONTINUATION_SEED_DIGEST,
+                "target_outbox_rows_after": 0,
+                "anchors": {},
+            }
+            seed.write_text(json.dumps(seed_value), encoding="utf-8")
+            secret_fields = {
+                "admin_password": "a" * 64,
+                "source_admin_password": "b" * 64,
+                "restore_admin_password": "c" * 64,
+                "source_password": "d" * 64,
+                "history_password": "e" * 64,
+                "producer_password": "f" * 64,
+                "consumer_password": "1" * 64,
+                "redis_admin_password": "2" * 64,
+                "redis_producer_password": "3" * 64,
+                "redis_consumer_password": "4" * 64,
+            }
+            private_value = {
+                "owner": epoch.CONTINUATION_OWNER,
+                "database": "kairos_epoch_" + epoch.CONTINUATION_OWNER[:12],
+                **secret_fields,
+            }
+            private.write_text(json.dumps(private_value), encoding="utf-8")
+            prior_config = {
+                "owner": epoch.CONTINUATION_OWNER,
+                "database": private_value["database"],
+                "pg_host": "kairos-epoch-" + epoch.CONTINUATION_OWNER[:12] + "-pg",
+                "redis_host": "kairos-epoch-"
+                + epoch.CONTINUATION_OWNER[:12]
+                + "-redis",
+                "history_password": secret_fields["history_password"],
+                "end_exclusive_ms": 1_791_680_280_000,
+                "maximum_bars": epoch.MAX_CATCHUP_BARS,
+            }
+            config_path.write_text(json.dumps(prior_config), encoding="utf-8")
+            hashes = {
+                parent_operator: epoch.CONTINUATION_PARENT_OPERATOR_SHA256,
+                failure: epoch.CONTINUATION_FAILURE_SHA256,
+                seed: epoch.CONTINUATION_SEED_SHA256,
+            }
+            with patch.object(epoch, "_sha", side_effect=lambda path: hashes[path]):
+                checked_seed, checked_private, checked_config = (
+                    epoch.validate_continuation_artifacts(
+                        owner=epoch.CONTINUATION_OWNER,
+                        parent_revision=epoch.CONTINUATION_PARENT_REVISION,
+                        parent_operator_sha256=epoch.CONTINUATION_PARENT_OPERATOR_SHA256,
+                        parent_operator=parent_operator,
+                        lease=lease,
+                        failure=failure,
+                        seed=seed,
+                        original_private=private,
+                        original_catchup_config=config_path,
+                    )
+                )
+            self.assertEqual(checked_seed, seed_value)
+            self.assertEqual(checked_private["owner"], epoch.CONTINUATION_OWNER)
+            self.assertEqual(checked_config, prior_config)
+            with self.assertRaises(epoch.Rejected):
+                epoch.validate_continuation_artifacts(
+                    owner=epoch.CONTINUATION_OWNER,
+                    parent_revision="0" * 40,
+                    parent_operator_sha256=epoch.CONTINUATION_PARENT_OPERATOR_SHA256,
+                    parent_operator=parent_operator,
+                    lease=lease,
+                    failure=failure,
+                    seed=seed,
+                    original_private=private,
+                    original_catchup_config=config_path,
+                )
+
+    def _continuation_fixture(self, directory: str):
+        controller = object.__new__(epoch.EpochController)
+        controller.owner = epoch.CONTINUATION_OWNER
+        controller.names = epoch.resource_names(controller.owner)
+        controller.work = Path(directory)
+        controller.continuation_attempt = "01"
+        controller.proofs = {}
+        controller.deadline = epoch.time.monotonic() + 300
+        last_close = 1_800_000_359_999
+        seed = {
+            "owner": controller.owner,
+            "rows": 5,
+            "anchors": {
+                symbol: {
+                    "count": 1,
+                    "first_open_time_ms": last_close - epoch.MINUTE_MS + 1,
+                    "last_open_time_ms": last_close - epoch.MINUTE_MS + 1,
+                    "last_close_time_ms": last_close,
+                }
+                for symbol in epoch.SYMBOLS
+            },
+        }
+        old_private = {
+            "database": "kairos_epoch_" + controller.owner[:12],
+            "admin_password": "a" * 64,
+            "producer_password": "b" * 64,
+            "consumer_password": "c" * 64,
+            "redis_producer_password": "d" * 64,
+            "redis_consumer_password": "e" * 64,
+        }
+        return controller, seed, old_private
+
+    def test_continuation_runs_only_in_reviewed_phase_order(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            root = Path(directory) / "epoch-root"
+            source_work = root / ("run-" + controller.owner)
+            (source_work / "output-seed").mkdir(parents=True)
+            parent_operator = source_work / "operator.zip"
+            failure = source_work / "runtime-epoch-failure.json"
+            seed_path = source_work / "output-seed" / "seed.json"
+            parent_operator.write_bytes(b"parent archive")
+            failure.write_bytes(b"frozen failed receipt")
+            seed_path.write_bytes(b"frozen seed receipt")
+            lease = root / "runtime-epoch.active"
+            lease.write_text(controller.owner + "\n", encoding="ascii")
+            hash_values = {
+                parent_operator: epoch.CONTINUATION_PARENT_OPERATOR_SHA256,
+                failure: epoch.CONTINUATION_FAILURE_SHA256,
+                seed_path: epoch.CONTINUATION_SEED_SHA256,
+            }
+            events = []
+            legacy = {"state": "stopped", "metadata_sha256": {"source": "same"}}
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing") or legacy
+            )
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "initialize-restore"
+            )
+            controller.create_volume = lambda *_args, **_kwargs: events.append(
+                "create-restore"
+            )
+            backups = iter(("pre-backup-sha", "post-backup-sha"))
+
+            def backup_and_verify(**kwargs):
+                events.append("backup-" + kwargs["tag"])
+                if kwargs["tag"] == "precontinuation":
+                    self.assertEqual(kwargs["seed"], seed)
+                else:
+                    self.assertGreater(
+                        kwargs["seed"]["anchors"][epoch.SYMBOLS[0]]["count"], 1
+                    )
+                return next(backups)
+
+            controller.backup_and_verify = backup_and_verify
+            phase_receipts = {
+                "rotate-history": {"credential_rotated": True},
+                "catchup": {"appended": dict.fromkeys(epoch.SYMBOLS, 1)},
+                "qualify": {"state": "NONTRADING_RUNTIME_QUALIFIED"},
+                "serve": {"state": "RUNNING_NONTRADING"},
+            }
+
+            def phase(mode, _config, *, suffix=""):
+                events.append(mode + (":" + suffix if suffix else ""))
+                if mode == "catchup":
+                    count = 3 if suffix == "continue-01" else 1
+                    receipt = {"appended": dict.fromkeys(epoch.SYMBOLS, count)}
+                else:
+                    receipt = phase_receipts[mode]
+                if mode == "serve":
+                    status_path = controller.work / "output-serve" / "status.json"
+                    status_path.parent.mkdir()
+                    status_path.write_text(
+                        json.dumps({"state": "RUNNING_NONTRADING"}),
+                        encoding="utf-8",
+                    )
+                return receipt
+
+            controller.phase = phase
+            controller.restart_serve_and_validate = lambda *_args: (
+                events.append("restart-serve") or {"state": "RUNNING_NONTRADING"}
+            )
+            controller.assert_legacy_sources_stopped = lambda **_kwargs: (
+                events.append("legacy-check") or legacy
+            )
+            times = iter((1_800_000_600.0, 1_800_000_660.0))
+            with (
+                patch.object(epoch.time, "time", side_effect=lambda: next(times)),
+                patch.object(
+                    epoch,
+                    "validate_running_status",
+                    side_effect=lambda value, *_a, **_kw: value,
+                ),
+                patch.object(epoch, "ROOT", root),
+                patch.object(epoch, "ACTIVE_LEASE", lease),
+                patch.object(epoch, "_sha", side_effect=lambda path: hash_values[path]),
+            ):
+                result = controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                )
+            self.assertEqual(
+                events,
+                [
+                    "existing",
+                    "initialize-restore",
+                    "backup-precontinuation",
+                    "rotate-history:history-credential",
+                    "catchup:continue-01",
+                    "create-restore",
+                    "initialize-restore",
+                    "backup-postcatchup",
+                    "catchup:continue-final-01",
+                    "qualify:continuation",
+                    "serve",
+                    "restart-serve",
+                    "legacy-check",
+                ],
+            )
+            self.assertEqual(
+                result["result"], "PASS_NONTRADING_RUNTIME_EPOCH_CONTINUATION"
+            )
+            self.assertEqual(result["proofs"]["legacy_after"], legacy)
+            self.assertTrue(result["proofs"]["source_failure_preserved"])
+
+    def test_continuation_prebackup_failure_prevents_rotation_and_catchup(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            events = []
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing") or {"state": "stopped"}
+            )
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "initialize"
+            )
+
+            def fail_backup(**_kwargs):
+                events.append("prebackup")
+                raise epoch.Rejected("PREBACKUP_PROOF_FAILED")
+
+            controller.backup_and_verify = fail_backup
+            controller.phase = lambda *args, **_kwargs: events.append(args[0])
+            with self.assertRaisesRegex(epoch.Rejected, "PREBACKUP_PROOF_FAILED"):
+                controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                )
+            self.assertEqual(events, ["existing", "initialize", "prebackup"])
+
+    def test_continuation_rotation_failure_prevents_catchup(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            events = []
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing") or {"state": "stopped"}
+            )
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "initialize"
+            )
+            controller.backup_and_verify = lambda **_kwargs: (
+                events.append("prebackup") or "backup-sha"
+            )
+
+            def phase(mode, _config, **_kwargs):
+                events.append(mode)
+                return {"credential_rotated": False}
+
+            controller.phase = phase
+            with self.assertRaisesRegex(
+                epoch.Rejected, "HISTORY_ROLE_ROTATION_PROOF_REQUIRED"
+            ):
+                controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                )
+            self.assertEqual(
+                events, ["existing", "initialize", "prebackup", "rotate-history"]
+            )
 
     def test_catchup_end_is_global_cap_safe_for_five_symbols_and_exact_resume(self):
         seed = seed_receipt()

@@ -158,6 +158,123 @@ class WorkerConfigTests(unittest.TestCase):
             worker.required_bars(events, 1_000_001)
 
 
+class HistorySnapshotTests(unittest.TestCase):
+    @staticmethod
+    def anchors():
+        return {
+            symbol: {
+                "count": 2,
+                "first_open_time_ms": 60_000,
+                "last_open_time_ms": 120_000,
+                "last_close_time_ms": 179_999,
+            }
+            for symbol in worker.SYMBOLS
+        }
+
+    def test_restore_requires_exact_expected_chains_and_global_audit_count(self):
+        anchors = self.anchors()
+        worker.validate_history_snapshot(10, anchors, {"anchors": anchors})
+        with self.assertRaisesRegex(worker.EpochError, "EXTRA_OR_MISSING"):
+            worker.validate_history_snapshot(11, anchors, {"anchors": anchors})
+
+    def test_extra_missing_or_changed_symbol_anchor_is_rejected(self):
+        anchors = self.anchors()
+        changed = self.anchors()
+        changed["BTCUSDT"]["last_close_time_ms"] += 1
+        for actual in (
+            changed,
+            {k: v for k, v in anchors.items() if k != "BTCUSDT"},
+            {**anchors, "OTHER": anchors["BTCUSDT"]},
+        ):
+            with self.assertRaises(worker.EpochError):
+                worker.validate_history_snapshot(10, actual, {"anchors": anchors})
+
+    def test_invalid_expected_chain_and_missing_expectation_are_rejected(self):
+        anchors = self.anchors()
+        invalid = self.anchors()
+        invalid["BTCUSDT"]["count"] = 3
+        for expected in (None, {}, {"anchors": invalid}):
+            with self.assertRaises(worker.EpochError):
+                worker.validate_history_snapshot(10, anchors, expected)
+
+
+class HistoryRotationTests(unittest.TestCase):
+    @staticmethod
+    def config(**changes):
+        value = {
+            "owner": OWNER,
+            "database": DB,
+            "pg_host": "kairos-epoch-0123456789ab-pg",
+            "redis_host": "kairos-epoch-0123456789ab-redis",
+            "admin_password": "a" * 64,
+            "history_password": "b" * 64,
+        }
+        value.update(changes)
+        return value
+
+    def test_rotation_rejects_other_hosts_and_extra_credentials_before_connect(self):
+        for config in (
+            self.config(pg_host="kairos-epoch-0123456789ab-source"),
+            self.config(pg_host="kairos-paper-gate-timescaledb-1"),
+            self.config(producer_password="c" * 64),
+            self.config(history_password="a" * 64),
+            {k: v for k, v in self.config().items() if k != "admin_password"},
+        ):
+            with (
+                mock.patch.object(worker, "connect", new=mock.AsyncMock()) as connect,
+                self.assertRaises(worker.EpochError),
+            ):
+                asyncio.run(worker.dispatch("rotate-history", config, Path("unused")))
+            connect.assert_not_awaited()
+
+    def test_rotation_changes_only_fixed_role_and_verifies_new_identity(self):
+        admin = mock.AsyncMock()
+        history = mock.AsyncMock()
+        history.fetchrow.return_value = {
+            "role": "kairos_epoch_history",
+            "database": DB,
+        }
+        config = self.config()
+        with (
+            mock.patch.object(
+                worker, "connect", new=mock.AsyncMock(side_effect=[admin, history])
+            ) as connect,
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()) as verify,
+        ):
+            result = asyncio.run(
+                worker.dispatch("rotate-history", config, Path("unused"))
+            )
+        connect.assert_has_awaits(
+            [mock.call(config, "kairos"), mock.call(config, "kairos_epoch_history")]
+        )
+        admin.execute.assert_awaited_once_with(
+            "ALTER ROLE kairos_epoch_history PASSWORD '" + "b" * 64 + "'"
+        )
+        history.execute.assert_not_awaited()
+        self.assertEqual(verify.await_count, 2)
+        admin.close.assert_awaited_once()
+        history.close.assert_awaited_once()
+        self.assertEqual(result["state"], "HISTORY_CREDENTIAL_ROTATED")
+        self.assertFalse(result["queue_mutations"])
+        self.assertNotIn(config["history_password"], json.dumps(result))
+
+    def test_rotation_failure_closes_connection_and_does_not_continue(self):
+        admin = mock.AsyncMock()
+        admin.execute.side_effect = RuntimeError("private driver diagnostic")
+        with (
+            mock.patch.object(
+                worker, "connect", new=mock.AsyncMock(return_value=admin)
+            ) as connect,
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()),
+            self.assertRaises(RuntimeError),
+        ):
+            asyncio.run(
+                worker.dispatch("rotate-history", self.config(), Path("unused"))
+            )
+        connect.assert_awaited_once()
+        admin.close.assert_awaited_once()
+
+
 class _FakeTransaction:
     def __init__(self, connection):
         self.connection = connection

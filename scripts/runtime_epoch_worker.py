@@ -28,7 +28,15 @@ MAX_STATUS_BYTES = 32_768
 SOURCE = "kairos-quant-scouts"
 SOURCE_DUMP_SHA256 = "2408db1335dc856122750e4604f14a436184f54a7f4ffab22bc35eb69747a7bc"
 DB_ROLES = ("kairos_epoch_history", "kairos_epoch_producer", "kairos_epoch_consumer")
-MODES = ("prepare", "seed", "catchup", "verify-restore", "qualify", "serve")
+MODES = (
+    "prepare",
+    "seed",
+    "catchup",
+    "verify-restore",
+    "rotate-history",
+    "qualify",
+    "serve",
+)
 PUBLICATION_LUA = """
 local prior=redis.call('HGET',KEYS[2],ARGV[1])
 if prior then
@@ -100,6 +108,20 @@ def validate_config(value: dict, mode: str) -> None:
         or value.get("seed_expectation") != {"accepted_dump_sha256": SOURCE_DUMP_SHA256}
     ):
         raise EpochError("PINNED_SOURCE_DUMP_PROVENANCE_REQUIRED")
+    if mode == "rotate-history" and (
+        set(value)
+        != {
+            "owner",
+            "database",
+            "pg_host",
+            "redis_host",
+            "admin_password",
+            "history_password",
+        }
+        or value["pg_host"] != "kairos-epoch-" + owner[:12] + "-pg"
+        or value["admin_password"] == value["history_password"]
+    ):
+        raise EpochError("EXACT_NEW_EPOCH_HISTORY_ROTATION_REQUIRED")
 
 
 def write_status(path: Path, value: dict, *, immutable: bool = False) -> None:
@@ -232,6 +254,44 @@ async def prepare(config: dict) -> dict:
     }
 
 
+async def rotate_history(config: dict) -> dict:
+    """Replace only the isolated history credential; no data or queue writes.
+
+    The secret is passed only through the privately mounted config and database
+    protocol, never a CLI argument, stdout, status, or diagnostic message.
+    """
+    admin = await connect(config, "kairos")
+    try:
+        await verify_schema(admin)
+        await admin.execute(
+            "ALTER ROLE kairos_epoch_history PASSWORD '"
+            + config["history_password"]
+            + "'"
+        )
+    finally:
+        await admin.close()
+    history = await connect(config, "kairos_epoch_history")
+    try:
+        await verify_schema(history)
+        identity = await history.fetchrow(
+            "SELECT current_user AS role,current_database() AS database"
+        )
+        if dict(identity) != {
+            "role": "kairos_epoch_history",
+            "database": config["database"],
+        }:
+            raise EpochError("ROTATED_HISTORY_IDENTITY_NOT_VERIFIED")
+    finally:
+        await history.close()
+    return {
+        "state": "HISTORY_CREDENTIAL_ROTATED",
+        "role": "kairos_epoch_history",
+        "credential_rotated": True,
+        "queue_mutations": False,
+        "trading_started": False,
+    }
+
+
 async def seed(config: dict) -> dict:
     from runtime_epoch_history_seed import (
         SOURCE_EXPORT_SQL,
@@ -291,6 +351,42 @@ async def seed(config: dict) -> dict:
         await target.close()
 
 
+def validate_history_snapshot(
+    audit_count: int, actual: dict, expected_seed: dict
+) -> None:
+    """Bind a restored snapshot to exact seeded/catch-up five-symbol chains."""
+    expected = expected_seed.get("anchors") if isinstance(expected_seed, dict) else None
+    if not isinstance(expected, dict) or set(expected) != set(SYMBOLS):
+        raise EpochError("EXPECTED_FIVE_SYMBOL_HISTORY_REQUIRED")
+    if set(actual) != set(SYMBOLS) or type(audit_count) is not int:
+        raise EpochError("EXACT_EXPECTED_HISTORY_SNAPSHOT_REQUIRED")
+    total = 0
+    for symbol in SYMBOLS:
+        anchor = expected[symbol]
+        if (
+            not isinstance(anchor, dict)
+            or set(anchor)
+            != {
+                "count",
+                "first_open_time_ms",
+                "last_open_time_ms",
+                "last_close_time_ms",
+            }
+            or any(type(value) is not int for value in anchor.values())
+            or anchor["count"] <= 0
+            or anchor["first_open_time_ms"] < 0
+            or anchor["first_open_time_ms"] % MINUTE
+            or anchor["last_open_time_ms"] - anchor["first_open_time_ms"]
+            != (anchor["count"] - 1) * MINUTE
+            or anchor["last_close_time_ms"] != anchor["last_open_time_ms"] + MINUTE - 1
+            or actual[symbol] != anchor
+        ):
+            raise EpochError("EXACT_EXPECTED_HISTORY_SNAPSHOT_REQUIRED")
+        total += anchor["count"]
+    if audit_count != total:
+        raise EpochError("EXTRA_OR_MISSING_EPOCH_AUDIT_HISTORY")
+
+
 async def verify_restore(config: dict) -> dict:
     import asyncpg
     from controlled_runtime_worker import Budget, _table_digest
@@ -332,6 +428,25 @@ async def verify_restore(config: dict) -> dict:
             ):
                 if result[table]["count"] != 0:
                     raise EpochError("AUDIT_ONLY_BACKUP_REQUIRED")
+            history = {}
+            for symbol in SYMBOLS:
+                chain = await connection.fetchrow(
+                    """SELECT count(*) n,count(DISTINCT (payload->>'open_time_ms')::bigint) u,min((payload->>'open_time_ms')::bigint) lo,max((payload->>'open_time_ms')::bigint) hi FROM event_audit WHERE topic=$1 AND source=$2 AND payload->>'symbol'=$3""",
+                    TOPIC,
+                    SOURCE,
+                    symbol,
+                )
+                if not chain["n"] or chain["n"] != chain["u"]:
+                    raise EpochError("RESTORED_HISTORY_UNIQUE_CHAIN_REQUIRED")
+                history[symbol] = {
+                    "count": chain["n"],
+                    "first_open_time_ms": chain["lo"],
+                    "last_open_time_ms": chain["hi"],
+                    "last_close_time_ms": chain["hi"] + MINUTE - 1,
+                }
+            validate_history_snapshot(
+                result["event_audit"]["count"], history, config.get("expected_seed")
+            )
             sequences = {}
             for row in await connection.fetch(
                 "SELECT sequencename FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename"
@@ -344,7 +459,7 @@ async def verify_restore(config: dict) -> dict:
                         f'SELECT last_value,is_called FROM public."{name}"'
                     )
                 )
-        return {"tables": result, "sequences": sequences}
+        return {"tables": result, "sequences": sequences, "anchors": history}
 
     try:
         first, second = await asyncio.gather(snapshot(original), snapshot(restored))
@@ -899,6 +1014,8 @@ async def dispatch(mode: str, config: dict, output: Path) -> dict:
         return await prepare(config)
     if mode == "seed":
         return await seed(config)
+    if mode == "rotate-history":
+        return await rotate_history(config)
     if mode == "catchup":
         return await recover(
             config, publish=False, status_path=output / "progress.json"

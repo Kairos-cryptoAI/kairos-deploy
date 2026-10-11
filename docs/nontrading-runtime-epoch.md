@@ -29,6 +29,29 @@ be removed to bypass a failed or still-running epoch.
   continuous delivery is admitted. Any final audit-only catch-up after that
   snapshot is separately recorded, not represented as part of its restore proof.
 
+## Single-attempt continuation after first catch-up failure
+
+A continuation is an explicit, same-owner recovery attempt for the one isolated
+epoch, not a new epoch or a general retry. It is eligible only when the first
+bounded catch-up phase (`catchup-01`) failed; preserve that original failure
+receipt, create-only lease, and phase configurations unchanged. Before
+continuing, independently verify the signed operator-archive parent
+`271354af42bb40004d55c1164ecf7363c83b9c1b` and the new signed clean `main`
+HEAD with green CI. Reconfirm exact ownership of the
+new PostgreSQL/Redis resources and mounts, and that no worker is active.
+
+Before any continuation write, take a backup of the new target and restore it
+to another isolated target. Verify all 39 public tables, sequence state, and
+physical/index integrity against that backup. Rotate only the new epoch's
+history credential through its fixed database role, using a private file
+projection; never put credentials in CLI arguments or output. Worker runtime
+dependencies must be executable from the dedicated bounded libraries mount
+(`/runtime-libs`, `nosuid,nodev,exec`); keep `/tmp` separately bounded and
+`noexec`. Any other failed phase, ownership mismatch, active worker, or failed
+backup/restore check stops continuation. No legacy database, Redis, queue,
+volume, or credential is changed. This procedure is specified here, not a
+claim that continuation has executed or passed.
+
 ## Continuous delivery boundary
 
 Only freshly closed bars enter the new transactional outbox. Redis publication

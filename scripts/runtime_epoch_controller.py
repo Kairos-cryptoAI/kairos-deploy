@@ -69,6 +69,20 @@ NATIVE_VERIFY = (
 NATIVE_VERIFY_SHA256 = (
     "d0ccd3b14574d10877bbc488c35155b4ca602e5b65f13ac122d8f2cca5e03930"
 )
+CONTINUATION_OWNER = "69893dc7b7c647f49967387e7efca9fb"
+CONTINUATION_PARENT_REVISION = "271354af42bb40004d55c1164ecf7363c83b9c1b"
+CONTINUATION_PARENT_OPERATOR_SHA256 = (
+    "d8766258473190feeaa734e3f534f11799c1417b667e14fb4da8d4af1dd3356e"
+)
+CONTINUATION_FAILURE_SHA256 = (
+    "a444c8a67e4f69399277893a718fc52eb0dc27cd97a32c53a91003890221c9f8"
+)
+CONTINUATION_SEED_SHA256 = (
+    "f8321be4d705843055f203900214c7c3285b1cea175878574ff9d0c1aa9eab30"
+)
+CONTINUATION_SEED_DIGEST = (
+    "a99ac49e8d87bf856b35f90e740de8d74664147754a51d938dae3bad2805a9d1"
+)
 QUANT_REPO = Path("D:/Kairos/kairos-quant-scouts")
 QUANT_REVISION = "77c3d3e813faeb042661dacecd148226d8a25834"
 CORE_REVISION = "6937eb4773fc00afaf5ba4e020b28b689f48e377"
@@ -135,6 +149,7 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
             "source_dump_sha256",
         },
         "catchup": common | {"history_password", "end_exclusive_ms", "maximum_bars"},
+        "rotate-history": common | {"admin_password", "history_password"},
         "verify-restore": common
         | {
             "admin_password",
@@ -194,6 +209,27 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         or not isinstance(value["expected_seed"], dict)
     ):
         raise Rejected("ISOLATED_RESTORE_IDENTITY_REQUIRED")
+    if mode == "rotate-history" and (
+        value["pg_host"] != "kairos-epoch-" + value["owner"][:12] + "-pg"
+        or value["history_password"] == value["admin_password"]
+        or re.fullmatch(r"[0-9a-f]{64}", value["history_password"]) is None
+    ):
+        raise Rejected("EXACT_NEW_EPOCH_HISTORY_ROTATION_REQUIRED")
+    return value
+
+
+def validate_worker_tmpfs(value: object) -> dict:
+    """Require bounded noexec scratch and one narrowly executable libs mount."""
+    required = {
+        "/tmp": {"rw", "nosuid", "nodev", "noexec", "size=64m"},
+        "/runtime-libs": {"rw", "nosuid", "nodev", "exec", "size=128m"},
+    }
+    if not isinstance(value, dict) or set(value) != set(required):
+        raise Rejected("EXACT_WORKER_TMPFS_SET_REQUIRED")
+    for destination, tokens in required.items():
+        observed = set(str(value[destination]).split(","))
+        if observed != tokens:
+            raise Rejected("EXECUTABLE_LIBRARY_TMPFS_REQUIRED")
     return value
 
 
@@ -318,7 +354,15 @@ def redis_acl_text(
 
 
 def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str]:
-    if mode not in {"prepare", "seed", "catchup", "verify-restore", "qualify", "serve"}:
+    if mode not in {
+        "prepare",
+        "seed",
+        "catchup",
+        "rotate-history",
+        "verify-restore",
+        "qualify",
+        "serve",
+    }:
         raise Rejected("WORKER_MODE_REQUIRED")
     if (
         config_path != CONFIG_PATH_IN_CONTAINER
@@ -574,11 +618,14 @@ class EpochController:
         expected_revision: str,
         wheelhouse: Path = DEFAULT_WHEELHOUSE,
         deadline: float | None = None,
+        workdir: Path | None = None,
+        continuation_attempt: str | None = None,
     ):
         self.owner = owner_name(owner)
         self.names = resource_names(owner)
         self.expected_revision = expected_revision
-        self.work = fresh.safe(ROOT / ("run-" + owner))
+        self.work = fresh.safe(workdir or (ROOT / ("run-" + owner)))
+        self.continuation_attempt = continuation_attempt
         self.deadline = deadline or (time.monotonic() + MAX_SECONDS)
         docker_config = self.work / "docker-config"
         if not docker_config.exists():
@@ -794,7 +841,7 @@ class EpochController:
         user: str | None = None,
         memory: str = "2g",
         cpus: str = "1",
-        tmpfs: str = "/tmp:rw,nosuid,nodev,size=128m",
+        tmpfs: str | tuple[str, ...] = "/tmp:rw,nosuid,nodev,size=128m",
     ) -> None:
         if not name.startswith("kairos-epoch-" + self.owner[:12] + "-"):
             raise Rejected("OWNER_BOUND_CONTAINER_NAME_REQUIRED")
@@ -821,7 +868,14 @@ class EpochController:
         ]
         if user:
             args += ["--user", user]
-        args += ["--tmpfs", tmpfs, *options, image, *command]
+        tmpfs_values = (tmpfs,) if isinstance(tmpfs, str) else tmpfs
+        if not tmpfs_values or any(
+            not isinstance(value, str) for value in tmpfs_values
+        ):
+            raise Rejected("BOUNDED_TMPFS_REQUIRED")
+        for value in tmpfs_values:
+            args += ["--tmpfs", value]
+        args += [*options, image, *command]
         self.docker(args)
         self.created.append(name)
         view = self.inspect_container(name)
@@ -1160,6 +1214,7 @@ class EpochController:
         config_path: Path,
         output_dir: Path,
         extra_mounts: tuple[str, ...] = (),
+        suffix: str = "",
     ) -> dict:
         if config_path.parent != self.work or output_dir.parent != self.work:
             raise Rejected("OWNER_PRIVATE_WORKER_FILES_REQUIRED")
@@ -1173,7 +1228,16 @@ class EpochController:
         name = (
             self.names["serve"]
             if mode == "serve"
-            else "kairos-epoch-" + self.owner[:12] + "-" + mode
+            else "kairos-epoch-"
+            + self.owner[:12]
+            + (
+                "-continue-" + self.continuation_attempt
+                if self.continuation_attempt
+                else ""
+            )
+            + "-"
+            + mode
+            + ("-" + suffix if suffix else "")
         )
         if (
             not output_dir.is_dir()
@@ -1231,9 +1295,9 @@ class EpochController:
             + " ".join(invocation[2:])
         )
         shell = (
-            "set -eu; export PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1; /usr/local/bin/python -m pip install --no-index --no-deps --no-compile --target /tmp/installed /wheelhouse/*.whl /aux-wheels/"
+            "set -eu; export PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1; /usr/local/bin/python -m pip install --no-index --no-deps --no-compile --target /runtime-libs/installed /wheelhouse/*.whl /aux-wheels/"
             + AUX_NUMPY
-            + " >/dev/null 2>&1; export PYTHONPATH=/tmp/installed:/operator:/quant; "
+            + " >/dev/null 2>&1; export PYTHONPATH=/runtime-libs/installed:/operator:/quant; "
             + run
         )
         command = ["-c", shell]
@@ -1246,6 +1310,10 @@ class EpochController:
             user="0:0",
             memory="512m",
             cpus="1",
+            tmpfs=(
+                "/tmp:rw,nosuid,nodev,noexec,size=64m",
+                "/runtime-libs:rw,nosuid,nodev,exec,size=128m",
+            ),
         )
         view = self.inspect_container(name)
         expected_mounts = {
@@ -1282,6 +1350,13 @@ class EpochController:
             actual_mounts[destination] = True
         if set(actual_mounts) != {item[0] for item in expected_mounts.values()}:
             raise Rejected("EXACT_WORKER_MOUNT_SET_REQUIRED")
+        tmpfs = (
+            json.loads(
+                self.docker(["inspect", "--format", "{{json .HostConfig.Tmpfs}}", name])
+            )
+            or {}
+        )
+        validate_worker_tmpfs(tmpfs)
         self.docker(["start", name])
         if mode == "serve":
             self.proofs["serve_container"] = name
@@ -1304,6 +1379,7 @@ class EpochController:
             "catchup": "AUDIT_ONLY_CATCHUP_COMPLETE",
             "verify-restore": "PASS_ISOLATED_EPOCH_RESTORE",
             "qualify": "NONTRADING_RUNTIME_QUALIFIED",
+            "rotate-history": "HISTORY_CREDENTIAL_ROTATED",
         }
         if (
             not isinstance(receipt, dict)
@@ -1340,7 +1416,7 @@ class EpochController:
         fresh.save(config_path, config)
         output_dir.mkdir()
         receipt = self.run_worker(
-            mode=mode, config_path=config_path, output_dir=output_dir
+            mode=mode, config_path=config_path, output_dir=output_dir, suffix=suffix
         )
         completed = self.work / (
             "phase-" + f"{self.phase_index:03d}" + "-complete.json"
@@ -1448,6 +1524,453 @@ class EpochController:
             raise Rejected("QUANT_RUNTIME_PACKAGE_SNAPSHOT_REQUIRED")
         self.proofs["operator_snapshot_sha256"] = fresh.digest(operator_manifest)
         self.proofs["quant_snapshot_sha256"] = fresh.digest(quant_manifest)
+
+    def assert_existing_epoch(self, *, source_work: Path) -> dict:
+        """Validate, but never restart or mutate, the failed epoch resources."""
+        before = self.assert_legacy_sources_stopped(legacy_redis_id=LEGACY_REDIS_ID)
+        listed = self.docker(
+            [
+                "ps",
+                "--filter",
+                "label=" + EPOCH_LABEL + "=" + self.owner,
+                "--filter",
+                "label=com.kairos.runtime-epoch.scope=" + EPOCH_SCOPE,
+                "--format",
+                "{{.Names}}",
+            ]
+        )
+        running = set(listed.splitlines())
+        if running != {self.names["target_pg"], self.names["redis"]}:
+            raise Rejected("ONLY_EXISTING_TARGET_DATABASE_AND_REDIS_MAY_RUN")
+        all_owned = self.docker(
+            [
+                "ps",
+                "-a",
+                "--filter",
+                "label=" + EPOCH_LABEL + "=" + self.owner,
+                "--filter",
+                "label=com.kairos.runtime-epoch.scope=" + EPOCH_SCOPE,
+                "--format",
+                "{{.Names}}",
+            ]
+        ).splitlines()
+        failed_worker = "kairos-epoch-" + self.owner[:12] + "-catchup"
+        if set(all_owned) != {
+            self.names["target_pg"],
+            self.names["redis"],
+            failed_worker,
+        }:
+            raise Rejected("EXACT_FAILED_EPOCH_RESOURCE_SET_REQUIRED")
+        continuation_prefix = "kairos-epoch-" + self.owner[:12] + "-continue-01-"
+        if any(name.startswith(continuation_prefix) for name in all_owned):
+            raise Rejected("CONTINUATION_ATTEMPT_ALREADY_EXISTS")
+        expected_images = {
+            self.names["target_pg"]: PG_IMAGE,
+            self.names["redis"]: REDIS_IMAGE,
+        }
+        for name, image in expected_images.items():
+            view = self.inspect_container(name)
+            labels = view.get("labels") or {}
+            if (
+                view.get("name") != "/" + name
+                or view.get("image")
+                not in {
+                    image,
+                    image.split("@", 1)[-1],
+                    "sha256:" + image.rsplit("sha256:", 1)[-1],
+                }
+                or (view.get("state") or {}).get("Status") != "running"
+                or view.get("network") != self.names["network"]
+                or view.get("ports")
+                or view.get("readonly") is not True
+                or view.get("caps") != ["ALL"]
+                or view.get("privileged") is True
+                or view.get("memory")
+                != (4 * 1024**3 if name == self.names["target_pg"] else 256 * 1024**2)
+                or view.get("swap")
+                != (4 * 1024**3 if name == self.names["target_pg"] else 256 * 1024**2)
+                or view.get("cpus")
+                != (1_000_000_000 if name == self.names["target_pg"] else 500_000_000)
+                or labels.get(EPOCH_LABEL) != self.owner
+                or labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+            ):
+                raise Rejected("EXACT_EXISTING_EPOCH_CONTAINER_REQUIRED")
+        target_secret = source_work / "target-admin-password"
+        acl_path = source_work / "redis-users.acl"
+        if (
+            not target_secret.is_file()
+            or target_secret.is_symlink()
+            or not acl_path.is_file()
+            or acl_path.is_symlink()
+        ):
+            raise Rejected("ORIGINAL_EPOCH_PRIVATE_MOUNT_FILES_REQUIRED")
+        self.require_mount_set(
+            self.names["target_pg"],
+            {
+                self.names["target_volume"]: ("/var/lib/postgresql/data", True),
+                str(target_secret): ("/run/secrets/epoch_admin_password", False),
+            },
+        )
+        self.require_mount_set(
+            self.names["redis"],
+            {
+                self.names["redis_volume"]: ("/data", True),
+                str(acl_path): ("/run/config/users.acl", False),
+            },
+        )
+        old_worker = "kairos-epoch-" + self.owner[:12] + "-catchup"
+        worker = self.inspect_container(old_worker)
+        if (
+            (worker.get("state") or {}).get("Status") != "exited"
+            or (worker.get("state") or {}).get("ExitCode") == 0
+            or (worker.get("labels") or {}).get(EPOCH_LABEL) != self.owner
+            or (worker.get("labels") or {}).get("com.kairos.runtime-epoch.scope")
+            != EPOCH_SCOPE
+            or worker.get("image")
+            not in {
+                WORKER_IMAGE,
+                WORKER_IMAGE.split("@", 1)[-1],
+                "sha256:" + WORKER_IMAGE.rsplit("sha256:", 1)[-1],
+            }
+            or worker.get("ports")
+            or worker.get("readonly") is not True
+            or worker.get("caps") != ["ALL"]
+            or worker.get("privileged") is True
+            or worker.get("memory") != 512 * 1024**2
+            or worker.get("swap") != 512 * 1024**2
+            or worker.get("cpus") != 1_000_000_000
+        ):
+            raise Rejected("EXACT_STOPPED_FAILED_CATCHUP_WORKER_REQUIRED")
+        self.require_mount_set(
+            old_worker,
+            {
+                str(source_work / "config-catchup-01.json"): (
+                    CONFIG_PATH_IN_CONTAINER,
+                    False,
+                ),
+                str(source_work / "output-catchup-01"): ("/output", True),
+                str(source_work / "operator"): ("/operator", False),
+                str(source_work / "runtime-wheelhouse"): ("/wheelhouse", False),
+                str(source_work / "quant"): ("/quant", False),
+                str(AUX_WHEELHOUSE): ("/aux-wheels", False),
+            },
+        )
+        volume_names = (
+            self.names["target_volume"],
+            self.names["restore_volume"],
+            self.names["redis_volume"],
+        )
+        for volume in volume_names:
+            metadata = json.loads(
+                self.docker(["volume", "inspect", "--format", "{{json .}}", volume])
+            )
+            labels = metadata.get("Labels") or {}
+            if (
+                metadata.get("Name") != volume
+                or labels.get(EPOCH_LABEL) != self.owner
+                or labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+            ):
+                raise Rejected("EXACT_OWNED_EPOCH_VOLUMES_REQUIRED")
+        source_volumes = self.docker(
+            [
+                "volume",
+                "ls",
+                "--filter",
+                "name=" + self.names["source_volume"],
+                "--format",
+                "{{.Name}}",
+            ]
+        ).splitlines()
+        if self.names["source_volume"] in source_volumes:
+            raise Rejected("DISPOSABLE_SOURCE_CLONE_MUST_BE_ABSENT")
+        network = json.loads(
+            self.docker(
+                ["network", "inspect", "--format", "{{json .}}", self.names["network"]]
+            )
+        )
+        labels = network.get("Labels") or {}
+        if (
+            network.get("Name") != self.names["network"]
+            or network.get("Driver") != "bridge"
+            or network.get("Internal") is not False
+            or labels.get(EPOCH_LABEL) != self.owner
+            or labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+        ):
+            raise Rejected("EXACT_OWNED_EPOCH_BRIDGE_REQUIRED")
+        endpoints = {
+            item.get("Name")
+            for item in (network.get("Containers") or {}).values()
+            if isinstance(item, dict)
+        }
+        if not {self.names["target_pg"], self.names["redis"]}.issubset(
+            endpoints
+        ) or endpoints - {
+            self.names["target_pg"],
+            self.names["redis"],
+            failed_worker,
+        }:
+            raise Rejected("EXACT_EXISTING_EPOCH_BRIDGE_ENDPOINTS_REQUIRED")
+        self.proofs["precontinuation_legacy"] = before
+        self.proofs["existing_epoch_identity_verified"] = True
+        return before
+
+    def backup_and_verify(self, *, seed: dict, restore_password: str, tag: str) -> str:
+        """Backup only the owned target and compare a disposable exact restore."""
+        backup = self.work / ("epoch-history-" + tag + ".dump")
+        container_dump = "/tmp/runtime-epoch-" + tag + ".dump"
+        self.docker(
+            [
+                "exec",
+                self.names["target_pg"],
+                "pg_dump",
+                "--format=custom",
+                "--no-owner",
+                "--no-privileges",
+                "--username=kairos",
+                "--dbname=kairos_epoch_" + self.owner[:12],
+                "--file=" + container_dump,
+            ],
+            seconds=240,
+        )
+        self.docker(
+            ["cp", self.names["target_pg"] + ":" + container_dump, str(backup)],
+            seconds=30,
+        )
+        if backup.is_symlink() or not backup.is_file() or backup.stat().st_size <= 0:
+            raise Rejected("PRIVATE_EPOCH_BACKUP_REQUIRED")
+        dump_hash = _sha(backup)
+        restore_secret = self.work / ("restore-admin-password-" + tag)
+        fresh.write(restore_secret, restore_password.encode("ascii"))
+        restore_mount = (
+            "--mount",
+            f"type=bind,src={backup},dst=/archive.dump,readonly",
+        )
+        self.create_database(
+            name=self.names["restore_pg"],
+            volume=self.names["restore_volume"],
+            password_path=restore_secret,
+            database="kairos_recovery_" + self.owner[:12] + "_epochrestore",
+            extra_mounts=restore_mount,
+            watchdog_seconds=1500,
+        )
+        self.wait_postgres(self.names["restore_pg"])
+        self.restore_accepted_dump(
+            self.names["restore_pg"],
+            "kairos_recovery_" + self.owner[:12] + "_epochrestore",
+        )
+        verification = self.phase(
+            "verify-restore",
+            {
+                "owner": self.owner,
+                "database": "kairos_epoch_" + self.owner[:12],
+                "pg_host": self.names["target_pg"],
+                "redis_host": self.names["redis"],
+                "admin_password": self._admin_password,
+                "restore_host": self.names["restore_pg"],
+                "restore_database": "kairos_recovery_"
+                + self.owner[:12]
+                + "_epochrestore",
+                "restore_admin_password": restore_password,
+                "expected_seed": seed,
+            },
+            suffix=tag,
+        )
+        audit_table = (verification.get("tables") or {}).get("event_audit") or {}
+        if tag == "precontinuation" and audit_table.get("count") != seed.get("rows"):
+            raise Rejected("PRECONTINUATION_SEED_ROW_COUNT_REQUIRED")
+        if tag == "postcatchup" and audit_table.get("count", 0) < seed.get("rows", 0):
+            raise Rejected("POSTCATCHUP_HISTORY_ROW_COUNT_REQUIRED")
+        self.docker(
+            [
+                "exec",
+                self.names["restore_pg"],
+                "pg_amcheck",
+                "--install-missing",
+                "--database=kairos_recovery_" + self.owner[:12] + "_epochrestore",
+                "--username=kairos",
+                "--heapallindexed",
+                "--parent-check",
+                "--rootdescend",
+            ],
+            seconds=240,
+        )
+        self.remove_owned_clone(self.names["restore_pg"], self.names["restore_volume"])
+        return dump_hash
+
+    def run_continuation(
+        self, *, seed: dict, old_private: dict, rotated_history: str
+    ) -> dict:
+        """Continue the pinned zero-append failure without adopting its worker."""
+        owner = self.owner
+        self._admin_password = old_private["admin_password"]
+        before = self.assert_existing_epoch(source_work=ROOT / ("run-" + owner))
+        # The originally initialized restore volume is owner-labelled and still
+        # empty; confirm it before using it for the pre-write backup proof.
+        self.initialize_volume(self.names["restore_volume"], uid=70)
+        pre_backup_hash = self.backup_and_verify(
+            seed=seed,
+            restore_password=secrets.token_hex(32),
+            tag="precontinuation",
+        )
+        self.proofs["precontinuation_backup_sha256"] = pre_backup_hash
+
+        rotated = self.phase(
+            "rotate-history",
+            {
+                "owner": owner,
+                "database": old_private["database"],
+                "pg_host": self.names["target_pg"],
+                "redis_host": self.names["redis"],
+                "admin_password": old_private["admin_password"],
+                "history_password": rotated_history,
+            },
+            suffix="history-credential",
+        )
+        if rotated.get("credential_rotated") is not True:
+            raise Rejected("HISTORY_ROLE_ROTATION_PROOF_REQUIRED")
+        self.proofs["history_credential_rotated"] = True
+
+        rolling = copy.deepcopy(seed)
+        end_target = ((int(time.time() * 1000) - 5_000) // MINUTE_MS) * MINUTE_MS
+        batches = 0
+        while (
+            min(a["last_close_time_ms"] + 1 for a in rolling["anchors"].values())
+            < end_target
+        ):
+            end = catchup_end_exclusive_ms(rolling, end_target)
+            batches += 1
+            if batches > 32:
+                raise Rejected("CONTINUATION_CATCHUP_BATCH_COUNT_EXCEEDED")
+            receipt = self.phase(
+                "catchup",
+                {
+                    "owner": owner,
+                    "database": old_private["database"],
+                    "pg_host": self.names["target_pg"],
+                    "redis_host": self.names["redis"],
+                    "history_password": rotated_history,
+                    "end_exclusive_ms": end,
+                    "maximum_bars": MAX_CATCHUP_BARS,
+                },
+                suffix=f"continue-{batches:02d}",
+            )
+            appended = receipt.get("appended")
+            if (
+                not isinstance(appended, dict)
+                or set(appended) != set(SYMBOLS)
+                or any(type(n) is not int or n < 0 for n in appended.values())
+                or sum(appended.values()) > MAX_CATCHUP_BARS
+            ):
+                raise Rejected("CONTINUATION_BOUNDED_CATCHUP_RECEIPT_REQUIRED")
+            for symbol, anchor in rolling["anchors"].items():
+                anchor["count"] += appended[symbol]
+                anchor["last_open_time_ms"] = end - MINUTE_MS
+                anchor["last_close_time_ms"] = end - 1
+        self.proofs["continuation_catchup_batches"] = batches
+        self.proofs["continuation_initial_end_exclusive_ms"] = end_target
+
+        # A second restore proof covers the catch-up snapshot before the short
+        # qualification tail is allowed to publish.
+        self.create_volume(self.names["restore_volume"])
+        self.initialize_volume(self.names["restore_volume"], uid=70)
+        post_backup_hash = self.backup_and_verify(
+            seed=rolling,
+            restore_password=secrets.token_hex(32),
+            tag="postcatchup",
+        )
+        self.proofs["postcatchup_backup_sha256"] = post_backup_hash
+
+        final_end = ((int(time.time() * 1000) - 5_000) // MINUTE_MS) * MINUTE_MS
+        final_batches = 0
+        while (
+            min(a["last_close_time_ms"] + 1 for a in rolling["anchors"].values())
+            < final_end
+        ):
+            end = catchup_end_exclusive_ms(rolling, final_end)
+            final_batches += 1
+            if final_batches > 32:
+                raise Rejected("CONTINUATION_FINAL_BATCH_COUNT_EXCEEDED")
+            receipt = self.phase(
+                "catchup",
+                {
+                    "owner": owner,
+                    "database": old_private["database"],
+                    "pg_host": self.names["target_pg"],
+                    "redis_host": self.names["redis"],
+                    "history_password": rotated_history,
+                    "end_exclusive_ms": end,
+                    "maximum_bars": MAX_CATCHUP_BARS,
+                },
+                suffix=f"continue-final-{final_batches:02d}",
+            )
+            appended = receipt.get("appended")
+            if (
+                not isinstance(appended, dict)
+                or set(appended) != set(SYMBOLS)
+                or any(type(n) is not int or n < 0 for n in appended.values())
+                or sum(appended.values()) > MAX_CATCHUP_BARS
+            ):
+                raise Rejected("CONTINUATION_FINAL_CATCHUP_RECEIPT_REQUIRED")
+            for symbol, anchor in rolling["anchors"].items():
+                anchor["count"] += appended[symbol]
+                anchor["last_open_time_ms"] = end - MINUTE_MS
+                anchor["last_close_time_ms"] = end - 1
+        self.proofs["continuation_final_batches"] = final_batches
+        runtime = {
+            "owner": owner,
+            "database": old_private["database"],
+            "pg_host": self.names["target_pg"],
+            "redis_host": self.names["redis"],
+            "producer_password": old_private["producer_password"],
+            "consumer_password": old_private["consumer_password"],
+            "redis_producer_password": old_private["redis_producer_password"],
+            "redis_consumer_password": old_private["redis_consumer_password"],
+        }
+        qualified = self.phase("qualify", runtime, suffix="continuation")
+        if qualified.get("state") != "NONTRADING_RUNTIME_QUALIFIED":
+            raise Rejected("NONTRADING_RUNTIME_QUALIFICATION_REQUIRED")
+        self.phase("serve", runtime)
+        status_path = self.work / "output-serve" / "status.json"
+        cutoff = min(time.monotonic() + 180, self.deadline - 15)
+        status = None
+        while time.monotonic() < cutoff:
+            if status_path.is_file() and not status_path.is_symlink():
+                try:
+                    candidate = json.loads(status_path.read_text(encoding="utf-8"))
+                    if candidate.get("state") == "RUNNING_NONTRADING":
+                        status = candidate
+                        break
+                except (OSError, json.JSONDecodeError):
+                    pass
+            time.sleep(2)
+        if status is None:
+            raise Rejected("PERSISTENT_NONTRADING_SERVE_STATUS_REQUIRED")
+        validate_running_status(status, owner)
+        restarted = self.restart_serve_and_validate(status_path, status)
+        after = self.assert_legacy_sources_stopped(legacy_redis_id=LEGACY_REDIS_ID)
+        if before != after:
+            raise Rejected("PRESERVED_LEGACY_SOURCE_IDENTITY_CHANGED")
+        source_work = ROOT / ("run-" + owner)
+        if (
+            _sha(source_work / "operator.zip") != CONTINUATION_PARENT_OPERATOR_SHA256
+            or _sha(source_work / "runtime-epoch-failure.json")
+            != CONTINUATION_FAILURE_SHA256
+            or _sha(source_work / "output-seed" / "seed.json")
+            != CONTINUATION_SEED_SHA256
+            or ACTIVE_LEASE.read_text(encoding="ascii") != owner + "\n"
+        ):
+            raise Rejected("PRESERVED_FAILED_EPOCH_EVIDENCE_CHANGED")
+        self.proofs["legacy_after"] = after
+        self.proofs["serve_restart_status"] = restarted
+        self.proofs["continuation_attempt"] = self.continuation_attempt
+        self.proofs["source_failure_preserved"] = True
+        return {
+            "result": "PASS_NONTRADING_RUNTIME_EPOCH_CONTINUATION",
+            "owner": owner,
+            "database": old_private["database"],
+            "resources": self.names,
+            "proofs": self.proofs,
+        }
 
     def run_epoch(self, *, end_exclusive_ms: int, secrets_map: dict) -> dict:
         owner = self.owner
@@ -1648,7 +2171,7 @@ class EpochController:
             "restore_host": self.names["restore_pg"],
             "restore_database": restore_database,
             "restore_admin_password": secrets_map["restore_admin_password"],
-            "expected_seed": seed,
+            "expected_seed": rolling,
         }
         self.phase("verify-restore", verify_config)
         self.docker(
@@ -1656,6 +2179,7 @@ class EpochController:
                 "exec",
                 self.names["restore_pg"],
                 "pg_amcheck",
+                "--install-missing",
                 "--database=" + restore_database,
                 "--username=kairos",
                 "--heapallindexed",
@@ -1775,6 +2299,102 @@ def _private_directory(path: Path) -> None:
         raise Rejected("PRIVATE_EPOCH_DIRECTORY_ACL_FAILED")
 
 
+def validate_continuation_artifacts(
+    *,
+    owner: str,
+    parent_revision: str,
+    parent_operator_sha256: str,
+    parent_operator: Path,
+    lease: Path,
+    failure: Path,
+    seed: Path,
+    original_private: Path,
+    original_catchup_config: Path,
+) -> tuple[dict, dict, dict]:
+    """Admit only the single frozen, zero-append catch-up failure instance."""
+    if (
+        owner != CONTINUATION_OWNER
+        or parent_revision != CONTINUATION_PARENT_REVISION
+        or parent_operator_sha256 != CONTINUATION_PARENT_OPERATOR_SHA256
+        or any(
+            path.is_symlink() or not path.is_file()
+            for path in (
+                parent_operator,
+                failure,
+                seed,
+                original_private,
+                original_catchup_config,
+            )
+        )
+        or lease.is_symlink()
+        or not lease.is_file()
+        or _sha(parent_operator) != CONTINUATION_PARENT_OPERATOR_SHA256
+        or _sha(failure) != CONTINUATION_FAILURE_SHA256
+        or _sha(seed) != CONTINUATION_SEED_SHA256
+        or lease.read_text(encoding="ascii") != owner + "\n"
+    ):
+        raise Rejected("EXACT_FAILED_EPOCH_CONTINUATION_PROVENANCE_REQUIRED")
+    failure_value = json.loads(failure.read_text(encoding="utf-8"))
+    seed_value = json.loads(seed.read_text(encoding="utf-8"))
+    if (
+        failure_value.get("owner") != owner
+        or failure_value.get("phase") != "catchup-01"
+        or failure_value.get("error_category") != "WORKER_MODE_FAILED_CATCHUP"
+        or failure_value.get("preserved_forensics") is not True
+        or failure_value.get("active_lease_preserved") is not True
+        or failure_value.get("trading_started") is not False
+        or seed_value.get("owner") != owner
+        or seed_value.get("state") != "VERIFIED_HISTORY_SEEDED_AUDIT_ONLY"
+        or seed_value.get("rows") != 173_164
+        or seed_value.get("ordered_digest_sha256") != CONTINUATION_SEED_DIGEST
+        or seed_value.get("target_outbox_rows_after") != 0
+    ):
+        raise Rejected("EXACT_EMPTY_APPENDER_FAILED_CATCHUP_REQUIRED")
+    private = json.loads(original_private.read_text(encoding="utf-8"))
+    required = {
+        "owner",
+        "database",
+        "admin_password",
+        "source_admin_password",
+        "restore_admin_password",
+        "source_password",
+        "history_password",
+        "producer_password",
+        "consumer_password",
+        "redis_admin_password",
+        "redis_producer_password",
+        "redis_consumer_password",
+    }
+    if (
+        set(private) != required
+        or private.get("owner") != owner
+        or private.get("database") != "kairos_epoch_" + owner[:12]
+        or original_catchup_config.is_symlink()
+    ):
+        raise Rejected("ORIGINAL_EPOCH_PRIVATE_IDENTITY_REQUIRED")
+    catchup_config = json.loads(original_catchup_config.read_text(encoding="utf-8"))
+    if (
+        set(catchup_config)
+        != {
+            "owner",
+            "database",
+            "pg_host",
+            "redis_host",
+            "history_password",
+            "end_exclusive_ms",
+            "maximum_bars",
+        }
+        or catchup_config.get("owner") != owner
+        or catchup_config.get("database") != private["database"]
+        or catchup_config.get("history_password") != private["history_password"]
+        or catchup_config.get("maximum_bars") != MAX_CATCHUP_BARS
+        or type(catchup_config.get("end_exclusive_ms")) is not int
+        or catchup_config["end_exclusive_ms"] % MINUTE_MS
+    ):
+        raise Rejected("ORIGINAL_FAILED_CATCHUP_BOUNDARY_REQUIRED")
+    return seed_value, private, catchup_config
+
+
 def _verify_source_signature(work: Path) -> None:
     """Use the already-pinned local signer/keyring path; never fetch keys."""
 
@@ -1806,6 +2426,35 @@ def _verify_source_signature(work: Path) -> None:
         NATIVE_VERIFY.with_suffix(".json.asc"),
         "source-proof",
     )
+
+
+def _verify_parent_revision(revision: str) -> None:
+    if revision != CONTINUATION_PARENT_REVISION:
+        raise Rejected("EXACT_FAILED_EPOCH_PARENT_REVISION_REQUIRED")
+    result = subprocess.run(
+        [str(GIT), "-C", str(REPO), "verify-commit", revision],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+        shell=False,
+    )
+    signer = subprocess.run(
+        [str(GIT), "-C", str(REPO), "log", "-1", "--format=%G? %GF", revision],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+        check=False,
+        shell=False,
+    )
+    if (
+        result.returncode
+        or signer.returncode
+        or signer.stdout.decode().strip() != "G " + fresh.SIGNER
+    ):
+        raise Rejected("SIGNED_FAILED_EPOCH_PARENT_REQUIRED")
 
 
 def _validate_admission(args: argparse.Namespace) -> None:
@@ -2055,6 +2704,10 @@ def _persist_failure_receipt(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--continue-failed-catchup", action="store_true")
+    parser.add_argument("--owner")
+    parser.add_argument("--expected-parent-revision")
+    parser.add_argument("--expected-parent-operator-sha256")
     parser.add_argument("--expected-revision")
     parser.add_argument("--expected-legacy-redis-id")
     parser.add_argument("--end-exclusive-ms", type=int)
@@ -2068,6 +2721,9 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "result": "PLAN_ONLY",
+                    "operation": "same-owner failed-catchup continuation"
+                    if args.continue_failed_catchup
+                    else "new isolated runtime epoch",
                     "writes": False,
                     "legacy_source_start": False,
                     "legacy_source_sql_or_redis_commands": 0,
@@ -2085,6 +2741,81 @@ def main(argv: list[str] | None = None) -> int:
     private_ready = False
     try:
         _validate_admission(args)
+        if args.continue_failed_catchup:
+            owner = args.owner
+            if args.end_exclusive_ms is not None:
+                raise Rejected("CONTINUATION_USES_FRESH_BOUNDED_ENDPOINTS")
+            if args.owner != CONTINUATION_OWNER:
+                raise Rejected("EXACT_FAILED_EPOCH_OWNER_REQUIRED")
+            _verify_parent_revision(args.expected_parent_revision or "")
+            source_work = fresh.safe(ROOT / ("run-" + args.owner))
+            parent_operator = source_work / "operator.zip"
+            failure_path = source_work / "runtime-epoch-failure.json"
+            seed_path = source_work / "output-seed" / "seed.json"
+            source_private = source_work / "epoch-private.json"
+            source_catchup = source_work / "config-catchup-01.json"
+            seed_value, old_private, _old_catchup = validate_continuation_artifacts(
+                owner=args.owner,
+                parent_revision=args.expected_parent_revision,
+                parent_operator_sha256=args.expected_parent_operator_sha256 or "",
+                parent_operator=parent_operator,
+                lease=ACTIVE_LEASE,
+                failure=failure_path,
+                seed=seed_path,
+                original_private=source_private,
+                original_catchup_config=source_catchup,
+            )
+            attempt = "01"
+            work = fresh.safe(source_work / ("continuation-" + attempt))
+            if work.exists() or work.is_symlink():
+                raise Rejected("CREATE_ONLY_SINGLE_CONTINUATION_ATTEMPT_REQUIRED")
+            _private_directory(work)
+            private_ready = True
+            _verify_source_signature(work)
+            controller = EpochController(
+                args.owner,
+                expected_revision=args.expected_revision,
+                wheelhouse=args.wheelhouse,
+                deadline=time.monotonic() + MAX_SECONDS,
+                workdir=work,
+                continuation_attempt=attempt,
+            )
+            controller.prepare_snapshots()
+            continuation_history = secrets.token_hex(32)
+            fresh.save(
+                work / "continuation-private.json",
+                {"owner": args.owner, "history_password": continuation_history},
+            )
+            result = controller.run_continuation(
+                seed=seed_value,
+                old_private=old_private,
+                rotated_history=continuation_history,
+            )
+            receipt = work / "runtime-epoch-continuation-receipt.json"
+            fresh.save(receipt, result)
+            print(
+                json.dumps(
+                    {
+                        "result": result["result"],
+                        "owner": args.owner,
+                        "attempt": attempt,
+                        "receipt": str(receipt),
+                        "secrets": "private-file-only",
+                        "native_operations": "bounded-owner-only",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if any(
+            value is not None
+            for value in (
+                args.owner,
+                args.expected_parent_revision,
+                args.expected_parent_operator_sha256,
+            )
+        ):
+            raise Rejected("CONTINUATION_FLAGS_REQUIRE_CONTINUATION_MODE")
         if (
             type(args.end_exclusive_ms) is not int
             or args.end_exclusive_ms % 60_000
