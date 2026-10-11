@@ -789,6 +789,27 @@ def _epoch_config(
     return value
 
 
+def normalize_container_metadata(value: object) -> dict:
+    """Canonicalize Docker's unordered mount inventory without dropping fields."""
+    if not isinstance(value, dict) or not isinstance(value.get("mounts"), list):
+        raise Rejected("EXACT_CONTAINER_MOUNT_INVENTORY_REQUIRED")
+    mounts = value["mounts"]
+    if any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("Destination"), str)
+        or not row["Destination"]
+        for row in mounts
+    ) or len({row["Destination"] for row in mounts}) != len(mounts):
+        raise Rejected("EXACT_CONTAINER_MOUNT_INVENTORY_REQUIRED")
+    return {
+        **value,
+        "mounts": sorted(
+            mounts,
+            key=lambda row: json.dumps(row, sort_keys=True, separators=(",", ":")),
+        ),
+    }
+
+
 class EpochController:
     """Owner-bound native resource manager; no old-runtime resource is adopted."""
 
@@ -842,7 +863,9 @@ class EpochController:
             ) from None
 
     def inspect_container(self, name: str) -> dict:
-        return json.loads(self.docker(["inspect", "--format", fresh.VIEW, name]))
+        return normalize_container_metadata(
+            json.loads(self.docker(["inspect", "--format", fresh.VIEW, name]))
+        )
 
     def assert_legacy_sources_stopped(self, *, legacy_redis_id: str) -> dict:
         """Read only exact source container metadata; never exec/query/start them."""

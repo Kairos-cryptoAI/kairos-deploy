@@ -90,6 +90,40 @@ def config(mode: str, **overrides: object) -> dict:
 
 
 class RuntimeEpochControllerTests(unittest.TestCase):
+    def test_metadata_digest_ignores_only_mount_enumeration_order(self):
+        view = {
+            "id": "a" * 64,
+            "state": {"Status": "exited", "Pid": 0},
+            "mounts": [
+                {"Destination": "/data", "Source": "owned-volume", "RW": True},
+                {"Destination": "/config", "Source": "owned-config", "RW": False},
+            ],
+        }
+        reordered = {**view, "mounts": list(reversed(view["mounts"]))}
+        self.assertEqual(
+            epoch.fresh.digest(epoch.normalize_container_metadata(view)),
+            epoch.fresh.digest(epoch.normalize_container_metadata(reordered)),
+        )
+        self.assertEqual(view["mounts"][0]["Destination"], "/data")
+        changed = {
+            **view,
+            "mounts": [{**view["mounts"][0], "RW": False}, view["mounts"][1]],
+        }
+        self.assertNotEqual(
+            epoch.fresh.digest(epoch.normalize_container_metadata(view)),
+            epoch.fresh.digest(epoch.normalize_container_metadata(changed)),
+        )
+
+    def test_metadata_canonicalization_rejects_ambiguous_mount_inventory(self):
+        for mounts in (
+            None,
+            [None],
+            [{"Source": "unknown"}],
+            [{"Destination": "/data"}] * 2,
+        ):
+            with self.subTest(mounts=mounts), self.assertRaises(epoch.Rejected):
+                epoch.normalize_container_metadata({"mounts": mounts})
+
     def test_attempt_02_initializer_has_fowner_and_tmpfs_for_image_pg_volume(self):
         controller = epoch.EpochController.__new__(epoch.EpochController)
         controller.owner = OWNER

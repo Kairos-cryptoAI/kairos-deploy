@@ -70,6 +70,28 @@ def _aof_inventory() -> dict:
 
 
 class RedisAofRecoveryTests(unittest.TestCase):
+    def test_canonical_proofs_round_trip_without_dropping_admission_identity(self):
+        for clone in (False, True):
+            proof = recovery.validate_redis_worker_proof(
+                _worker_proof(clone=clone), clone=clone
+            )
+            self.assertEqual(
+                recovery.validate_redis_worker_proof(proof, clone=clone), proof
+            )
+            for mutation in (
+                {"owner": "0" * 32},
+                {"new_epoch_database": "other"},
+                {"mode": "other"},
+            ):
+                with self.assertRaises(epoch.Rejected):
+                    recovery.validate_redis_worker_proof(
+                        {**proof, **mutation}, clone=clone
+                    )
+        inventory = recovery.validate_aof_inventory(_aof_inventory())
+        self.assertEqual(recovery.validate_aof_inventory(inventory), inventory)
+        with self.assertRaises(epoch.Rejected):
+            recovery.validate_aof_inventory({**inventory, "status": "FAIL"})
+
     def test_default_invocation_is_a_side_effect_free_plan(self):
         with (
             patch.object(boot, "verify_source", side_effect=AssertionError("called")),
@@ -411,6 +433,7 @@ class RedisAofRecoveryTests(unittest.TestCase):
             }
         }
         preserved = {
+            "active_latch_sha256": "7" * 64,
             "task_state": {"state": "Ready", "last_result": 1, "boot_python_count": 0},
             "resource_metadata": {"legacy": {"x": 1}, "standby": {"x": 2}},
         }
@@ -419,7 +442,7 @@ class RedisAofRecoveryTests(unittest.TestCase):
             or controller.proofs.update(
                 accepted_clone_proof=clone_proof, accepted_aof_inventory=aof_proof
             )
-            or accepted
+            or {**accepted, "previous_boot_active_latch_sha256": "7" * 64}
         )
         controller.validate_admission = lambda **kwargs: (
             setattr(controller, "preserved", preserved) or (preserved, resources, {})

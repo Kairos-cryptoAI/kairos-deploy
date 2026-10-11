@@ -271,6 +271,7 @@ def validate_aof_inventory(value: object, *, worker_proof: dict | None = None) -
     if type(value.get("bytes")) is not int or not 0 < value["bytes"] <= MAX_AOF_BYTES:
         reject("REDIS_AOF_INVENTORY_SIZE_REQUIRED")
     return {
+        "status": "PASS_AOF_INVENTORY",
         "bytes": value["bytes"],
         "parsed_source_sha256": value["parsed_source_sha256"],
         "publication_message_ids_sha256": value["publication_message_ids_sha256"],
@@ -314,6 +315,9 @@ def validate_redis_worker_proof(value: object, *, clone: bool) -> dict:
         reject("BOOT_REDIS_STATE_PROOF_CONFLICT")
     return {
         "state": "PASS_BOOT_REDIS_STATE",
+        "owner": OWNER,
+        "mode": "boot-redis-clone" if clone else "boot-redis-state",
+        "new_epoch_database": "kairos_epoch_" + OWNER[:12],
         "outbox_rows": EXPECTED_ROWS,
         "completed_inbox": EXPECTED_ROWS,
         "stream_entries": EXPECTED_STREAM,
@@ -916,6 +920,26 @@ class RedisAofRecoveryController(boot.BootController):
             or directory.name != "run-" + accepted["run_id"]
         ):
             reject("ACCEPTED_CLONE_PRIVATE_WORK_DIRECTORY_REQUIRED")
+        failure_path = directory / "redis-aof-recovery-failure.json"
+        if failure_path.exists():
+            adjudication = accepted.get("retained_evidence_adjudication")
+            if (
+                not isinstance(adjudication, dict)
+                or adjudication.get("result") != "PASS_MOUNT_ORDER_ONLY_ADJUDICATION"
+                or adjudication.get("failure_sha256") != epoch.fresh.sha(failure_path)
+                or adjudication.get("clone_restarted") is not False
+                or adjudication.get("evidence_rewritten") is not False
+                or adjudication.get("source_revision") != self.expected_revision
+            ):
+                reject("FAILED_CLONE_REQUIRES_EXPLICIT_RETAINED_EVIDENCE_ADJUDICATION")
+            clone_view = self.inspect_container(CLONE_CONTAINER)
+            if (
+                clone_view.get("id") != accepted["clone_container_id"]
+                or (clone_view.get("state") or {}).get("Status") != "exited"
+                or epoch.fresh.digest(clone_view)
+                != adjudication.get("clone_metadata_sha256")
+            ):
+                reject("ADJUDICATED_STOPPED_CLONE_METADATA_CHANGED")
         original_acl = directory / "original-redis-users.acl"
         candidate_acl = directory / "candidate-redis-users.acl"
         if (
@@ -947,6 +971,10 @@ class RedisAofRecoveryController(boot.BootController):
         self.preserved, resources, _ = self.validate_admission(
             allowed_acl_sha256=accepted.get("candidate_acl_sha256")
         )
+        if self.preserved["active_latch_sha256"] != accepted.get(
+            "previous_boot_active_latch_sha256"
+        ):
+            reject("QUALIFIED_BOOT_ACTIVE_LATCH_CHANGED")
         if (
             (resources["views"]["serve"].get("state") or {}).get("Status") != "exited"
             or (resources["views"]["serve"].get("state") or {}).get("ExitCode") != 255
