@@ -60,6 +60,14 @@ class BootAdmissionTests(unittest.TestCase):
             )
             controller.prepare_snapshots = mock.Mock()
             controller.wait_postgres = mock.Mock()
+            controller.create_volume = mock.Mock(
+                side_effect=lambda name: calls.append(("volume-create", name))
+            )
+            controller.initialize_volume = mock.Mock(
+                side_effect=lambda name, **kwargs: calls.append(
+                    ("volume-init", name, kwargs["uid"])
+                )
+            )
             controller.backup_and_verify = mock.Mock(
                 side_effect=lambda **kwargs: (
                     calls.append(("restore", kwargs["tag"])) or "b" * 64
@@ -116,6 +124,24 @@ class BootAdmissionTests(unittest.TestCase):
                 result = controller.run_boot()
             self.assertEqual(result["result"], "PASS_NONTRADING_EPOCH_BOOT")
             self.assertEqual(controller.backup_and_verify.call_count, 2)
+            restore_volume = controller.names["restore_volume"]
+            self.assertEqual(
+                [
+                    c
+                    for c in calls
+                    if c[0] in {"volume-create", "volume-init", "restore"}
+                ],
+                [
+                    ("volume-create", restore_volume),
+                    ("volume-init", restore_volume, 70),
+                    ("restore", "bootbefore"),
+                    ("volume-create", restore_volume),
+                    ("volume-init", restore_volume, 70),
+                    ("restore", "bootafter"),
+                ],
+            )
+            for tag in ("bootbefore", "bootafter"):
+                self.assertEqual(controller.proofs[tag + "_backup_sha256"], "b" * 64)
             for call in controller.backup_and_verify.call_args_list:
                 self.assertEqual(
                     call.kwargs["verification_mode"], "boot-verify-restore"
@@ -131,6 +157,67 @@ class BootAdmissionTests(unittest.TestCase):
             self.assertNotIn(("start", boot.STANDBY_NAME), calls)
             self.assertTrue(result["legacy_unchanged"])
             self.assertFalse(result["trading_started"])
+
+    def test_boot_restore_volume_requires_absent_resources_before_any_mutation(self):
+        for conflict in (None, "volume", "clone"):
+            with self.subTest(conflict=conflict):
+                controller = boot.BootController.__new__(boot.BootController)
+                controller.names = epoch.resource_names(boot.OWNER)
+                controller.proofs = {}
+                volume = controller.names["restore_volume"]
+                clone = controller.names["restore_pg"]
+                controller.docker = mock.Mock(
+                    side_effect=[
+                        volume + "\n" if conflict == "volume" else "",
+                        clone + "\n" if conflict == "clone" else "",
+                    ]
+                )
+                events = []
+                controller.create_volume = mock.Mock(
+                    side_effect=lambda name, events=events: events.append(
+                        ("create", name)
+                    )
+                )
+                controller.initialize_volume = mock.Mock(
+                    side_effect=lambda name, events=events, **kwargs: events.append(
+                        ("initialize", name, kwargs["uid"])
+                    )
+                )
+                if conflict:
+                    with self.assertRaisesRegex(
+                        epoch.Rejected, "BOOT_RESTORE_RESOURCES_MUST_BE_ABSENT"
+                    ):
+                        controller.prepare_boot_restore_volume("bootbefore")
+                    self.assertEqual(events, [])
+                    self.assertEqual(controller.proofs, {})
+                else:
+                    controller.prepare_boot_restore_volume("bootbefore")
+                    self.assertEqual(
+                        events, [("create", volume), ("initialize", volume, 70)]
+                    )
+                    self.assertTrue(
+                        controller.proofs["bootbefore_restore_volume"][
+                            "fresh_owner_labelled"
+                        ]
+                    )
+                self.assertEqual(
+                    controller.docker.call_args_list[-1].args[0],
+                    [
+                        "ps",
+                        "-a",
+                        "--filter",
+                        "name=^/" + clone + "$",
+                        "--format",
+                        "{{.Names}}",
+                    ],
+                )
+
+    def test_boot_restore_volume_rejects_unknown_tag_without_docker(self):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.docker = mock.Mock()
+        with self.assertRaisesRegex(epoch.Rejected, "EXACT_BOOT_BACKUP_TAG_REQUIRED"):
+            controller.prepare_boot_restore_volume("arbitrary")
+        controller.docker.assert_not_called()
 
     @staticmethod
     def _resources():

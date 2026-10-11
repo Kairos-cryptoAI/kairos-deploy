@@ -366,6 +366,28 @@ class BootController(epoch.EpochController):
             )
         )
 
+    def prepare_boot_restore_volume(self, tag: str) -> None:
+        """Create only a fresh owned disposable volume for this exact boot backup."""
+        if tag not in {"bootbefore", "bootafter"}:
+            raise epoch.Rejected("EXACT_BOOT_BACKUP_TAG_REQUIRED")
+        volume = self.names["restore_volume"]
+        clone = self.names["restore_pg"]
+        volumes = self.docker(
+            ["volume", "ls", "--filter", "name=" + volume, "--format", "{{.Name}}"]
+        ).splitlines()
+        clones = self.docker(
+            ["ps", "-a", "--filter", "name=^/" + clone + "$", "--format", "{{.Names}}"]
+        ).splitlines()
+        if volume in volumes or clones:
+            raise epoch.Rejected("BOOT_RESTORE_RESOURCES_MUST_BE_ABSENT")
+        self.create_volume(volume)
+        self.initialize_volume(volume, uid=70)
+        self.proofs[tag + "_restore_volume"] = {
+            "name": volume,
+            "fresh_owner_labelled": True,
+            "initialized_uid": 70,
+        }
+
     def run_boot(self) -> dict:
         before_resources = self.validate_resources(allow_running=True)
         self.proofs["isolated_standby"] = before_resources["standby"]
@@ -422,7 +444,8 @@ class BootController(epoch.EpochController):
         self._admin_password = (PARENT / "target-admin-password").read_text().strip()
         before = self.boot_state("before")
         self.proofs["before_state"] = before
-        self.backup_and_verify(
+        self.prepare_boot_restore_volume("bootbefore")
+        self.proofs["bootbefore_backup_sha256"] = self.backup_and_verify(
             seed=before,
             restore_password=secrets.token_hex(32),
             tag="bootbefore",
@@ -462,7 +485,8 @@ class BootController(epoch.EpochController):
             validate_preserved_state(before, after)
             self.proofs["after_state"] = after
             if index == 0:
-                self.backup_and_verify(
+                self.prepare_boot_restore_volume("bootafter")
+                self.proofs["bootafter_backup_sha256"] = self.backup_and_verify(
                     seed=after,
                     restore_password=secrets.token_hex(32),
                     tag="bootafter",
