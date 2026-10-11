@@ -52,6 +52,16 @@ backup/restore check stops continuation. No legacy database, Redis, queue,
 volume, or credential is changed. This procedure is specified here, not a
 claim that continuation has executed or passed.
 
+A second create-only continuation is limited to the recorded pre-backup
+initializer failure of attempt `01`. It must bind that failure's exact hash,
+preserve the original attempt directory, and retain the failed initializer's
+metadata and log before removing only that stopped, owner-labelled helper.
+Its named restore volume is preserved; any helper-only anonymous volume may
+be removed with the helper. The initializer has only `CHOWN` and `FOWNER`
+capabilities on its exact new-epoch volume and no network. An explicit tiny
+PostgreSQL-data tmpfs prevents the image from creating another anonymous volume.
+The pre-write backup/restore proof and every later gate remain mandatory.
+
 ## Continuous delivery boundary
 
 Only freshly closed bars enter the new transactional outbox. Redis publication

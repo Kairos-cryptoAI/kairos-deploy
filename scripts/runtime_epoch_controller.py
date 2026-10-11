@@ -83,6 +83,15 @@ CONTINUATION_SEED_SHA256 = (
 CONTINUATION_SEED_DIGEST = (
     "a99ac49e8d87bf856b35f90e740de8d74664147754a51d938dae3bad2805a9d1"
 )
+CONTINUATION_01_FAILURE_SHA256 = (
+    "7bf5c35c90168232e05bb0a3e8e0ffc9a159651a24ac570014f5f73d6073a1bf"
+)
+CONTINUATION_01_LOG_SHA256 = (
+    "c2741ec478dcdec079af280316f7095f3a7b92b86cf407ac451baee5635ae931"
+)
+CONTINUATION_01_ANONYMOUS_VOLUME = (
+    "d7cc17ef9c25f75e9ffb0d5981ad4181215788d3108894eabbd89a8085275b5f"
+)
 QUANT_REPO = Path("D:/Kairos/kairos-quant-scouts")
 QUANT_REVISION = "77c3d3e813faeb042661dacecd148226d8a25834"
 CORE_REVISION = "6937eb4773fc00afaf5ba4e020b28b689f48e377"
@@ -789,6 +798,8 @@ class EpochController:
         } or uid not in {70, 999}:
             raise Rejected("NEW_VOLUME_INITIALIZATION_SCOPE_REQUIRED")
         helper = "kairos-epoch-" + self.owner[:12] + "-volume-init-" + str(uid)
+        if self.continuation_attempt:
+            helper += "-continue-" + self.continuation_attempt
         if helper in self.created:
             raise Rejected("UNIQUE_VOLUME_INITIALIZER_REQUIRED")
         self.docker(
@@ -802,6 +813,7 @@ class EpochController:
                 "--read-only",
                 "--cap-drop=ALL",
                 "--cap-add=CHOWN",
+                "--cap-add=FOWNER",
                 "--security-opt=no-new-privileges:true",
                 "--memory=64m",
                 "--memory-swap=64m",
@@ -811,6 +823,8 @@ class EpochController:
                 EPOCH_LABEL + "=" + self.owner,
                 "--label",
                 "com.kairos.runtime-epoch.scope=" + EPOCH_SCOPE,
+                "--tmpfs",
+                "/var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=1m",
                 "--mount",
                 f"type=volume,src={name},dst=/owned",
                 "--entrypoint",
@@ -827,6 +841,22 @@ class EpochController:
             "state", {}
         ).get("Running"):
             raise Rejected("VOLUME_INITIALIZER_FAILED")
+        tmpfs = (
+            json.loads(
+                self.docker(
+                    ["inspect", "--format", "{{json .HostConfig.Tmpfs}}", helper]
+                )
+            )
+            or {}
+        )
+        if tmpfs != {"/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m"}:
+            raise Rejected("INITIALIZER_IMAGE_VOLUME_MUST_BE_TMPFS")
+        if any(
+            mount.get("Type") == "volume"
+            and mount.get("Destination") == "/var/lib/postgresql/data"
+            for mount in inspection.get("mounts", [])
+        ):
+            raise Rejected("INITIALIZER_ANONYMOUS_DATA_VOLUME_REJECTED")
         self.docker(["rm", helper])
         self.created.remove(helper)
 
@@ -1525,7 +1555,9 @@ class EpochController:
         self.proofs["operator_snapshot_sha256"] = fresh.digest(operator_manifest)
         self.proofs["quant_snapshot_sha256"] = fresh.digest(quant_manifest)
 
-    def assert_existing_epoch(self, *, source_work: Path) -> dict:
+    def assert_existing_epoch(
+        self, *, source_work: Path, failed_initializer: str | None = None
+    ) -> dict:
         """Validate, but never restart or mutate, the failed epoch resources."""
         before = self.assert_legacy_sources_stopped(legacy_redis_id=LEGACY_REDIS_ID)
         listed = self.docker(
@@ -1555,13 +1587,18 @@ class EpochController:
             ]
         ).splitlines()
         failed_worker = "kairos-epoch-" + self.owner[:12] + "-catchup"
-        if set(all_owned) != {
-            self.names["target_pg"],
-            self.names["redis"],
-            failed_worker,
-        }:
+        expected_owned = {self.names["target_pg"], self.names["redis"], failed_worker}
+        if failed_initializer:
+            expected_owned.add(failed_initializer)
+        if set(all_owned) != expected_owned:
             raise Rejected("EXACT_FAILED_EPOCH_RESOURCE_SET_REQUIRED")
-        continuation_prefix = "kairos-epoch-" + self.owner[:12] + "-continue-01-"
+        continuation_prefix = (
+            "kairos-epoch-"
+            + self.owner[:12]
+            + "-continue-"
+            + str(self.continuation_attempt)
+            + "-"
+        )
         if any(name.startswith(continuation_prefix) for name in all_owned):
             raise Rejected("CONTINUATION_ATTEMPT_ALREADY_EXISTS")
         expected_images = {
@@ -1797,16 +1834,189 @@ class EpochController:
         self.remove_owned_clone(self.names["restore_pg"], self.names["restore_volume"])
         return dump_hash
 
+    def archive_and_remove_attempt_01_initializer(
+        self, *, attempt01_work: Path
+    ) -> dict:
+        """Remove only the pinned stopped failed helper and its anonymous volume."""
+        helper = "kairos-epoch-" + self.owner[:12] + "-volume-init-70"
+        failure_path = attempt01_work / "runtime-epoch-failure.json"
+        validate_attempt_01_initializer_failure(
+            owner=self.owner,
+            receipt_path=failure_path,
+            expected_sha256=CONTINUATION_01_FAILURE_SHA256,
+        )
+        view = self.inspect_container(helper)
+        labels = view.get("labels") or {}
+        mounts = view.get("mounts") or []
+        mount_projection = sorted(
+            (
+                item.get("Type"),
+                item.get("Name"),
+                item.get("Destination"),
+                item.get("RW"),
+            )
+            for item in mounts
+        )
+        anonymous_mounts = [
+            item
+            for item in mounts
+            if item.get("Type") == "volume"
+            and item.get("Destination") == "/var/lib/postgresql/data"
+            and item.get("Name") == CONTINUATION_01_ANONYMOUS_VOLUME
+        ]
+        if len(anonymous_mounts) != 1:
+            raise Rejected("EXACT_FAILED_INITIALIZER_ANONYMOUS_VOLUME_REQUIRED")
+        anonymous_volume = anonymous_mounts[0]["Name"]
+        expected_mounts = sorted(
+            (
+                ("volume", self.names["restore_volume"], "/owned", True),
+                ("volume", anonymous_volume, "/var/lib/postgresql/data", True),
+            )
+        )
+        cap_add = json.loads(
+            self.docker(["inspect", "--format", "{{json .HostConfig.CapAdd}}", helper])
+        )
+        network_mode = (
+            self.docker(
+                ["inspect", "--format", "{{json .HostConfig.NetworkMode}}", helper]
+            )
+            .strip()
+            .strip('"')
+        )
+        if (
+            view.get("name") != "/" + helper
+            or view.get("image")
+            not in {
+                PG_IMAGE,
+                PG_IMAGE.split("@", 1)[-1],
+                "sha256:" + PG_IMAGE.rsplit("sha256:", 1)[-1],
+            }
+            or (view.get("state") or {}).get("Status") != "exited"
+            or (view.get("state") or {}).get("ExitCode") != 1
+            or labels.get(EPOCH_LABEL) != self.owner
+            or labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+            or view.get("ports")
+            or view.get("network") != "none"
+            or view.get("readonly") is not True
+            or view.get("caps") != ["ALL"]
+            or view.get("privileged") is True
+            or view.get("memory") != 64 * 1024**2
+            or view.get("swap") != 64 * 1024**2
+            or view.get("cpus") != 250_000_000
+            or cap_add != ["CAP_CHOWN"]
+            or network_mode != "none"
+            or mount_projection != expected_mounts
+        ):
+            raise Rejected("EXACT_FAILED_INITIALIZER_CONTAINER_REQUIRED")
+        restore_volume = json.loads(
+            self.docker(
+                [
+                    "volume",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    self.names["restore_volume"],
+                ]
+            )
+        )
+        volume_labels = restore_volume.get("Labels") or {}
+        if (
+            restore_volume.get("Name") != self.names["restore_volume"]
+            or volume_labels.get(EPOCH_LABEL) != self.owner
+            or volume_labels.get("com.kairos.runtime-epoch.scope") != EPOCH_SCOPE
+        ):
+            raise Rejected("EXACT_OWNED_RESTORE_VOLUME_REQUIRED")
+        users = self.docker(
+            [
+                "ps",
+                "-a",
+                "--filter",
+                "volume=" + anonymous_volume,
+                "--format",
+                "{{.Names}}",
+            ]
+        ).splitlines()
+        if users != [helper]:
+            raise Rejected("FAILED_INITIALIZER_ANONYMOUS_VOLUME_ISOLATION_REQUIRED")
+        stderr_path = attempt01_work / "cli-017.stderr"
+        if stderr_path.is_symlink() or not stderr_path.is_file():
+            raise Rejected("PINNED_FAILED_INITIALIZER_STDERR_REQUIRED")
+        log_hash = _sha(stderr_path)
+        if log_hash != CONTINUATION_01_LOG_SHA256:
+            raise Rejected("PINNED_FAILED_INITIALIZER_STDERR_REQUIRED")
+        try:
+            log_text = stderr_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            raise Rejected("PINNED_FAILED_INITIALIZER_STDERR_REQUIRED") from None
+        if "chmod: /owned: Operation not permitted" not in log_text:
+            raise Rejected("EXACT_FAILED_INITIALIZER_LOG_CLASS_REQUIRED")
+        evidence = {
+            "owner": self.owner,
+            "attempt_01_failure_sha256": CONTINUATION_01_FAILURE_SHA256,
+            "helper_name": helper,
+            "helper_container_id": view.get("id"),
+            "image": PG_IMAGE,
+            "state": "exited",
+            "exit_code": 1,
+            "cap_add": cap_add,
+            "network_mode": network_mode,
+            "mounts": mount_projection,
+            "anonymous_volume": anonymous_volume,
+            "failed_operation": "chmod_owned_volume_permission_denied",
+            "log_sha256": log_hash,
+            "raw_log_preserved": False,
+        }
+        evidence_path = self.work / "attempt-01-initializer-evidence.json"
+        fresh.save(evidence_path, evidence)
+        self.docker(["rm", "-v", helper], seconds=20)
+        remaining_helper = self.docker(
+            ["ps", "-a", "--filter", "name=^/" + helper + "$", "--format", "{{.Names}}"]
+        ).strip()
+        remaining_anonymous = self.docker(
+            [
+                "volume",
+                "ls",
+                "--filter",
+                "name=" + anonymous_volume,
+                "--format",
+                "{{.Name}}",
+            ]
+        ).splitlines()
+        if remaining_helper or anonymous_volume in remaining_anonymous:
+            raise Rejected(
+                "FAILED_INITIALIZER_CLEANUP_DID_NOT_REMOVE_ONLY_ANONYMOUS_DATA"
+            )
+        return evidence
+
     def run_continuation(
-        self, *, seed: dict, old_private: dict, rotated_history: str
+        self,
+        *,
+        seed: dict,
+        old_private: dict,
+        rotated_history: str,
+        attempt01_work: Path | None = None,
     ) -> dict:
         """Continue the pinned zero-append failure without adopting its worker."""
         owner = self.owner
         self._admin_password = old_private["admin_password"]
-        before = self.assert_existing_epoch(source_work=ROOT / ("run-" + owner))
-        # The originally initialized restore volume is owner-labelled and still
-        # empty; confirm it before using it for the pre-write backup proof.
-        self.initialize_volume(self.names["restore_volume"], uid=70)
+        source_work = ROOT / ("run-" + owner)
+        failed_initializer = None
+        if self.continuation_attempt == "02":
+            if attempt01_work is None:
+                raise Rejected("ATTEMPT_01_FAILURE_EVIDENCE_REQUIRED")
+            failed_initializer = "kairos-epoch-" + self.owner[:12] + "-volume-init-70"
+        before = self.assert_existing_epoch(
+            source_work=source_work, failed_initializer=failed_initializer
+        )
+        if self.continuation_attempt == "02":
+            evidence = self.archive_and_remove_attempt_01_initializer(
+                attempt01_work=attempt01_work
+            )
+            self.proofs["attempt_01_initializer_evidence"] = evidence
+            self.proofs["attempt_01_failure_sha256"] = CONTINUATION_01_FAILURE_SHA256
+        else:
+            # The original epoch already initialized this owned restore volume.
+            self.initialize_volume(self.names["restore_volume"], uid=70)
         pre_backup_hash = self.backup_and_verify(
             seed=seed,
             restore_password=secrets.token_hex(32),
@@ -1960,6 +2170,10 @@ class EpochController:
             or ACTIVE_LEASE.read_text(encoding="ascii") != owner + "\n"
         ):
             raise Rejected("PRESERVED_FAILED_EPOCH_EVIDENCE_CHANGED")
+        if self.continuation_attempt == "02":
+            attempt01_failure = attempt01_work / "runtime-epoch-failure.json"
+            if _sha(attempt01_failure) != CONTINUATION_01_FAILURE_SHA256:
+                raise Rejected("PRESERVED_ATTEMPT_01_FAILURE_CHANGED")
         self.proofs["legacy_after"] = after
         self.proofs["serve_restart_status"] = restarted
         self.proofs["continuation_attempt"] = self.continuation_attempt
@@ -2395,6 +2609,32 @@ def validate_continuation_artifacts(
     return seed_value, private, catchup_config
 
 
+def validate_attempt_01_initializer_failure(
+    *, owner: str, receipt_path: Path, expected_sha256: str
+) -> dict:
+    """Pin the only admissible failed initializer transition to attempt 02."""
+    helper = "kairos-epoch-" + owner_name(owner)[:12] + "-volume-init-70"
+    if (
+        owner != CONTINUATION_OWNER
+        or expected_sha256 != CONTINUATION_01_FAILURE_SHA256
+        or receipt_path.is_symlink()
+        or not receipt_path.is_file()
+        or _sha(receipt_path) != CONTINUATION_01_FAILURE_SHA256
+    ):
+        raise Rejected("EXACT_ATTEMPT_01_INITIALIZER_FAILURE_REQUIRED")
+    value = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if (
+        value.get("owner") != owner
+        or value.get("phase") != "ADMISSION"
+        or value.get("error_category") != "Rejected"
+        or value.get("created_resources") != [helper]
+        or value.get("active_lease_preserved") is not True
+        or value.get("trading_started") is not False
+    ):
+        raise Rejected("EXACT_ATTEMPT_01_INITIALIZER_FAILURE_REQUIRED")
+    return value
+
+
 def _verify_source_signature(work: Path) -> None:
     """Use the already-pinned local signer/keyring path; never fetch keys."""
 
@@ -2705,6 +2945,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--continue-failed-catchup", action="store_true")
+    parser.add_argument("--continue-initializer-repair", action="store_true")
+    parser.add_argument("--expected-attempt-01-failure-sha256")
     parser.add_argument("--owner")
     parser.add_argument("--expected-parent-revision")
     parser.add_argument("--expected-parent-operator-sha256")
@@ -2721,7 +2963,9 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "result": "PLAN_ONLY",
-                    "operation": "same-owner failed-catchup continuation"
+                    "operation": "same-owner attempt-02 initializer repair"
+                    if args.continue_initializer_repair
+                    else "same-owner failed-catchup continuation"
                     if args.continue_failed_catchup
                     else "new isolated runtime epoch",
                     "writes": False,
@@ -2741,6 +2985,80 @@ def main(argv: list[str] | None = None) -> int:
     private_ready = False
     try:
         _validate_admission(args)
+        if args.continue_initializer_repair:
+            owner = args.owner
+            if args.continue_failed_catchup or args.end_exclusive_ms is not None:
+                raise Rejected("INITIALIZER_REPAIR_FLAGS_EXCLUSIVE_REQUIRED")
+            if args.owner != CONTINUATION_OWNER:
+                raise Rejected("EXACT_FAILED_EPOCH_OWNER_REQUIRED")
+            _verify_parent_revision(args.expected_parent_revision or "")
+            source_work = fresh.safe(ROOT / ("run-" + args.owner))
+            parent_operator = source_work / "operator.zip"
+            failure_path = source_work / "runtime-epoch-failure.json"
+            seed_path = source_work / "output-seed" / "seed.json"
+            source_private = source_work / "epoch-private.json"
+            source_catchup = source_work / "config-catchup-01.json"
+            seed_value, old_private, _old_catchup = validate_continuation_artifacts(
+                owner=args.owner,
+                parent_revision=args.expected_parent_revision,
+                parent_operator_sha256=args.expected_parent_operator_sha256 or "",
+                parent_operator=parent_operator,
+                lease=ACTIVE_LEASE,
+                failure=failure_path,
+                seed=seed_path,
+                original_private=source_private,
+                original_catchup_config=source_catchup,
+            )
+            attempt01 = source_work / "continuation-01"
+            attempt01_failure = attempt01 / "runtime-epoch-failure.json"
+            validate_attempt_01_initializer_failure(
+                owner=args.owner,
+                receipt_path=attempt01_failure,
+                expected_sha256=args.expected_attempt_01_failure_sha256 or "",
+            )
+            attempt = "02"
+            work = fresh.safe(source_work / ("continuation-" + attempt))
+            if work.exists() or work.is_symlink():
+                raise Rejected("CREATE_ONLY_ATTEMPT_02_REQUIRED")
+            _private_directory(work)
+            private_ready = True
+            _verify_source_signature(work)
+            controller = EpochController(
+                args.owner,
+                expected_revision=args.expected_revision,
+                wheelhouse=args.wheelhouse,
+                deadline=time.monotonic() + MAX_SECONDS,
+                workdir=work,
+                continuation_attempt=attempt,
+            )
+            controller.prepare_snapshots()
+            continuation_history = secrets.token_hex(32)
+            fresh.save(
+                work / "continuation-private.json",
+                {"owner": args.owner, "history_password": continuation_history},
+            )
+            result = controller.run_continuation(
+                seed=seed_value,
+                old_private=old_private,
+                rotated_history=continuation_history,
+                attempt01_work=attempt01,
+            )
+            receipt = work / "runtime-epoch-continuation-receipt.json"
+            fresh.save(receipt, result)
+            print(
+                json.dumps(
+                    {
+                        "result": result["result"],
+                        "owner": args.owner,
+                        "attempt": attempt,
+                        "receipt": str(receipt),
+                        "secrets": "private-file-only",
+                        "native_operations": "bounded-owner-only",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.continue_failed_catchup:
             owner = args.owner
             if args.end_exclusive_ms is not None:
@@ -2813,6 +3131,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.owner,
                 args.expected_parent_revision,
                 args.expected_parent_operator_sha256,
+                args.expected_attempt_01_failure_sha256,
             )
         ):
             raise Rejected("CONTINUATION_FLAGS_REQUIRE_CONTINUATION_MODE")

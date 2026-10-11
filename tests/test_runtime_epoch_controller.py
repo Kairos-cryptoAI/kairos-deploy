@@ -88,6 +88,78 @@ def config(mode: str, **overrides: object) -> dict:
 
 
 class RuntimeEpochControllerTests(unittest.TestCase):
+    def test_attempt_02_initializer_has_fowner_and_tmpfs_for_image_pg_volume(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.owner = OWNER
+        controller.names = epoch.resource_names(OWNER)
+        controller.continuation_attempt = "02"
+        controller.created = []
+        commands = []
+
+        def docker(args, **_kwargs):
+            commands.append(args)
+            if args[:3] == ["inspect", "--format", "{{json .HostConfig.Tmpfs}}"]:
+                return json.dumps(
+                    {"/var/lib/postgresql/data": "rw,nosuid,nodev,noexec,size=1m"}
+                )
+            return ""
+
+        controller.docker = docker
+        controller.inspect_container = lambda _name: {
+            "state": {"ExitCode": 0, "Running": False}
+        }
+        controller.initialize_volume(controller.names["restore_volume"], uid=70)
+
+        create = commands[0]
+        self.assertEqual(
+            create[create.index("--cap-add=CHOWN") + 1], "--cap-add=FOWNER"
+        )
+        self.assertIn("/var/lib/postgresql/data:rw,nosuid,nodev,noexec,size=1m", create)
+        self.assertIn(
+            "kairos-epoch-" + OWNER[:12] + "-volume-init-70-continue-02", create
+        )
+        self.assertNotIn(
+            "kairos-epoch-" + OWNER[:12] + "-volume-init-70-continue-01", create
+        )
+        self.assertEqual(
+            commands[-1],
+            ["rm", "kairos-epoch-" + OWNER[:12] + "-volume-init-70-continue-02"],
+        )
+        self.assertEqual(controller.created, [])
+
+    def test_attempt_01_failure_admission_requires_exact_frozen_receipt(self):
+        with TemporaryDirectory() as directory:
+            receipt = Path(directory) / "runtime-epoch-failure.json"
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "owner": epoch.CONTINUATION_OWNER,
+                        "phase": "ADMISSION",
+                        "error_category": "Rejected",
+                        "created_resources": [
+                            "kairos-epoch-69893dc7b7c6-volume-init-70"
+                        ],
+                        "active_lease_preserved": True,
+                        "trading_started": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(
+                epoch, "_sha", return_value=epoch.CONTINUATION_01_FAILURE_SHA256
+            ):
+                epoch.validate_attempt_01_initializer_failure(
+                    owner=epoch.CONTINUATION_OWNER,
+                    receipt_path=receipt,
+                    expected_sha256=epoch.CONTINUATION_01_FAILURE_SHA256,
+                )
+                with self.assertRaises(epoch.Rejected):
+                    epoch.validate_attempt_01_initializer_failure(
+                        owner=epoch.CONTINUATION_OWNER,
+                        receipt_path=receipt,
+                        expected_sha256="0" * 64,
+                    )
+
     def test_owner_names_are_exact_and_resources_are_separate(self):
         names = epoch.resource_names(OWNER)
         self.assertNotEqual(names["target_volume"], names["source_volume"])
