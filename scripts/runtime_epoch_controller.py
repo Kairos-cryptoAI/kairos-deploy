@@ -2241,6 +2241,8 @@ class EpochController:
             "epoch-history.dump",
             "epoch-history-precontinuation.dump",
             "epoch-history-postcatchup.dump",
+            "epoch-history-bootbefore.dump",
+            "epoch-history-bootafter.dump",
         }
         native = self.native
         safe_backup = fresh.safe(backup)

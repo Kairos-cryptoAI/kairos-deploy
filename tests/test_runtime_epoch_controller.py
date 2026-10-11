@@ -249,6 +249,17 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                     )
 
     def test_binary_pg_dump_stream_is_exclusive_bounded_and_job_assigned(self):
+        for backup_name in (
+            "epoch-history.dump",
+            "epoch-history-precontinuation.dump",
+            "epoch-history-postcatchup.dump",
+            "epoch-history-bootbefore.dump",
+            "epoch-history-bootafter.dump",
+        ):
+            with self.subTest(backup_name=backup_name):
+                self._assert_exclusive_bounded_binary_pg_dump(backup_name)
+
+    def _assert_exclusive_bounded_binary_pg_dump(self, backup_name):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "docker-config").mkdir()
@@ -296,7 +307,7 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                 self.assertFalse(cancel)
                 return {"assigned_before_resume": True, "active_processes_after": 0}
 
-            backup = root / "epoch-history.dump"
+            backup = root / backup_name
             with (
                 patch.object(
                     epoch.subprocess, "Popen", side_effect=popen
@@ -333,6 +344,45 @@ class RuntimeEpochControllerTests(unittest.TestCase):
             self.assertEqual(
                 controller.native.operations[0]["sha256"], result["sha256"]
             )
+            with (
+                patch.object(epoch.subprocess, "Popen") as duplicate_mock,
+                self.assertRaisesRegex(
+                    epoch.Rejected, "PRIVATE_CREATE_ONLY_EPOCH_DUMP_REQUIRED"
+                ),
+            ):
+                controller.stream_private_pg_dump(
+                    backup=backup, database="kairos_epoch_0123456789ab"
+                )
+            duplicate_mock.assert_not_called()
+            self.assertEqual(backup.read_bytes(), b"PGDMP\x00binary")
+
+    def test_binary_pg_dump_rejects_unbound_names_database_and_directory(self):
+        for case in ("unknown_name", "foreign_database", "foreign_directory"):
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                root = Path(directory)
+                foreign = root / "foreign"
+                foreign.mkdir()
+                controller = object.__new__(epoch.EpochController)
+                controller.owner = OWNER
+                controller.work = root
+                controller.native = SimpleNamespace(work=root)
+                backup = root / "epoch-history-bootbefore.dump"
+                database = "kairos_epoch_0123456789ab"
+                if case == "unknown_name":
+                    backup = root / "epoch-history-arbitrary.dump"
+                elif case == "foreign_database":
+                    database = "kairos_epoch_ffffffffffff"
+                else:
+                    backup = foreign / backup.name
+                with (
+                    patch.object(epoch.subprocess, "Popen") as popen_mock,
+                    self.assertRaisesRegex(
+                        epoch.Rejected, "PRIVATE_CREATE_ONLY_EPOCH_DUMP_REQUIRED"
+                    ),
+                ):
+                    controller.stream_private_pg_dump(backup=backup, database=database)
+                popen_mock.assert_not_called()
+                self.assertFalse(backup.exists())
 
     def test_binary_pg_dump_failure_keeps_partial_archive_without_echoing_stderr(self):
         with TemporaryDirectory() as directory:
