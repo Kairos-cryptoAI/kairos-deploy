@@ -1698,7 +1698,10 @@ class RuntimeEpochControllerTests(unittest.TestCase):
             producer_password="b" * 64,
             consumer_password="c" * 64,
         )
-        self.assertTrue(acl.startswith("user default off\n"))
+        self.assertEqual(acl.splitlines()[0], epoch.replay_default_acl(OWNER))
+        self.assertIn(" off ", acl.splitlines()[0])
+        self.assertNotIn("+@all", acl.splitlines()[0])
+        self.assertNotIn("~*", acl.splitlines()[0])
         producer, consumer = acl.splitlines()[2:]
         self.assertTrue(producer.startswith("user kairos_epoch_producer on #"))
         self.assertIn("~" + epoch.CLOSED_BAR_TOPIC, producer)

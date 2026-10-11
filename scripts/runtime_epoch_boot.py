@@ -648,7 +648,11 @@ def main(argv=None) -> int:
                     "reason": category,
                     "owner": OWNER,
                     "trading_started": False,
-                    "source_revision": args.expected_revision,
+                    "source_revision": (
+                        controller.expected_revision
+                        if controller
+                        else args.expected_revision
+                    ),
                 },
             )
         print(

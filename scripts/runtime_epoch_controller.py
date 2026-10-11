@@ -26,10 +26,12 @@ if __package__:
     from scripts import controlled_runtime_primary as primary
     from scripts import controlled_runtime_transition as current
     from scripts import fresh_runtime_recovery as fresh
+    from scripts.runtime_epoch_redis_aof import replay_default_acl
 else:
     import controlled_runtime_primary as primary
     import controlled_runtime_transition as current
     import fresh_runtime_recovery as fresh
+    from runtime_epoch_redis_aof import replay_default_acl
 
 REPO = Path("D:/Kairos/kairos-deploy")
 ROOT = REPO / "backups/runtime-epoch-20261011"
@@ -284,6 +286,13 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
             "redis_producer_password",
             "redis_consumer_password",
         },
+        "boot-redis-clone": common
+        | {
+            "producer_password",
+            "consumer_password",
+            "redis_producer_password",
+            "redis_consumer_password",
+        },
         "boot-catchup": common
         | {"history_password", "end_exclusive_ms", "maximum_bars", "expected_seed"},
         "boot-verify-restore": common
@@ -364,6 +373,14 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         or re.fullmatch(r"[0-9a-f]{64}", value["admin_password"]) is None
     ):
         raise Rejected("EXACT_READ_ONLY_HISTORY_STATE_IDENTITY_REQUIRED")
+    if mode in {"boot-redis-state", "boot-redis-clone"} and (
+        value["pg_host"] != "kairos-epoch-" + value["owner"][:12] + "-pg"
+        or value["redis_host"]
+        != "kairos-epoch-"
+        + value["owner"][:12]
+        + ("-redisclone" if mode == "boot-redis-clone" else "-redis")
+    ):
+        raise Rejected("EXACT_READ_ONLY_REDIS_PROOF_HOSTS_REQUIRED")
     return value
 
 
@@ -499,7 +516,16 @@ def redis_acl_text(
             "xack",
         ),
     )
-    return "user default off\n" + admin + "\n" + producer + "\n" + consumer + "\n"
+    return (
+        replay_default_acl(owner)
+        + "\n"
+        + admin
+        + "\n"
+        + producer
+        + "\n"
+        + consumer
+        + "\n"
+    )
 
 
 def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str]:
@@ -512,6 +538,7 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "history-state",
         "boot-state",
         "boot-redis-state",
+        "boot-redis-clone",
         "boot-catchup",
         "boot-verify-restore",
         "qualify",
@@ -1561,6 +1588,7 @@ class EpochController:
             "history-state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
             "boot-state": "PASS_BOOT_STATE",
             "boot-redis-state": "PASS_BOOT_REDIS_STATE",
+            "boot-redis-clone": "PASS_BOOT_REDIS_STATE",
             "boot-catchup": "AUDIT_ONLY_CATCHUP_COMPLETE",
             "boot-verify-restore": "PASS_BOOT_ISOLATED_RESTORE",
         }

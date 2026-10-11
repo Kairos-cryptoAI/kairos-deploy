@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -80,6 +81,7 @@ MODES = (
     "boot-verify-restore",
     "boot-catchup",
     "boot-redis-state",
+    "boot-redis-clone",
     "rotate-history",
     "history-state",
     "qualify",
@@ -128,9 +130,13 @@ def validate_config(value: dict, mode: str) -> None:
         "boot-verify-restore",
         "boot-catchup",
         "boot-redis-state",
+        "boot-redis-clone",
     } and (
         value.get("pg_host") != "kairos-epoch-" + owner[:12] + "-pg"
-        or value.get("redis_host") != "kairos-epoch-" + owner[:12] + "-redis"
+        or value.get("redis_host")
+        != "kairos-epoch-"
+        + owner[:12]
+        + ("-redisclone" if mode == "boot-redis-clone" else "-redis")
     ):
         raise EpochError("EXACT_OWNED_BOOT_EPOCH_HOSTS_REQUIRED")
     if mode == "history-state" and set(value) != {
@@ -219,7 +225,7 @@ def validate_config(value: dict, mode: str) -> None:
         ):
             raise EpochError("EXACT_FIXED_BOOT_CATCHUP_CONFIG_REQUIRED")
         validate_boot_seed(value["expected_seed"], owner, value["database"])
-    if mode == "boot-redis-state" and set(value) != {
+    if mode in {"boot-redis-state", "boot-redis-clone"} and set(value) != {
         "owner",
         "database",
         "pg_host",
@@ -999,7 +1005,38 @@ async def boot_verify_restore(config: dict) -> dict:
         await restored.close()
 
 
-async def boot_redis_state(config: dict) -> dict:
+async def verify_redis_default_disabled(config: dict, *, clone: bool = False) -> dict:
+    """Refuse anonymous/default authentication; never write to an admitted epoch."""
+    import redis.asyncio as aioredis
+    from redis.exceptions import AuthenticationError
+
+    client = aioredis.Redis(
+        host=config["redis_host"],
+        decode_responses=True,
+        socket_timeout=15,
+    )
+    try:
+        probes = [("PING",), ("AUTH", "default", "")]
+        if clone:
+            # Only the disposable clone receives this denial probe. Even a
+            # successful probe fails qualification and never reaches serving.
+            probes.append(("XADD", TOPIC, "*", "data", "qualification-denied"))
+        for probe in probes:
+            try:
+                await client.execute_command(*probe)
+            except AuthenticationError:
+                continue
+            raise EpochError("BOOT_REDIS_DEFAULT_OR_ANONYMOUS_ACCESS_ALLOWED")
+        return {
+            "anonymous_ping_refused": True,
+            "default_auth_refused": True,
+            "anonymous_write_refused_on_clone": clone,
+        }
+    finally:
+        await client.aclose()
+
+
+async def boot_redis_state(config: dict, *, clone: bool = False) -> dict:
     """Read-only Redis/data-plane proof before any new serving process starts."""
     import redis.asyncio as aioredis
     from kairos_core.contracts import ClosedBarEventV1
@@ -1022,6 +1059,9 @@ async def boot_redis_state(config: dict) -> dict:
         socket_timeout=15,
     )
     try:
+        auth_proofs = await verify_redis_default_disabled(config, clone=clone)
+        if await producer.ping() is not True or await consumer.ping() is not True:
+            raise EpochError("BOOT_REDIS_SEPARATE_ROLE_AUTH_REQUIRED")
         await verify_schema(producer_sql)
         await verify_schema(consumer_sql)
         outbox = await producer_sql.fetch(
@@ -1114,8 +1154,12 @@ async def boot_redis_state(config: dict) -> dict:
             "completed_inbox": len(inbox),
             "stream_entries": len(stream_rows),
             "publication_receipts": len(expected_stream_ids),
+            "publication_message_ids_sha256": hashlib.sha256(
+                json.dumps(sorted(durable), separators=(",", ":")).encode()
+            ).hexdigest(),
             "consumer_groups": 1,
             "pending_deliveries": 0,
+            "auth_proofs": auth_proofs,
             "trading_started": False,
         }
     finally:
@@ -1868,6 +1912,8 @@ async def dispatch(mode: str, config: dict, output: Path) -> dict:
         return await boot_catchup(config, output)
     if mode == "boot-redis-state":
         return await boot_redis_state(config)
+    if mode == "boot-redis-clone":
+        return await boot_redis_state(config, clone=True)
     if mode == "catchup":
         return await recover(
             config, publish=False, status_path=output / "progress.json"

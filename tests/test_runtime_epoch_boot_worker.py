@@ -145,6 +145,23 @@ class BootConfigTests(unittest.TestCase):
                 "boot-redis-state",
             )
 
+    def test_clone_proof_requires_exact_disposable_host_and_no_admin(self):
+        config = base(
+            producer_password="a" * 64,
+            consumer_password="b" * 64,
+            redis_producer_password="c" * 64,
+            redis_consumer_password="d" * 64,
+            redis_host="kairos-epoch-0123456789ab-redisclone",
+        )
+        worker.validate_config(config, "boot-redis-clone")
+        for change in (
+            {"redis_host": "kairos-epoch-0123456789ab-redis"},
+            {"pg_host": "kairos-epoch-0123456789ab-source"},
+            {"admin_password": "e" * 64},
+        ):
+            with self.subTest(change=change), self.assertRaises(worker.EpochError):
+                worker.validate_config({**config, **change}, "boot-redis-clone")
+
 
 class BootSeedGuardTests(unittest.TestCase):
     def test_only_the_exact_previously_restored_migration_identity_is_admitted(self):
@@ -356,6 +373,190 @@ class BootSeedGuardTests(unittest.TestCase):
             connection.audit_orphans = 1
             with self.assertRaisesRegex(worker.EpochError, "BOOT_QUEUE_AUDIT_IDENTITY"):
                 asyncio.run(worker.boot_queue_state(connection, OWNER))
+
+
+class RedisInterfaceProofTests(unittest.TestCase):
+    """Exercise the actual coroutine/driver interface, not only pure validators."""
+
+    def fixture(self):
+        payload = {"message_id": "bar-1", "source": worker.SOURCE, "symbol": "BTCUSDT"}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        outbox = {
+            "message_id": "bar-1",
+            "topic": worker.TOPIC,
+            "payload": payload,
+            "payload_sha256": digest,
+            "producer": worker.SOURCE,
+            "published_at": "published",
+            "publish_attempts": 1,
+            "last_error": None,
+            "lease_owner": None,
+            "lease_until": None,
+            "dead_lettered_at": None,
+            "reconciliation_state": "NONE",
+        }
+        inbox = {
+            "consumer": "kairos-epoch-consumer-0123456789ab:bars",
+            "message_id": "bar-1",
+            "topic": worker.TOPIC,
+            "status": "COMPLETED",
+            "payload_sha256": digest,
+        }
+        state = types.SimpleNamespace(
+            outbox=[outbox],
+            inbox=[inbox],
+            receipt=json.dumps([digest, "1-0"]),
+            rows=[("1-0", {"data": encoded}), ("2-0", {"data": encoded})],
+            groups=[{"name": "bars", "last-delivered-id": "2-0"}],
+            pending={"pending": 0},
+            clients=[],
+            anonymous_allowed=False,
+            role_authenticated=True,
+            commands=[],
+        )
+        producer_sql, consumer_sql = mock.AsyncMock(), mock.AsyncMock()
+        producer_sql.fetch.return_value = state.outbox
+        consumer_sql.fetch.return_value = state.inbox
+
+        class AuthenticationError(Exception):
+            pass
+
+        class Redis:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                state.clients.append(self)
+
+            async def ping(self):
+                return state.role_authenticated
+
+            async def execute_command(self, *command):
+                state.commands.append(command)
+                if state.anonymous_allowed:
+                    return True
+                raise AuthenticationError("withheld")
+
+            async def hget(self, key, field):
+                if (
+                    key != "kairos.runtime." + OWNER + ".publication"
+                    or field != "bar-1"
+                ):
+                    raise AssertionError("unexpected ledger identity")
+                return state.receipt
+
+            async def xrange(self, name, **bounds):
+                if name != worker.TOPIC:
+                    raise AssertionError("unexpected stream")
+                return state.rows[:1] if bounds["min"] != "-" else state.rows
+
+            async def xinfo_groups(self, name):
+                if name != worker.TOPIC:
+                    raise AssertionError("unexpected groups")
+                return state.groups
+
+            async def xpending(self, name, group):
+                if (name, group) != (worker.TOPIC, "bars"):
+                    raise AssertionError("unexpected pending scope")
+                return state.pending
+
+            async def aclose(self):
+                self.closed = True
+
+        core = types.ModuleType("kairos_core")
+        core.__path__ = []
+        contracts = types.ModuleType("kairos_core.contracts")
+        contracts.ClosedBarEventV1 = types.SimpleNamespace(
+            model_validate=lambda value: types.SimpleNamespace(**value)
+        )
+        persistence = types.ModuleType("kairos_persistence")
+        persistence.__path__ = []
+        runtime = types.ModuleType("kairos_persistence.runtime")
+        runtime.canonical_payload = lambda value: (
+            json.dumps(value, sort_keys=True, separators=(",", ":")),
+            hashlib.sha256(
+                json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        )
+        redis = types.ModuleType("redis")
+        redis.__path__ = []
+        redis_async = types.ModuleType("redis.asyncio")
+        redis_async.Redis = Redis
+        redis.asyncio = redis_async
+        exceptions = types.ModuleType("redis.exceptions")
+        exceptions.AuthenticationError = AuthenticationError
+        config = base(
+            producer_password="a" * 64,
+            consumer_password="b" * 64,
+            redis_producer_password="c" * 64,
+            redis_consumer_password="d" * 64,
+        )
+        modules = {
+            "kairos_core": core,
+            "kairos_core.contracts": contracts,
+            "kairos_persistence": persistence,
+            "kairos_persistence.runtime": runtime,
+            "redis": redis,
+            "redis.asyncio": redis_async,
+            "redis.exceptions": exceptions,
+        }
+        return state, producer_sql, consumer_sql, config, modules
+
+    def run_proof(self, fixture, *, clone=False):
+        _state, producer_sql, consumer_sql, config, modules = fixture
+        with (
+            mock.patch.dict(sys.modules, modules),
+            mock.patch.object(
+                worker,
+                "connect",
+                new=mock.AsyncMock(side_effect=[producer_sql, consumer_sql]),
+            ),
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()),
+        ):
+            return asyncio.run(worker.boot_redis_state(config, clone=clone))
+
+    def test_actual_readonly_proof_matches_receipts_stream_groups_and_closes(self):
+        fixture = self.fixture()
+        result = self.run_proof(fixture)
+        self.assertEqual(result["state"], "PASS_BOOT_REDIS_STATE")
+        self.assertEqual(result["publication_receipts"], 1)
+        self.assertEqual(result["stream_entries"], 2)
+        self.assertEqual(
+            result["publication_message_ids_sha256"],
+            hashlib.sha256(b'["bar-1"]').hexdigest(),
+        )
+        self.assertEqual(fixture[0].commands, [("PING",), ("AUTH", "default", "")])
+        self.assertTrue(all(client.closed for client in fixture[0].clients))
+        fixture[1].close.assert_awaited_once()
+        fixture[2].close.assert_awaited_once()
+
+    def test_only_disposable_clone_receives_anonymous_write_denial_probe(self):
+        fixture = self.fixture()
+        result = self.run_proof(fixture, clone=True)
+        self.assertTrue(result["auth_proofs"]["anonymous_write_refused_on_clone"])
+        self.assertEqual(fixture[0].commands[-1][0], "XADD")
+
+    def test_missing_aof_transaction_effects_fail_before_any_serving(self):
+        fixture = self.fixture()
+        fixture[0].receipt = None
+        with self.assertRaisesRegex(worker.EpochError, "PUBLICATION_RECEIPT_MISSING"):
+            self.run_proof(fixture)
+        self.assertTrue(all(client.closed for client in fixture[0].clients))
+
+    def test_conflict_pending_unknown_group_or_auth_fail_closed(self):
+        changes = (
+            ("receipt", '["forged","1-0"]'),
+            ("pending", {"pending": 1}),
+            ("groups", [{"name": "wrong", "last-delivered-id": "2-0"}]),
+            ("anonymous_allowed", True),
+            ("role_authenticated", False),
+        )
+        for name, value in changes:
+            fixture = self.fixture()
+            setattr(fixture[0], name, value)
+            with self.subTest(name=name), self.assertRaises(worker.EpochError):
+                self.run_proof(fixture)
+            self.assertTrue(all(client.closed for client in fixture[0].clients))
 
 
 class BootDispatchTests(unittest.TestCase):
