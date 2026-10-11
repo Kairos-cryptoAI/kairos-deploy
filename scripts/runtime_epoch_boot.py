@@ -151,7 +151,6 @@ def create_binding(revision: str) -> Path:
         != PARENT_RECEIPT_SHA256
     ):
         raise epoch.Rejected("ACCEPTED_EPOCH_PARENT_RECEIPT_REQUIRED")
-    ROOT.mkdir(parents=True, exist_ok=True)
     epoch._private_directory(ROOT)
     path = ROOT / "binding.json"
     sources = {}
@@ -566,7 +565,6 @@ def main(argv=None) -> int:
             raise epoch.Rejected("BOOT_ACTIVE_OR_FAILED_LATCH_REQUIRES_OPERATOR")
         run = uuid.uuid4().hex
         work = ROOT / "runs" / run
-        work.mkdir(parents=True)
         epoch._private_directory(work)
         lease_bytes = (
             json.dumps(

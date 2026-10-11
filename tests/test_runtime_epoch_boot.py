@@ -419,6 +419,84 @@ class BootAdmissionTests(unittest.TestCase):
                 )
             controller.assert_not_called()
 
+    def test_binding_private_directory_is_created_once_and_never_overwritten(self):
+        with TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "boot"
+            accepted = parent / "accepted"
+            accepted.mkdir()
+            receipt = accepted / "runtime-epoch-continuation-receipt.json"
+            receipt.write_bytes(b"{}")
+            with (
+                mock.patch.object(boot, "ROOT", root),
+                mock.patch.object(boot, "SERVE_WORK", accepted),
+                mock.patch.object(
+                    boot, "PARENT_RECEIPT_SHA256", boot.fresh.sha(receipt)
+                ),
+                mock.patch.object(boot, "verify_source"),
+                mock.patch.object(boot, "git", return_value=""),
+                mock.patch.object(boot, "input_paths", return_value=[]),
+                mock.patch.object(boot, "validate_binding"),
+                mock.patch.object(
+                    epoch,
+                    "_private_directory",
+                    side_effect=lambda path: path.mkdir(parents=True, exist_ok=False),
+                ) as private,
+            ):
+                binding = boot.create_binding("a" * 40)
+                private.assert_called_once_with(root)
+                original = binding.read_bytes()
+                with self.assertRaises(FileExistsError):
+                    boot.create_binding("a" * 40)
+                self.assertEqual(binding.read_bytes(), original)
+
+    def test_execute_creates_private_run_once_and_releases_only_successful_lease(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            binding = root / "binding.json"
+            binding.write_text(json.dumps({"revision": "a" * 40}))
+            lease = root / "boot.active"
+            run = "b" * 32
+            work = root / "runs" / run
+            with (
+                mock.patch.object(boot, "ROOT", root),
+                mock.patch.object(boot, "LEASE", lease),
+                mock.patch.object(boot, "IS_WINDOWS", True),
+                mock.patch.object(boot, "validate_binding"),
+                mock.patch.object(boot, "verify_source"),
+                mock.patch.object(boot.uuid, "uuid4", return_value=mock.Mock(hex=run)),
+                mock.patch.object(
+                    epoch,
+                    "_private_directory",
+                    side_effect=lambda path: path.mkdir(parents=True, exist_ok=False),
+                ) as private,
+                mock.patch.object(boot, "BootController") as controller,
+            ):
+                controller.return_value.run_boot.return_value = {
+                    "result": "PASS_NONTRADING_EPOCH_BOOT",
+                    "trading_started": False,
+                }
+                self.assertEqual(
+                    boot.main(
+                        [
+                            "--execute",
+                            "--boot-id",
+                            "638957743065000000",
+                            "--binding",
+                            str(binding),
+                            "--binding-sha256",
+                            boot.fresh.sha(binding),
+                        ]
+                    ),
+                    0,
+                )
+                private.assert_called_once_with(work)
+                controller.return_value.fail_closed_cleanup.assert_not_called()
+            self.assertFalse(lease.exists())
+            accepted = json.loads((work / "boot-receipt.json").read_bytes())
+            self.assertEqual(accepted["source_revision"], "a" * 40)
+            self.assertFalse(accepted["trading_started"])
+
 
 if __name__ == "__main__":
     unittest.main()
