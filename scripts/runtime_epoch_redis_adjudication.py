@@ -160,6 +160,20 @@ def load_evidence() -> tuple[dict, bytes]:
     return values, lease
 
 
+def validate_previous_terminal_review() -> None:
+    frozen = {
+        LATCH: "a51191a64c20621785a8a803f08a57cd641befff7a3abef0af5c1bde33ac770d",
+        PREVIOUS_ADJUDICATION
+        / "adjudication-failure.json": PREVIOUS_REVIEW_FAILURE_SHA256,
+        PREVIOUS_ADJUDICATION
+        / "cli-050.stdout": "c5328f4697f23898f27d8e11e442215cd7183309ebc0c2d84bc8d96abd5bad34",
+    }
+    for path, expected in frozen.items():
+        admitted = epoch.fresh.safe(path)
+        if not admitted.is_file() or epoch.fresh.sha(admitted) != expected:
+            recovery.reject("EXACT_REVIEWED_TERMINAL_MANIFEST_FAILURE_REQUIRED")
+
+
 def adjudicate(
     controller: recovery.RedisAofRecoveryController, values: dict, lease: bytes
 ) -> dict:
@@ -359,15 +373,8 @@ def main(argv: list[str] | None = None) -> int:
         values, lease = load_evidence()
         validate_observations(values)
         review_latch = TERMINAL_REVIEW_LATCH if args.review_closed_segment else LATCH
-        if args.review_closed_segment and (
-            epoch.fresh.sha(LATCH)
-            != "a51191a64c20621785a8a803f08a57cd641befff7a3abef0af5c1bde33ac770d"
-            or epoch.fresh.sha(PREVIOUS_ADJUDICATION / "adjudication-failure.json")
-            != PREVIOUS_REVIEW_FAILURE_SHA256
-            or epoch.fresh.sha(PREVIOUS_ADJUDICATION / "cli-050.stdout")
-            != "c5328f4697f23898f27d8e11e442215cd7183309ebc0c2d84bc8d96abd5bad34"
-        ):
-            recovery.reject("EXACT_REVIEWED_TERMINAL_MANIFEST_FAILURE_REQUIRED")
+        if args.review_closed_segment:
+            validate_previous_terminal_review()
         receipt = WORK / "redis-aof-clone-qualification.json"
         if (
             receipt.exists()
@@ -400,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         if review_latch.read_bytes() != adjudication_latch_bytes:
             recovery.reject("RETAINED_ADJUDICATION_LATCH_CHANGED")
         if args.review_closed_segment:
+            validate_previous_terminal_review()
             result["retained_evidence_adjudication"].update(
                 previous_readonly_review_failure_sha256=PREVIOUS_REVIEW_FAILURE_SHA256,
                 previous_readonly_review_failure_preserved=True,

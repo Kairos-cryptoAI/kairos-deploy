@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts import runtime_epoch_redis_adjudication as adjudication
 from scripts import runtime_epoch_redis_recovery as recovery
@@ -127,6 +127,39 @@ def observations() -> dict:
 
 
 class RedisRetainedAdjudicationTests(unittest.TestCase):
+    def test_previous_review_hash_change_on_final_recheck_is_rejected(self):
+        good = [
+            "a51191a64c20621785a8a803f08a57cd641befff7a3abef0af5c1bde33ac770d",
+            adjudication.PREVIOUS_REVIEW_FAILURE_SHA256,
+            "c5328f4697f23898f27d8e11e442215cd7183309ebc0c2d84bc8d96abd5bad34",
+        ]
+        admitted = Mock()
+        admitted.is_file.return_value = True
+        with (
+            patch.object(adjudication.epoch.fresh, "safe", return_value=admitted),
+            patch.object(
+                adjudication.epoch.fresh,
+                "sha",
+                side_effect=good + good[:2] + ["0" * 64],
+            ) as hashed,
+        ):
+            adjudication.validate_previous_terminal_review()
+            with self.assertRaises(recovery.epoch.Rejected):
+                adjudication.validate_previous_terminal_review()
+        self.assertEqual(hashed.call_count, 6)
+
+    def test_missing_previous_review_file_rejected_before_hashing(self):
+        admitted = Mock()
+        admitted.is_file.return_value = False
+        with (
+            patch.object(adjudication.epoch.fresh, "safe", return_value=admitted),
+            patch.object(
+                adjudication.epoch.fresh, "sha", side_effect=AssertionError("hash")
+            ),
+            self.assertRaises(recovery.epoch.Rejected),
+        ):
+            adjudication.validate_previous_terminal_review()
+
     def test_default_plan_has_no_git_native_or_evidence_side_effect(self):
         with (
             patch.object(
