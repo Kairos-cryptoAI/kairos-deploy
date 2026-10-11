@@ -160,6 +160,332 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                         expected_sha256="0" * 64,
                     )
 
+    def test_attempt_02_backup_failure_is_bound_to_receipt_stderr_and_cleanup_proof(
+        self,
+    ):
+        owner = epoch.CONTINUATION_OWNER
+        with TemporaryDirectory() as directory:
+            attempt02 = Path(directory) / "continuation-02"
+            attempt02.mkdir()
+            failure = attempt02 / "runtime-epoch-failure.json"
+            failure.write_text(
+                json.dumps(
+                    {
+                        "owner": owner,
+                        "phase": "ADMISSION",
+                        "error_category": "Rejected",
+                        "created_resources": [],
+                        "active_lease_preserved": True,
+                        "trading_started": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stderr = attempt02 / "cli-025.stderr"
+            stderr.write_bytes(b"synthetic immutable docker-cp failure\n")
+            evidence = attempt02 / "attempt-01-initializer-evidence.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "owner": owner,
+                        "attempt_01_failure_sha256": epoch.CONTINUATION_01_FAILURE_SHA256,
+                        "helper_name": "kairos-epoch-69893dc7b7c6-volume-init-70",
+                        "helper_container_id": "1" * 64,
+                        "image": epoch.PG_IMAGE,
+                        "state": "exited",
+                        "exit_code": 1,
+                        "cap_add": ["CAP_CHOWN"],
+                        "network_mode": "none",
+                        "mounts": [
+                            [
+                                "volume",
+                                epoch.CONTINUATION_01_ANONYMOUS_VOLUME,
+                                "/var/lib/postgresql/data",
+                                True,
+                            ],
+                            [
+                                "volume",
+                                epoch.resource_names(owner)["restore_volume"],
+                                "/owned",
+                                True,
+                            ],
+                        ],
+                        "anonymous_volume": epoch.CONTINUATION_01_ANONYMOUS_VOLUME,
+                        "failed_operation": "chmod_owned_volume_permission_denied",
+                        "log_sha256": epoch.CONTINUATION_01_LOG_SHA256,
+                        "raw_log_preserved": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hash_by_name = {
+                failure.name: epoch.CONTINUATION_02_FAILURE_SHA256,
+                stderr.name: epoch.CONTINUATION_02_LOG_SHA256,
+                evidence.name: epoch.CONTINUATION_02_ATTEMPT_01_EVIDENCE_SHA256,
+            }
+            with patch.object(
+                epoch, "_sha", side_effect=lambda path: hash_by_name[path.name]
+            ):
+                result = epoch.validate_attempt_02_backup_failure(
+                    owner=owner,
+                    attempt02_work=attempt02,
+                    expected_sha256=epoch.CONTINUATION_02_FAILURE_SHA256,
+                )
+                self.assertEqual(
+                    result,
+                    {
+                        "failure_sha256": epoch.CONTINUATION_02_FAILURE_SHA256,
+                        "stderr_sha256": epoch.CONTINUATION_02_LOG_SHA256,
+                        "attempt_01_initializer_evidence_sha256": epoch.CONTINUATION_02_ATTEMPT_01_EVIDENCE_SHA256,
+                    },
+                )
+                with self.assertRaises(epoch.Rejected):
+                    epoch.validate_attempt_02_backup_failure(
+                        owner=owner,
+                        attempt02_work=attempt02,
+                        expected_sha256="0" * 64,
+                    )
+
+    def test_binary_pg_dump_stream_is_exclusive_bounded_and_job_assigned(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker-config").mkdir()
+            controller = object.__new__(epoch.EpochController)
+            controller.owner = OWNER
+            controller.names = epoch.resource_names(OWNER)
+            controller.work = root
+            controller.deadline = epoch.time.monotonic() + 600
+            events = []
+
+            class FakeJob:
+                creation_flags = 123
+
+                def attach_and_resume(self, process):
+                    events.append(("attach", process))
+
+                def close(self):
+                    events.append(("close",))
+
+            controller.native = SimpleNamespace(
+                work=root,
+                sequence=0,
+                operations=[],
+                module=SimpleNamespace(WindowsProcessJob=FakeJob),
+            )
+
+            class FakeProcess:
+                returncode = 0
+
+                def poll(self):
+                    return self.returncode
+
+            process = FakeProcess()
+
+            def popen(command, **kwargs):
+                events.append(("popen", command, kwargs["creationflags"]))
+                kwargs["stdout"].write(b"PGDMP\x00binary")
+                kwargs["stderr"].write(b"diagnostic\n")
+                return process
+
+            def finish(job, actual_process, _deadline, *, cancel):
+                self.assertEqual(events[0], ("popen", events[0][1], 123))
+                self.assertEqual(events[1], ("attach", process))
+                self.assertIs(actual_process, process)
+                self.assertFalse(cancel)
+                return {"assigned_before_resume": True, "active_processes_after": 0}
+
+            backup = root / "epoch-history.dump"
+            with (
+                patch.object(
+                    epoch.subprocess, "Popen", side_effect=popen
+                ) as popen_mock,
+                patch.object(epoch.fresh.bounded, "bounded_finish", side_effect=finish),
+            ):
+                result = controller.stream_private_pg_dump(
+                    backup=backup, database="kairos_epoch_0123456789ab"
+                )
+            self.assertEqual(backup.read_bytes(), b"PGDMP\x00binary")
+            self.assertEqual(result["binary_stdout_bytes"], len(b"PGDMP\x00binary"))
+            self.assertEqual(
+                result["sha256"], epoch.hashlib.sha256(b"PGDMP\x00binary").hexdigest()
+            )
+            command = popen_mock.call_args.args[0]
+            self.assertEqual(
+                command[command.index("exec") + 1], controller.names["target_pg"]
+            )
+            timeout_index = command.index("exec") + 2
+            self.assertEqual(
+                command[timeout_index : timeout_index + 4],
+                [
+                    "/usr/bin/timeout",
+                    "-s",
+                    "KILL",
+                    str(epoch.EPOCH_DUMP_TIMEOUT_SECONDS - 5),
+                ],
+            )
+            self.assertNotIn("-t", command)
+            self.assertNotIn("--interactive", command)
+            self.assertEqual(command[-1], "--dbname=kairos_epoch_0123456789ab")
+            self.assertFalse(any("--file=" in item or item == "cp" for item in command))
+            self.assertIn(("close",), events)
+            self.assertEqual(
+                controller.native.operations[0]["sha256"], result["sha256"]
+            )
+
+    def test_binary_pg_dump_failure_keeps_partial_archive_without_echoing_stderr(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "docker-config").mkdir()
+            controller = object.__new__(epoch.EpochController)
+            controller.owner = OWNER
+            controller.names = epoch.resource_names(OWNER)
+            controller.work = root
+            controller.deadline = epoch.time.monotonic() + 600
+
+            class FakeJob:
+                creation_flags = 0
+
+                def attach_and_resume(self, _process):
+                    pass
+
+                def close(self):
+                    pass
+
+            controller.native = SimpleNamespace(
+                work=root,
+                sequence=0,
+                operations=[],
+                module=SimpleNamespace(WindowsProcessJob=FakeJob),
+            )
+
+            class FailedProcess:
+                returncode = 1
+
+                def poll(self):
+                    return self.returncode
+
+            def popen(_command, **kwargs):
+                kwargs["stdout"].write(b"partial-PGDMP")
+                kwargs["stderr"].write(b"private driver message")
+                return FailedProcess()
+
+            backup = root / "epoch-history.dump"
+            with (
+                patch.object(epoch.subprocess, "Popen", side_effect=popen),
+                patch.object(
+                    epoch.fresh.bounded,
+                    "bounded_finish",
+                    return_value={
+                        "assigned_before_resume": True,
+                        "active_processes_after": 0,
+                    },
+                ),
+                self.assertRaisesRegex(
+                    epoch.Rejected, "BOUNDED_BINARY_EPOCH_DUMP_FAILED"
+                ),
+            ):
+                controller.stream_private_pg_dump(
+                    backup=backup, database="kairos_epoch_0123456789ab"
+                )
+            self.assertEqual(backup.read_bytes(), b"partial-PGDMP")
+            self.assertNotIn(
+                "private driver message", str(controller.native.operations)
+            )
+
+    def test_binary_pg_dump_cancels_job_for_stream_bounds_and_timeout(self):
+        for case in ("stdout", "stderr", "timeout"):
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "docker-config").mkdir()
+                controller = object.__new__(epoch.EpochController)
+                controller.owner = OWNER
+                controller.names = epoch.resource_names(OWNER)
+                controller.work = root
+                controller.deadline = 10_000
+                events = []
+
+                class FakeJob:
+                    creation_flags = 0
+
+                    def attach_and_resume(self, _process, event_log=events):
+                        event_log.append("assigned-and-resumed")
+
+                    def close(self, event_log=events):
+                        event_log.append("closed")
+
+                controller.native = SimpleNamespace(
+                    work=root,
+                    sequence=0,
+                    operations=[],
+                    module=SimpleNamespace(WindowsProcessJob=FakeJob),
+                )
+
+                class RunningProcess:
+                    returncode = None
+
+                    def poll(self):
+                        return None
+
+                process = RunningProcess()
+
+                def popen(_command, _case=case, _process=process, **kwargs):
+                    if _case == "stdout":
+                        kwargs["stdout"].write(b"exceeds")
+                        kwargs["stdout"].flush()
+                    elif _case == "stderr":
+                        kwargs["stderr"].write(b"exceeds")
+                        kwargs["stderr"].flush()
+                    return _process
+
+                def finish(
+                    _job, actual_process, _deadline, *, cancel, expected_process=process
+                ):
+                    self.assertIs(actual_process, expected_process)
+                    self.assertTrue(cancel)
+                    return {
+                        "assigned_before_resume": True,
+                        "active_processes_after": 0,
+                    }
+
+                tick = iter((100.0, 100.0, 106.0, 106.0, 106.0, 106.0))
+                with (
+                    patch.object(epoch.subprocess, "Popen", side_effect=popen),
+                    patch.object(
+                        epoch.fresh.bounded, "bounded_finish", side_effect=finish
+                    ),
+                    patch.object(
+                        epoch,
+                        "MAX_EPOCH_DUMP_BYTES",
+                        3 if case == "stdout" else epoch.MAX_EPOCH_DUMP_BYTES,
+                    ),
+                    patch.object(
+                        epoch,
+                        "MAX_EPOCH_DUMP_STDERR_BYTES",
+                        3 if case == "stderr" else epoch.MAX_EPOCH_DUMP_STDERR_BYTES,
+                    ),
+                    patch.object(
+                        epoch,
+                        "EPOCH_DUMP_TIMEOUT_SECONDS",
+                        5 if case == "timeout" else epoch.EPOCH_DUMP_TIMEOUT_SECONDS,
+                    ),
+                    patch.object(
+                        epoch.time,
+                        "monotonic",
+                        side_effect=lambda values=tick: next(values, 106.0),
+                    ),
+                    self.assertRaisesRegex(
+                        epoch.Rejected, "BOUNDED_BINARY_EPOCH_DUMP_FAILED"
+                    ),
+                ):
+                    controller.stream_private_pg_dump(
+                        backup=root / "epoch-history.dump",
+                        database="kairos_epoch_0123456789ab",
+                    )
+                self.assertIn("assigned-and-resumed", events)
+                self.assertIn("closed", events)
+                self.assertTrue((root / "epoch-history.dump").exists())
+                self.assertTrue((root / "cli-001.stderr").exists())
+
     def test_owner_names_are_exact_and_resources_are_separate(self):
         names = epoch.resource_names(OWNER)
         self.assertNotEqual(names["target_volume"], names["source_volume"])
@@ -550,6 +876,103 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                 events, ["existing", "initialize", "prebackup", "rotate-history"]
             )
 
+    def test_attempt_03_skips_old_initializer_cleanup_and_volume_initialization(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            controller.continuation_attempt = "03"
+            attempt01 = Path(directory) / "continuation-01"
+            attempt02 = Path(directory) / "continuation-02"
+            attempt01.mkdir()
+            attempt02.mkdir()
+            failure = attempt02 / "runtime-epoch-failure.json"
+            failure.write_text(
+                json.dumps(
+                    {
+                        "owner": controller.owner,
+                        "phase": "ADMISSION",
+                        "error_category": "Rejected",
+                        "created_resources": [],
+                        "active_lease_preserved": True,
+                        "trading_started": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stderr = attempt02 / "cli-025.stderr"
+            stderr.write_bytes(b"synthetic attempt02 stderr")
+            evidence = attempt02 / "attempt-01-initializer-evidence.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "owner": controller.owner,
+                        "attempt_01_failure_sha256": epoch.CONTINUATION_01_FAILURE_SHA256,
+                        "helper_name": "kairos-epoch-69893dc7b7c6-volume-init-70",
+                        "helper_container_id": "1" * 64,
+                        "image": epoch.PG_IMAGE,
+                        "state": "exited",
+                        "exit_code": 1,
+                        "cap_add": ["CAP_CHOWN"],
+                        "network_mode": "none",
+                        "mounts": [
+                            [
+                                "volume",
+                                epoch.CONTINUATION_01_ANONYMOUS_VOLUME,
+                                "/var/lib/postgresql/data",
+                                True,
+                            ],
+                            [
+                                "volume",
+                                controller.names["restore_volume"],
+                                "/owned",
+                                True,
+                            ],
+                        ],
+                        "anonymous_volume": epoch.CONTINUATION_01_ANONYMOUS_VOLUME,
+                        "failed_operation": "chmod_owned_volume_permission_denied",
+                        "log_sha256": epoch.CONTINUATION_01_LOG_SHA256,
+                        "raw_log_preserved": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hashes = {
+                failure: epoch.CONTINUATION_02_FAILURE_SHA256,
+                stderr: epoch.CONTINUATION_02_LOG_SHA256,
+                evidence: epoch.CONTINUATION_02_ATTEMPT_01_EVIDENCE_SHA256,
+            }
+            events = []
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing") or {"state": "stopped"}
+            )
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "unexpected-initialize"
+            )
+            controller.archive_and_remove_attempt_01_initializer = lambda **_kwargs: (
+                events.append("unexpected-cleanup")
+            )
+
+            def fail_backup(**_kwargs):
+                events.append("prebackup")
+                raise epoch.Rejected("EXPECTED_STOP_BEFORE_DATABASE_MUTATION")
+
+            controller.backup_and_verify = fail_backup
+            root = Path(directory) / "epoch-root"
+            with (
+                patch.object(epoch, "ROOT", root),
+                patch.object(epoch, "_sha", side_effect=lambda path: hashes[path]),
+                self.assertRaisesRegex(
+                    epoch.Rejected, "EXPECTED_STOP_BEFORE_DATABASE_MUTATION"
+                ),
+            ):
+                controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                    attempt01_work=attempt01,
+                    attempt02_work=attempt02,
+                )
+            self.assertEqual(events, ["existing", "prebackup"])
+
     def test_catchup_end_is_global_cap_safe_for_five_symbols_and_exact_resume(self):
         seed = seed_receipt()
         target = 1_791_680_280_000
@@ -664,7 +1087,7 @@ class RuntimeEpochControllerTests(unittest.TestCase):
             receipt = json.loads(receipt_text)
             self.assertEqual(receipt["result"], "FAILED_CLOSED")
             self.assertEqual(receipt["phase"], "catchup-02")
-            self.assertEqual(receipt["error_category"], "OSError")
+            self.assertEqual(receipt["error_category"], "OSERROR")
             self.assertIn(
                 "kairos-epoch-0123456789ab-catchup", receipt["created_resources"]
             )
