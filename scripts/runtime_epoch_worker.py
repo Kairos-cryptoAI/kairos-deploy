@@ -520,13 +520,31 @@ def validate_epoch_table_inventory(tables: list[str]) -> None:
 
 
 BOOT_ALLOWED_NONEMPTY_TABLES = frozenset(
-    {"schema_migrations", "event_audit", "message_outbox", "message_inbox"}
+    {
+        "schema_migrations",
+        "event_audit",
+        "message_outbox",
+        "message_inbox",
+        "paper_canary_database_identity",
+    }
 )
+# Migration 014 provisions one identity row, not canary/trading admission.
+# Pin its full digest from the accepted continuation-05 verified restore
+# (receipt SHA-256 9e5b66868c4e01d1b047d3603eba6fc9673419e838da34e1bd54d579fa70ec4b).
+BOOT_DATABASE_IDENTITY = {
+    "count": 1,
+    "sha256": "ba22f0bf5a60970ce0553e4c307106244912c7764e0f355a1955be65898e6e38",
+}
 BOOT_ADVISORY_LOCKS = (
     4907627681104115019,  # history/current-bar writer
     7716101100001,  # outbox dispatcher
     7716101100002,  # epoch supervisor
 )
+
+
+def validate_boot_database_identity(tables: dict) -> None:
+    if tables.get("paper_canary_database_identity") != BOOT_DATABASE_IDENTITY:
+        raise EpochError("BOOT_MIGRATION_DATABASE_IDENTITY_CONFLICT")
 
 
 def validate_boot_seed(value: dict, owner: str, database: str) -> None:
@@ -568,6 +586,7 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
         if table not in BOOT_ALLOWED_NONEMPTY_TABLES
     ):
         raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
+    validate_boot_database_identity(value["tables"])
     if (
         value["original_prefix"]
         != {
@@ -782,6 +801,7 @@ async def boot_state_snapshot(connection, owner: str) -> dict:
             if table not in BOOT_ALLOWED_NONEMPTY_TABLES
         ):
             raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
+        validate_boot_database_identity(table_digests)
         queue = await boot_queue_state(connection, owner)
         history = await boot_history_snapshot(connection)
         if table_digests["event_audit"] != history["audit"]:

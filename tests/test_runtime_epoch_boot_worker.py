@@ -47,6 +47,10 @@ def boot_seed() -> dict:
     table_rows["event_audit"]["sha256"] = "b" * 64
     table_rows["message_outbox"]["count"] = 2_220
     table_rows["message_inbox"]["count"] = 2_220
+    table_rows["paper_canary_database_identity"] = {
+        "count": 1,
+        "sha256": "ba22f0bf5a60970ce0553e4c307106244912c7764e0f355a1955be65898e6e38",
+    }
     return {
         "state": "PASS_BOOT_STATE",
         "matched_public_tables": 32,
@@ -143,6 +147,34 @@ class BootConfigTests(unittest.TestCase):
 
 
 class BootSeedGuardTests(unittest.TestCase):
+    def test_only_the_exact_previously_restored_migration_identity_is_admitted(self):
+        accepted = boot_seed()
+        worker.validate_boot_seed(accepted, OWNER, DB)
+        for changed in (
+            {"count": 0, "sha256": "a" * 64},
+            {**worker.BOOT_DATABASE_IDENTITY, "count": 2},
+            {**worker.BOOT_DATABASE_IDENTITY, "sha256": "0" * 64},
+        ):
+            value = copy.deepcopy(accepted)
+            value["tables"]["paper_canary_database_identity"] = changed
+            with (
+                self.subTest(changed=changed),
+                self.assertRaisesRegex(
+                    worker.EpochError, "BOOT_MIGRATION_DATABASE_IDENTITY_CONFLICT"
+                ),
+            ):
+                worker.validate_boot_seed(value, OWNER, DB)
+        for table in ("paper_canary_sessions", "paper_canary_arms", "execution_orders"):
+            value = copy.deepcopy(accepted)
+            value["tables"][table]["count"] = 1
+            with (
+                self.subTest(table=table),
+                self.assertRaisesRegex(
+                    worker.EpochError, "BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY"
+                ),
+            ):
+                worker.validate_boot_seed(value, OWNER, DB)
+
     def test_all_preexisting_audit_rows_remain_hash_bound_after_catchup(self):
         expected = boot_seed()
         connection = mock.AsyncMock()
