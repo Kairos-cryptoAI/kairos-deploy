@@ -76,6 +76,10 @@ MODES = (
     "seed",
     "catchup",
     "verify-restore",
+    "boot-state",
+    "boot-verify-restore",
+    "boot-catchup",
+    "boot-redis-state",
     "rotate-history",
     "history-state",
     "qualify",
@@ -119,6 +123,16 @@ def validate_config(value: dict, mode: str) -> None:
     for key, item in value.items():
         if key.endswith("password") and not re.fullmatch(r"[0-9a-f]{64}", item):
             raise EpochError("NEW_PRIVATE_CREDENTIAL_REQUIRED")
+    if mode in {
+        "boot-state",
+        "boot-verify-restore",
+        "boot-catchup",
+        "boot-redis-state",
+    } and (
+        value.get("pg_host") != "kairos-epoch-" + owner[:12] + "-pg"
+        or value.get("redis_host") != "kairos-epoch-" + owner[:12] + "-redis"
+    ):
+        raise EpochError("EXACT_OWNED_BOOT_EPOCH_HOSTS_REQUIRED")
     if mode == "history-state" and set(value) != {
         "owner",
         "database",
@@ -155,6 +169,67 @@ def validate_config(value: dict, mode: str) -> None:
             raise EpochError("FIXED_FINALITY_SAFE_DEADLINE_REQUIRED")
         if value.get("maximum_bars") != MAX_BARS:
             raise EpochError("EXACT_GLOBAL_HISTORY_CAP_REQUIRED")
+    if mode == "boot-state" and set(value) != {
+        "owner",
+        "database",
+        "pg_host",
+        "redis_host",
+        "admin_password",
+    }:
+        raise EpochError("EXACT_READONLY_BOOT_STATE_CONFIG_REQUIRED")
+    if mode == "boot-verify-restore":
+        if (
+            set(value)
+            != {
+                "owner",
+                "database",
+                "pg_host",
+                "redis_host",
+                "admin_password",
+                "restore_host",
+                "restore_database",
+                "restore_admin_password",
+                "expected_seed",
+            }
+            or value.get("restore_host") != "kairos-epoch-" + owner[:12] + "-restore"
+            or value.get("restore_database")
+            != "kairos_recovery_" + owner[:12] + "_epochrestore"
+        ):
+            raise EpochError("EXACT_OWNED_BOOT_RESTORE_CONFIG_REQUIRED")
+        validate_boot_seed(value["expected_seed"], owner, value["database"])
+    if mode == "boot-catchup":
+        end = value.get("end_exclusive_ms")
+        now = int(time.time() * 1000)
+        if (
+            type(end) is not int
+            or end % MINUTE
+            or end > now - FINALITY_MS
+            or value.get("maximum_bars") != MAX_BARS
+            or set(value)
+            != {
+                "owner",
+                "database",
+                "pg_host",
+                "redis_host",
+                "history_password",
+                "end_exclusive_ms",
+                "maximum_bars",
+                "expected_seed",
+            }
+        ):
+            raise EpochError("EXACT_FIXED_BOOT_CATCHUP_CONFIG_REQUIRED")
+        validate_boot_seed(value["expected_seed"], owner, value["database"])
+    if mode == "boot-redis-state" and set(value) != {
+        "owner",
+        "database",
+        "pg_host",
+        "redis_host",
+        "producer_password",
+        "consumer_password",
+        "redis_producer_password",
+        "redis_consumer_password",
+    }:
+        raise EpochError("EXACT_READONLY_BOOT_REDIS_CONFIG_REQUIRED")
     if mode == "seed" and (
         value.get("source_dump_sha256") != SOURCE_DUMP_SHA256
         or value.get("seed_expectation") != {"accepted_dump_sha256": SOURCE_DUMP_SHA256}
@@ -444,6 +519,321 @@ def validate_epoch_table_inventory(tables: list[str]) -> None:
         raise EpochError("EXACT_EPOCH_TABLE_INVENTORY_REQUIRED")
 
 
+BOOT_ALLOWED_NONEMPTY_TABLES = frozenset(
+    {"schema_migrations", "event_audit", "message_outbox", "message_inbox"}
+)
+BOOT_ADVISORY_LOCKS = (
+    4907627681104115019,  # history/current-bar writer
+    7716101100001,  # outbox dispatcher
+    7716101100002,  # epoch supervisor
+)
+
+
+def validate_boot_seed(value: dict, owner: str, database: str) -> None:
+    """Require the byte-for-byte boot-state result, not a partial expectation."""
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "state",
+            "matched_public_tables",
+            "tables",
+            "sequences",
+            "anchors",
+            "original_prefix",
+            "queue",
+            "trading_started",
+        }
+        or value.get("state") != "PASS_BOOT_STATE"
+        or value.get("matched_public_tables") != len(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        or value.get("trading_started") is not False
+        or set(value.get("tables", {})) != set(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        or not isinstance(value.get("sequences"), dict)
+        or not isinstance(value.get("queue"), dict)
+        or not isinstance(value.get("anchors"), dict)
+        or not isinstance(value.get("original_prefix"), dict)
+    ):
+        raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
+    if any(
+        not isinstance(row, dict)
+        or type(row.get("count")) is not int
+        or row["count"] < 0
+        or re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) is None
+        for row in value["tables"].values()
+    ):
+        raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
+    if any(
+        value["tables"][table]["count"] != 0
+        for table in CONTROLLED_RUNTIME_PUBLIC_TABLES
+        if table not in BOOT_ALLOWED_NONEMPTY_TABLES
+    ):
+        raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
+    if (
+        value["original_prefix"]
+        != {
+            "rows": ORIGINAL_PREFIX_ROWS,
+            "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
+            "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+        }
+        or value["queue"].get("outbox_rows") != value["queue"].get("inbox_rows")
+        or value["queue"].get("completed_inbox") != value["queue"].get("inbox_rows")
+        or value["queue"].get("pending_outbox") != 0
+        or value["queue"].get("unresolved_inbox") != 0
+        or value["queue"].get("trading_rows") != 0
+        or value["queue"].get("outbox_rows")
+        != value["tables"]["message_outbox"]["count"]
+        or value["queue"].get("inbox_rows") != value["tables"]["message_inbox"]["count"]
+        or any(
+            type(value["queue"].get(key)) is not int or value["queue"][key] < 0
+            for key in (
+                "outbox_rows",
+                "inbox_rows",
+                "completed_inbox",
+                "pending_outbox",
+                "unresolved_inbox",
+                "trading_rows",
+            )
+        )
+    ):
+        raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
+    validate_history_snapshot(
+        value["tables"]["event_audit"]["count"],
+        value["anchors"],
+        {"anchors": value["anchors"]},
+    )
+
+
+async def validate_no_epoch_workers(connection) -> None:
+    """Prove the writer, dispatcher, and supervisor session locks are all free."""
+    acquired = []
+    try:
+        for key in BOOT_ADVISORY_LOCKS:
+            if not await connection.fetchval("SELECT pg_try_advisory_lock($1)", key):
+                raise EpochError("EPOCH_WORKER_LOCK_STILL_HELD")
+            acquired.append(key)
+    finally:
+        for key in reversed(acquired):
+            await connection.fetchval("SELECT pg_advisory_unlock($1)", key)
+
+
+async def boot_queue_state(connection, owner: str) -> dict:
+    """Validate and summarize the exact already-published, completed bar queues."""
+    from kairos_core.contracts import ClosedBarEventV1
+    from kairos_persistence.runtime import canonical_payload
+
+    outbox = await connection.fetch(
+        """SELECT id,message_id,topic,payload,payload_sha256,producer,published_at,
+                  publish_attempts,last_error,lease_owner,lease_until,
+                  dead_lettered_at,reconciliation_state
+             FROM message_outbox ORDER BY id"""
+    )
+    inbox = await connection.fetch(
+        """SELECT consumer,message_id,topic,status,payload_sha256
+             FROM message_inbox ORDER BY consumer,message_id"""
+    )
+    consumer_name = "kairos-epoch-consumer-" + owner[:12] + ":bars"
+    if len(outbox) != len(inbox):
+        raise EpochError("BOOT_QUEUE_ORPHAN_OR_UNRESOLVED_ROW")
+    inbox_by_id = {}
+    for row in inbox:
+        if (
+            row["consumer"] != consumer_name
+            or row["status"] != "COMPLETED"
+            or not row["payload_sha256"]
+            or not re.fullmatch(r"[0-9a-f]{64}", row["payload_sha256"])
+            or row["message_id"] in inbox_by_id
+        ):
+            raise EpochError("BOOT_QUEUE_INBOX_NOT_EXACTLY_COMPLETED")
+        inbox_by_id[row["message_id"]] = row
+    for row in outbox:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        _encoded, digest = canonical_payload(payload)
+        event = ClosedBarEventV1.model_validate(payload)
+        inbox_row = inbox_by_id.pop(row["message_id"], None)
+        if (
+            row["topic"] != TOPIC
+            or row["producer"] != SOURCE
+            or row["published_at"] is None
+            or row["publish_attempts"] < 1
+            or row["last_error"] is not None
+            or row["lease_owner"] is not None
+            or row["lease_until"] is not None
+            or row["dead_lettered_at"] is not None
+            or row["reconciliation_state"] != "NONE"
+            or digest != row["payload_sha256"]
+            or event.message_id != row["message_id"]
+            or event.source != SOURCE
+            or event.symbol not in SYMBOLS
+            or inbox_row is None
+            or inbox_row["topic"] != row["topic"]
+            or inbox_row["payload_sha256"] != digest
+        ):
+            raise EpochError("BOOT_QUEUE_IDENTITY_OR_STATE_CONFLICT")
+    if inbox_by_id:
+        raise EpochError("BOOT_QUEUE_ORPHAN_OR_UNRESOLVED_ROW")
+    if await connection.fetchval(
+        """SELECT count(*) FROM message_outbox o WHERE NOT EXISTS
+             (SELECT 1 FROM event_audit a WHERE a.message_id=o.message_id
+                AND a.topic=o.topic AND a.source=o.producer AND a.payload=o.payload)"""
+    ):
+        raise EpochError("BOOT_QUEUE_AUDIT_IDENTITY_MISMATCH")
+    return {
+        "outbox_rows": len(outbox),
+        "inbox_rows": len(inbox),
+        "completed_inbox": len(inbox),
+        "pending_outbox": 0,
+        "unresolved_inbox": 0,
+        "trading_rows": 0,
+    }
+
+
+def validate_boot_stream_rows(
+    stream_rows: list, durable: dict, receipt_ids: set[str]
+) -> None:
+    """Allow the single exact duplicate delivery written by prior qualification."""
+    allowed_payloads = {encoded for _digest, encoded in durable.values()}
+    stream_ids = {stream_id for stream_id, _fields in stream_rows}
+    if (
+        len(stream_rows) != len(durable) + 1
+        or len(stream_ids) != len(stream_rows)
+        or not receipt_ids.issubset(stream_ids)
+        or any(
+            set(fields) != {"data"} or fields["data"] not in allowed_payloads
+            for _stream_id, fields in stream_rows
+        )
+    ):
+        raise EpochError("BOOT_REDIS_UNOWNED_STREAM_ENTRY")
+
+
+async def boot_history_snapshot(connection) -> dict:
+    """History-role projection used around data-only recovery (no inbox grant)."""
+    from controlled_runtime_worker import Budget, _table_digest
+
+    audit = await _table_digest(connection, "event_audit", Budget())
+    outbox = await _table_digest(connection, "message_outbox", Budget())
+    prefix = await connection.fetchrow(
+        """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest
+             FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha
+                     FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r""",
+        ORIGINAL_PREFIX_LAST_OPEN_MS,
+    )
+    history = {}
+    for symbol in SYMBOLS:
+        row = await connection.fetchrow(
+            """SELECT count(*) n,count(DISTINCT (payload->>'open_time_ms')::bigint) u,
+                      min((payload->>'open_time_ms')::bigint) lo,
+                      max((payload->>'open_time_ms')::bigint) hi
+                 FROM event_audit WHERE topic=$1 AND source=$2 AND payload->>'symbol'=$3""",
+            TOPIC,
+            SOURCE,
+            symbol,
+        )
+        if not row["n"] or row["n"] != row["u"]:
+            raise EpochError("BOOT_HISTORY_UNIQUE_CHAIN_REQUIRED")
+        history[symbol] = {
+            "count": row["n"],
+            "first_open_time_ms": row["lo"],
+            "last_open_time_ms": row["hi"],
+            "last_close_time_ms": row["hi"] + MINUTE - 1,
+        }
+    validate_history_snapshot(audit["count"], history, {"anchors": history})
+    original_prefix = {
+        "rows": prefix["n"],
+        "audit_table_sha256": prefix["digest"],
+        "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+    }
+    if original_prefix != {
+        "rows": ORIGINAL_PREFIX_ROWS,
+        "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
+        "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+    }:
+        raise EpochError("BOOT_ORIGINAL_PREFIX_CONFLICT")
+    return {
+        "audit": audit,
+        "outbox": outbox,
+        "anchors": history,
+        "original_prefix": original_prefix,
+    }
+
+
+async def boot_state_snapshot(connection, owner: str) -> dict:
+    """Full read-only state proof for safe restart/restore admission."""
+    from controlled_runtime_worker import Budget, _table_digest
+
+    await verify_schema(connection)
+    await validate_no_epoch_workers(connection)
+    async with connection.transaction(isolation="repeatable_read", readonly=True):
+        tables = [
+            row["relname"]
+            for row in await connection.fetch(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relispartition ORDER BY c.relname"
+            )
+        ]
+        validate_epoch_table_inventory(tables)
+        budget = Budget()
+        table_digests = {
+            table: await _table_digest(connection, table, budget) for table in tables
+        }
+        if any(
+            table_digests[table]["count"] != 0
+            for table in tables
+            if table not in BOOT_ALLOWED_NONEMPTY_TABLES
+        ):
+            raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
+        queue = await boot_queue_state(connection, owner)
+        history = await boot_history_snapshot(connection)
+        if table_digests["event_audit"] != history["audit"]:
+            raise EpochError("BOOT_AUDIT_SNAPSHOT_CONFLICT")
+        sequences = {}
+        for row in await connection.fetch(
+            "SELECT sequencename FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename"
+        ):
+            name = row["sequencename"]
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", name):
+                raise EpochError("SEQUENCE_IDENTITY_REJECTED")
+            sequences[name] = dict(
+                await connection.fetchrow(
+                    f'SELECT last_value,is_called FROM public."{name}"'
+                )
+            )
+        result = {
+            "state": "PASS_BOOT_STATE",
+            "matched_public_tables": len(tables),
+            "tables": table_digests,
+            "sequences": sequences,
+            "anchors": history["anchors"],
+            "original_prefix": history["original_prefix"],
+            "queue": queue,
+            "trading_started": False,
+        }
+        validate_boot_seed(result, owner, "kairos_epoch_" + owner[:12])
+        return result
+
+
+async def validate_boot_audit_prefix(connection, expected: dict) -> None:
+    """Prove every pre-reboot audit row, not only the original seed, survived."""
+    row = await connection.fetchrow(
+        """SELECT count(*) n,
+                  encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest
+             FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha
+                     FROM event_audit t
+                     JOIN unnest($3::text[],$4::bigint[]) AS cutoffs(symbol,last_open)
+                       ON t.payload->>'symbol'=cutoffs.symbol
+                    WHERE t.topic=$1 AND t.source=$2
+                      AND (t.payload->>'open_time_ms')::bigint<=cutoffs.last_open) r""",
+        TOPIC,
+        SOURCE,
+        list(SYMBOLS),
+        [expected["anchors"][s]["last_open_time_ms"] for s in SYMBOLS],
+    )
+    if {"count": row["n"], "sha256": row["digest"]} != expected["tables"][
+        "event_audit"
+    ]:
+        raise EpochError("BOOT_PREEXISTING_AUDIT_PREFIX_CONFLICT")
+
+
 def validate_expected_audit_digest(expected_seed: dict, audit: dict) -> None:
     if "audit_table_sha256" in expected_seed and (
         re.fullmatch(r"[0-9a-f]{64}", str(expected_seed["audit_table_sha256"])) is None
@@ -548,6 +938,183 @@ async def history_state(config: dict) -> dict:
             return result
     finally:
         await connection.close()
+
+
+async def boot_state(config: dict) -> dict:
+    connection = await connect(config, "kairos")
+    try:
+        return await boot_state_snapshot(connection, config["owner"])
+    finally:
+        await connection.close()
+
+
+async def boot_verify_restore(config: dict) -> dict:
+    import asyncpg
+
+    original = await connect(config, "kairos")
+    restored = await asyncpg.connect(
+        f"postgresql://kairos:{config['restore_admin_password']}@{config['restore_host']}:5432/{config['restore_database']}",
+        timeout=15,
+        command_timeout=120,
+    )
+    try:
+        first, second = await asyncio.gather(
+            boot_state_snapshot(original, config["owner"]),
+            boot_state_snapshot(restored, config["owner"]),
+        )
+        if first != config["expected_seed"] or second != first:
+            raise EpochError("EPOCH_BOOT_RESTORE_FULL_STATE_CONFLICT")
+        return {
+            "state": "PASS_BOOT_ISOLATED_RESTORE",
+            "matched_public_tables": len(CONTROLLED_RUNTIME_PUBLIC_TABLES),
+            "tables": first["tables"],
+            "sequences": first["sequences"],
+            "anchors": first["anchors"],
+            "original_prefix": first["original_prefix"],
+            "queue": first["queue"],
+            "trading_started": False,
+        }
+    finally:
+        await original.close()
+        await restored.close()
+
+
+async def boot_redis_state(config: dict) -> dict:
+    """Read-only Redis/data-plane proof before any new serving process starts."""
+    import redis.asyncio as aioredis
+    from kairos_core.contracts import ClosedBarEventV1
+    from kairos_persistence.runtime import canonical_payload
+
+    producer_sql = await connect(config, "kairos_epoch_producer")
+    consumer_sql = await connect(config, "kairos_epoch_consumer")
+    producer = aioredis.Redis(
+        host=config["redis_host"],
+        username="kairos_epoch_producer",
+        password=config["redis_producer_password"],
+        decode_responses=True,
+        socket_timeout=15,
+    )
+    consumer = aioredis.Redis(
+        host=config["redis_host"],
+        username="kairos_epoch_consumer",
+        password=config["redis_consumer_password"],
+        decode_responses=True,
+        socket_timeout=15,
+    )
+    try:
+        await verify_schema(producer_sql)
+        await verify_schema(consumer_sql)
+        outbox = await producer_sql.fetch(
+            """SELECT message_id,topic,payload,payload_sha256,producer,published_at,
+                      publish_attempts,last_error,lease_owner,lease_until,
+                      dead_lettered_at,reconciliation_state
+                 FROM message_outbox ORDER BY id"""
+        )
+        inbox = await consumer_sql.fetch(
+            "SELECT consumer,message_id,topic,status,payload_sha256 FROM message_inbox ORDER BY consumer,message_id"
+        )
+        durable = {}
+        for row in outbox:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            encoded, digest = canonical_payload(payload)
+            event = ClosedBarEventV1.model_validate(payload)
+            if (
+                row["topic"] != TOPIC
+                or row["producer"] != SOURCE
+                or row["published_at"] is None
+                or row["publish_attempts"] < 1
+                or row["last_error"] is not None
+                or row["lease_owner"] is not None
+                or row["lease_until"] is not None
+                or row["dead_lettered_at"] is not None
+                or row["reconciliation_state"] != "NONE"
+                or digest != row["payload_sha256"]
+                or event.message_id != row["message_id"]
+                or event.source != SOURCE
+                or event.symbol not in SYMBOLS
+            ):
+                raise EpochError("BOOT_QUEUE_IDENTITY_OR_STATE_CONFLICT")
+            durable[row["message_id"]] = (digest, encoded)
+        consumer_name = "kairos-epoch-consumer-" + config["owner"][:12] + ":bars"
+        if len(inbox) != len(durable):
+            raise EpochError("BOOT_QUEUE_ORPHAN_OR_UNRESOLVED_ROW")
+        inbox_by_id = {}
+        for row in inbox:
+            if (
+                row["consumer"] != consumer_name
+                or row["topic"] != TOPIC
+                or row["status"] != "COMPLETED"
+                or row["message_id"] not in durable
+                or row["payload_sha256"] != durable[row["message_id"]][0]
+                or row["message_id"] in inbox_by_id
+            ):
+                raise EpochError("BOOT_QUEUE_INBOX_NOT_EXACTLY_COMPLETED")
+            inbox_by_id[row["message_id"]] = True
+        ledger = "kairos.runtime." + config["owner"] + ".publication"
+        expected_stream_ids = set()
+        for message_id, (digest, encoded) in durable.items():
+            receipt = await producer.hget(ledger, message_id)
+            if not receipt:
+                raise EpochError("BOOT_REDIS_PUBLICATION_RECEIPT_MISSING")
+            value = json.loads(receipt)
+            if (
+                not isinstance(value, list)
+                or len(value) != 2
+                or value[0] != digest
+                or not re.fullmatch(r"[0-9]+-[0-9]+", str(value[1]))
+            ):
+                raise EpochError("BOOT_REDIS_PUBLICATION_RECEIPT_CONFLICT")
+            receipt_rows = await producer.xrange(TOPIC, min=value[1], max=value[1])
+            if len(receipt_rows) != 1 or receipt_rows[0][1] != {"data": encoded}:
+                raise EpochError("BOOT_REDIS_STREAM_RECEIPT_CONFLICT")
+            expected_stream_ids.add(value[1])
+        stream_rows = await producer.xrange(TOPIC, min="-", max="+")
+        validate_boot_stream_rows(stream_rows, durable, expected_stream_ids)
+        groups = await producer.xinfo_groups(TOPIC)
+        bars_group = next(
+            (group for group in groups if group.get("name") == "bars"), None
+        )
+        pending = await consumer.xpending(TOPIC, "bars") if bars_group else None
+        if (
+            len(groups) != 1
+            or bars_group is None
+            or not pending
+            or pending.get("pending") != 0
+            or bars_group.get("last-delivered-id") != stream_rows[-1][0]
+            or not expected_stream_ids.issubset(
+                {stream_id for stream_id, _ in stream_rows}
+            )
+        ):
+            raise EpochError("BOOT_REDIS_CONSUMER_GROUP_NOT_CAUGHT_UP")
+        return {
+            "state": "PASS_BOOT_REDIS_STATE",
+            "outbox_rows": len(outbox),
+            "completed_inbox": len(inbox),
+            "stream_entries": len(stream_rows),
+            "publication_receipts": len(expected_stream_ids),
+            "consumer_groups": 1,
+            "pending_deliveries": 0,
+            "trading_started": False,
+        }
+    finally:
+        await producer.aclose()
+        await consumer.aclose()
+        await producer_sql.close()
+        await consumer_sql.close()
+
+
+async def boot_catchup(config: dict, output: Path) -> dict:
+    result = await recover(
+        config,
+        publish=False,
+        status_path=output / "progress.json",
+        boot_expected=config["expected_seed"],
+    )
+    if result.get("state") != "AUDIT_ONLY_CATCHUP_COMPLETE":
+        raise EpochError("BOOT_AUDIT_ONLY_CATCHUP_REQUIRED")
+    return result
 
 
 async def verify_restore(config: dict) -> dict:
@@ -756,7 +1323,13 @@ async def fetch_closed_bar_page(session, symbol: str, start: int, finish: int):
     raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT")
 
 
-async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
+async def recover(
+    config: dict,
+    *,
+    publish: bool,
+    status_path: Path,
+    boot_expected: dict | None = None,
+) -> dict:
     import aiohttp
     import asyncpg
     from kairos_quant.long_gap_recovery import RecoveryStatus, recover_symbol
@@ -776,6 +1349,18 @@ async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
             )
             if not lock:
                 raise EpochError("EPOCH_WRITER_ALREADY_RUNNING")
+            boot_before = None
+            if boot_expected is not None:
+                boot_before = await boot_history_snapshot(connection)
+                if (
+                    boot_before["audit"] != boot_expected["tables"]["event_audit"]
+                    or boot_before["outbox"]
+                    != boot_expected["tables"]["message_outbox"]
+                    or boot_before["anchors"] != boot_expected["anchors"]
+                    or boot_before["original_prefix"]
+                    != boot_expected["original_prefix"]
+                ):
+                    raise EpochError("BOOT_CATCHUP_PRESTATE_CONFLICT")
             values = await anchors(pool)
             required = required_bars(values, end)
             if required > (MAX_PENDING if publish else MAX_BARS):
@@ -856,13 +1441,43 @@ async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
                         },
                     )
 
-                await asyncio.gather(*(one(s) for s in SYMBOLS))
+                if boot_expected is None:
+                    await asyncio.gather(*(one(s) for s in SYMBOLS))
+                else:
+                    async with asyncio.TaskGroup() as group:
+                        for symbol in SYMBOLS:
+                            group.create_task(one(symbol))
             if sum(totals.values()) != required:
                 raise EpochError("EXACT_APPEND_COUNT_REQUIRED")
-            if not publish and await connection.fetchval(
-                "SELECT count(*) FROM message_outbox"
+            if (
+                not publish
+                and boot_expected is None
+                and await connection.fetchval("SELECT count(*) FROM message_outbox")
             ):
                 raise EpochError("HISTORY_CREATED_OUTBOX_REJECTED")
+            if boot_expected is not None:
+                boot_after = await boot_history_snapshot(connection)
+                await validate_boot_audit_prefix(connection, boot_expected)
+                expected_counts = {
+                    symbol: boot_before["anchors"][symbol]["count"] + totals[symbol]
+                    for symbol in SYMBOLS
+                }
+                if (
+                    boot_after["outbox"] != boot_before["outbox"]
+                    or boot_after["original_prefix"] != boot_before["original_prefix"]
+                    or boot_after["audit"]["count"]
+                    != boot_before["audit"]["count"] + sum(totals.values())
+                    or any(
+                        boot_after["anchors"][symbol]["count"]
+                        != expected_counts[symbol]
+                        or boot_after["anchors"][symbol]["first_open_time_ms"]
+                        != boot_before["anchors"][symbol]["first_open_time_ms"]
+                        or boot_after["anchors"][symbol]["last_open_time_ms"]
+                        != end - MINUTE
+                        for symbol in SYMBOLS
+                    )
+                ):
+                    raise EpochError("BOOT_CATCHUP_POSTSTATE_CONFLICT")
             await connection.execute("SELECT pg_advisory_unlock(4907627681104115019)")
         return {
             "state": "CURRENT_BARS_APPENDED"
@@ -871,6 +1486,17 @@ async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
             "appended": totals,
             "through_exclusive_ms": end,
             "maximum_bars": MAX_PENDING if publish else MAX_BARS,
+            **(
+                {
+                    "pre_catchup_audit_rows": boot_before["audit"]["count"],
+                    "post_catchup_audit_rows": boot_after["audit"]["count"],
+                    "outbox_preserved": True,
+                    "original_prefix_preserved": True,
+                    "pre_catchup_prefix_preserved": True,
+                }
+                if boot_expected is not None
+                else {}
+            ),
         }
     finally:
         await pool.close()
@@ -1214,6 +1840,14 @@ async def dispatch(mode: str, config: dict, output: Path) -> dict:
         return await rotate_history(config)
     if mode == "history-state":
         return await history_state(config)
+    if mode == "boot-state":
+        return await boot_state(config)
+    if mode == "boot-verify-restore":
+        return await boot_verify_restore(config)
+    if mode == "boot-catchup":
+        return await boot_catchup(config, output)
+    if mode == "boot-redis-state":
+        return await boot_redis_state(config)
     if mode == "catchup":
         return await recover(
             config, publish=False, status_path=output / "progress.json"

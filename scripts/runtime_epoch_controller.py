@@ -276,6 +276,24 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         "catchup": common | {"history_password", "end_exclusive_ms", "maximum_bars"},
         "rotate-history": common | {"admin_password", "history_password"},
         "history-state": common | {"admin_password"},
+        "boot-state": common | {"admin_password"},
+        "boot-redis-state": common
+        | {
+            "producer_password",
+            "consumer_password",
+            "redis_producer_password",
+            "redis_consumer_password",
+        },
+        "boot-catchup": common
+        | {"history_password", "end_exclusive_ms", "maximum_bars", "expected_seed"},
+        "boot-verify-restore": common
+        | {
+            "admin_password",
+            "restore_host",
+            "restore_database",
+            "restore_admin_password",
+            "expected_seed",
+        },
         "verify-restore": common
         | {
             "admin_password",
@@ -315,7 +333,7 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
     for key in secret_fields:
         if not isinstance(value[key], str) or len(value[key]) < 32:
             raise Rejected("NEW_EPOCH_SECRET_REQUIRED")
-    if mode == "catchup":
+    if mode in {"catchup", "boot-catchup"}:
         if type(value["end_exclusive_ms"]) is not int or value["end_exclusive_ms"] <= 0:
             raise Rejected("CLOSED_END_EXCLUSIVE_REQUIRED")
         if (
@@ -328,7 +346,7 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         or not isinstance(value["seed_expectation"], dict)
     ):
         raise Rejected("PINNED_SEED_PROVENANCE_REQUIRED")
-    if mode == "verify-restore" and (
+    if mode in {"verify-restore", "boot-verify-restore"} and (
         value["restore_host"] != "kairos-epoch-" + value["owner"][:12] + "-restore"
         or value["restore_database"]
         != "kairos_recovery_" + value["owner"][:12] + "_epochrestore"
@@ -492,6 +510,10 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "rotate-history",
         "verify-restore",
         "history-state",
+        "boot-state",
+        "boot-redis-state",
+        "boot-catchup",
+        "boot-verify-restore",
         "qualify",
         "serve",
     }:
@@ -1437,7 +1459,7 @@ class EpochController:
         timeout = (
             ""
             if mode == "serve"
-            else ("1800" if mode in {"catchup", "qualify"} else "600")
+            else ("1800" if mode in {"catchup", "boot-catchup", "qualify"} else "600")
         )
         run = (
             "exec " + " ".join(invocation)
@@ -1518,7 +1540,8 @@ class EpochController:
                 raise Rejected("NONTRADING_SERVE_DID_NOT_REMAIN_RUNNING")
             return {"state": "RUNNING_NONTRADING", "container": name}
         result = self.docker(
-            ["wait", name], seconds=1810 if mode in {"catchup", "qualify"} else 610
+            ["wait", name],
+            seconds=1810 if mode in {"catchup", "boot-catchup", "qualify"} else 610,
         )
         if result.strip() != "0":
             raise Rejected("WORKER_MODE_FAILED_" + mode.upper())
@@ -1536,6 +1559,10 @@ class EpochController:
             "qualify": "NONTRADING_RUNTIME_QUALIFIED",
             "rotate-history": "HISTORY_CREDENTIAL_ROTATED",
             "history-state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
+            "boot-state": "PASS_BOOT_STATE",
+            "boot-redis-state": "PASS_BOOT_REDIS_STATE",
+            "boot-catchup": "AUDIT_ONLY_CATCHUP_COMPLETE",
+            "boot-verify-restore": "PASS_BOOT_ISOLATED_RESTORE",
         }
         if (
             not isinstance(receipt, dict)
@@ -2353,8 +2380,17 @@ class EpochController:
         operation["sha256"] = _sha(backup)
         return operation
 
-    def backup_and_verify(self, *, seed: dict, restore_password: str, tag: str) -> str:
+    def backup_and_verify(
+        self,
+        *,
+        seed: dict,
+        restore_password: str,
+        tag: str,
+        verification_mode: str = "verify-restore",
+    ) -> str:
         """Backup only the owned target and compare a disposable exact restore."""
+        if verification_mode not in {"verify-restore", "boot-verify-restore"}:
+            raise Rejected("EXACT_BACKUP_VERIFICATION_MODE_REQUIRED")
         backup = self.work / ("epoch-history-" + tag + ".dump")
         operation = self.stream_private_pg_dump(
             backup=backup, database="kairos_epoch_" + self.owner[:12]
@@ -2381,7 +2417,7 @@ class EpochController:
             "kairos_recovery_" + self.owner[:12] + "_epochrestore",
         )
         verification = self.phase(
-            "verify-restore",
+            verification_mode,
             {
                 "owner": self.owner,
                 "database": "kairos_epoch_" + self.owner[:12],

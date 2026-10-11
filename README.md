@@ -484,6 +484,36 @@ second clone restore drill. Its signed `PASS_CLONE_ONLY` receipt always records
 authorizes source migration, source quarantine, consumer restart, PAPER, alpha,
 or LIVE; the next gate remains a separately reviewed target-role/primary change.
 
+## Guarded non-trading epoch boot recovery
+
+`scripts/runtime_epoch_boot.py` is scoped to the one accepted CLOSED_BAR-only
+epoch. The Windows launcher and `Install-NonTradingEpochBootTask.ps1` bind its
+exact signed, clean `main` revision, private input hashes and three existing
+container IDs. Docker restart policies stay `no`; the task runs once after the
+current user's Windows logon, waits for the local Linux engine, and never starts
+Docker Desktop or changes its settings. This is not a headless host-boot service.
+
+After an outage it checks completed publication/inbox identities, all 32 public
+tables, sequences, five contiguous bar chains and the original immutable prefix.
+A fresh bounded backup must restore exactly in an owned disposable clone and
+pass heap/B-tree checks. Missed bars are appended audit-only through the existing
+restricted history identity, with the complete pre-outage audit prefix and all
+queues/sequences preserved. Another verified backup precedes bounded final-tail
+catch-up, read-only Redis receipt/group checks and restart of the **same** accepted
+bar worker. Downtime history is not republished as live events.
+
+Only the three exact epoch containers may be started. The pinned, already-running
+isolated `kairos-shadow-gate` test PostgreSQL may coexist untouched, without host
+ports or shared networks; any other Kairos service or identity/isolation drift
+blocks startup. The protected old PAPER database/Redis and their unresolved queue
+remain stopped and are never connected to or modified by this path.
+
+An exclusive durable latch prevents duplicate or automatic retries. A failed run
+keeps its receipts and forensic resources for operator review. Source or private
+input changes require an explicitly reviewed new binding; the installed task
+does not silently adopt new code. This path never enables strategies, LLM/API
+calls, EVEDEX, PAPER/LIVE or any trading readiness flag.
+
 ## Known qualification boundary
 
 Static checks and synthetic tests cannot validate real provider credentials or guarantee
