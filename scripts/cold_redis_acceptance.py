@@ -793,7 +793,7 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
                 json.dumps({"state": "COPY_VERIFIED", "prepared": True}, sort_keys=True)
             )
             return 0
-        if mode == "manifest-only":
+        if mode in {"manifest-only", "manifest-aof-cache"}:
             stage = "manifest_source"
             source = Path("/source")
             manifest = _manifest_tree(source)
@@ -803,11 +803,17 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
                     "source Redis volume is empty or exceeds the copy-size bound"
                 )
             stage = "manifest_persistence"
+            cache_metadata = (
+                {"cache_stable_metadata_sha256": _cache_stable_metadata(source)}
+                if mode == "manifest-aof-cache"
+                else {}
+            )
             print(
                 json.dumps(
                     {
                         "state": "COPY_VERIFIED",
                         **manifest,
+                        **cache_metadata,
                         "persistence": _persistence_layout(
                             source, require_root_rdb=historical_rdb_only
                         ),
@@ -937,6 +943,48 @@ def _manifest_tree(root: Path) -> dict[str, Any]:
         "manifest_sha256": _sha256_bytes(_canonical(rows)),
         "content_sha256": _sha256_bytes(_canonical(content_rows)),
     }
+
+
+def _cache_stable_metadata(root: Path) -> str:
+    """Exact epoch tree; root RDB may refresh, reads may update access times."""
+    expected = {
+        "appendonlydir",
+        "appendonlydir/appendonly.aof.manifest",
+        "appendonlydir/appendonly.aof.1.base.rdb",
+        "appendonlydir/appendonly.aof.1.incr.aof",
+        "dump.rdb",
+    }
+    actual = {path.relative_to(root).as_posix() for path in root.rglob("*")}
+    if actual != expected:
+        raise ColdRedisError("cache proof requires the exact four-file epoch tree")
+    rows = []
+    root_info = root.lstat()
+    if root.is_symlink() or not root.is_dir():
+        raise ColdRedisError("cache proof requires a plain volume root")
+    rows.append(
+        {
+            "path": ".",
+            "mode": root_info.st_mode & 0o7777,
+            "uid": root_info.st_uid,
+            "gid": root_info.st_gid,
+        }
+    )
+    for relative in sorted(expected):
+        path = root / relative
+        info = path.lstat()
+        kind = "directory" if relative == "appendonlydir" else "file"
+        if path.is_symlink() or not (
+            path.is_dir() if kind == "directory" else path.is_file()
+        ):
+            raise ColdRedisError("cache proof contains a linked or special path")
+        row = _metadata_row(root, path, info, kind)
+        # Read-only directory traversal can update atime; it is not an
+        # authority/security field. All non-cache mtime/ctime stay bound.
+        row.pop("atime_ns")
+        if relative == "dump.rdb":
+            row = {key: row[key] for key in ("path", "kind", "mode", "uid", "gid")}
+        rows.append(row)
+    return _digest(rows)
 
 
 def _root_rdb_metadata(root: Path, *, required: bool) -> dict[str, Any] | None:
@@ -2316,7 +2364,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--native-inspection", type=Path)
     parser.add_argument("--work-root", type=Path, default=ROOT)
     parser.add_argument(
-        "--worker", choices=("copy-hash", "manifest-only", "prepare-target", "observe")
+        "--worker",
+        choices=(
+            "copy-hash",
+            "manifest-only",
+            "manifest-aof-cache",
+            "prepare-target",
+            "observe",
+        ),
     )
     parser.add_argument("worker_config", nargs="?", type=Path)
     args = parser.parse_args(argv)
@@ -2329,10 +2384,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.worker == "prepare-target":
         return _run_worker_bounded(lambda: _copy_worker("prepare-target"), seconds=30)
-    if args.worker == "manifest-only":
+    if args.worker in {"manifest-only", "manifest-aof-cache"}:
+        if args.worker == "manifest-aof-cache" and args.historical_root_rdb_only:
+            raise ColdRedisError("epoch cache proof cannot use historical RDB mode")
         return _run_worker_bounded(
             lambda: _copy_worker(
-                "manifest-only", historical_rdb_only=args.historical_root_rdb_only
+                args.worker, historical_rdb_only=args.historical_root_rdb_only
             ),
             seconds=60,
         )

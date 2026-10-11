@@ -70,6 +70,55 @@ def _aof_inventory() -> dict:
 
 
 class RedisAofRecoveryTests(unittest.TestCase):
+    def test_async_root_cache_refresh_does_not_weaken_aof_or_file_inventory(self):
+        persistence = {
+            "format": "REDIS_MULTIPART_AOF",
+            "aof_manifest_sha256": recovery.OPEN_SEGMENT_MANIFEST_SHA256,
+            "aof_file_hashes": recovery.EXACT_SEGMENT_FILES,
+            "rdb_present": True,
+        }
+        before = {
+            "state": "COPY_VERIFIED",
+            "file_count": 4,
+            "total_bytes": 3257093,
+            "manifest_sha256": "a" * 64,
+            "content_sha256": "b" * 64,
+            "cache_stable_metadata_sha256": "e" * 64,
+            "persistence": persistence,
+        }
+        after = {
+            **before,
+            "total_bytes": 4175397,
+            "manifest_sha256": "c" * 64,
+            "content_sha256": "d" * 64,
+        }
+        proof = recovery.validate_readonly_manifest_stability(before, after)
+        self.assertIs(proof["root_rdb_cache_refreshed"], True)
+        self.assertIs(proof["authoritative_aof_byte_identical"], True)
+        self.assertIs(
+            recovery.validate_readonly_manifest_stability(before, before)[
+                "root_rdb_cache_refreshed"
+            ],
+            False,
+        )
+        for mutation in (
+            {"file_count": 5},
+            {"total_bytes": recovery.MAX_AOF_BYTES + 1},
+            {"unknown_file": True},
+            {"cache_stable_metadata_sha256": "f" * 64},
+            {"persistence": {**persistence, "rdb_present": False}},
+            {
+                "persistence": {
+                    **persistence,
+                    "aof_manifest_sha256": recovery.CLOSED_SEGMENT_MANIFEST_SHA256,
+                }
+            },
+        ):
+            with self.assertRaises(epoch.Rejected):
+                recovery.validate_readonly_manifest_stability(
+                    before, {**after, **mutation}
+                )
+
     def test_canonical_proofs_round_trip_without_dropping_admission_identity(self):
         for clone in (False, True):
             proof = recovery.validate_redis_worker_proof(
@@ -445,8 +494,10 @@ class RedisAofRecoveryTests(unittest.TestCase):
             "rdb_present": True,
         }
         manifest = {
+            "state": "COPY_VERIFIED",
             "manifest_sha256": "3" * 64,
             "content_sha256": "2" * 64,
+            "cache_stable_metadata_sha256": "5" * 64,
             "file_count": 4,
             "total_bytes": 100,
             "persistence": persistence,
@@ -481,7 +532,7 @@ class RedisAofRecoveryTests(unittest.TestCase):
         )
         controller._make_snapshots = lambda: calls.append("snapshot")
         controller._source_view_fingerprint = lambda value: {"redis": "unchanged"}
-        controller.cold_manifest = lambda volume, tag: (
+        controller.cold_manifest = lambda volume, tag, **kwargs: (
             calls.append("manifest:" + tag) or manifest
         )
         controller.aof_inventory = lambda volume, tag: (

@@ -319,6 +319,60 @@ def validate_aof_inventory(value: object, *, worker_proof: dict | None = None) -
     }
 
 
+def validate_readonly_manifest_stability(before: dict, after: dict) -> dict:
+    """AOF stays byte-identical; Redis may asynchronously refresh root RDB cache.
+
+    The cold worker admits exactly three authoritative AOF files plus the
+    existing root dump.rdb. Only its cache contribution may change; both full
+    hashes remain evidence. Pristine backup checks never use this relaxation.
+    """
+    fields = {
+        "state",
+        "file_count",
+        "total_bytes",
+        "manifest_sha256",
+        "content_sha256",
+        "persistence",
+        "cache_stable_metadata_sha256",
+    }
+    for value in (before, after):
+        if (
+            not isinstance(value, dict)
+            or set(value) != fields
+            or value.get("state") != "COPY_VERIFIED"
+            or value.get("file_count") != 4
+            or type(value.get("total_bytes")) is not int
+            or not 0 < value["total_bytes"] <= MAX_AOF_BYTES
+            or not isinstance(value.get("persistence"), dict)
+            or value["persistence"].get("rdb_present") is not True
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(value.get(key, ""))) is None
+                for key in (
+                    "manifest_sha256",
+                    "content_sha256",
+                    "cache_stable_metadata_sha256",
+                )
+            )
+        ):
+            reject("EXACT_READONLY_REDIS_FOUR_FILE_MANIFEST_REQUIRED")
+    if (
+        before["persistence"] != after["persistence"]
+        or before["cache_stable_metadata_sha256"]
+        != after["cache_stable_metadata_sha256"]
+    ):
+        reject("ORIGINAL_REDIS_CHANGED_DURING_READONLY_VERIFICATION")
+    return {
+        "root_rdb_cache_refreshed": before != after,
+        "before_full_manifest_sha256": before["manifest_sha256"],
+        "after_full_manifest_sha256": after["manifest_sha256"],
+        "before_content_sha256": before["content_sha256"],
+        "after_content_sha256": after["content_sha256"],
+        "authoritative_aof_byte_identical": True,
+        "noncache_tree_and_security_metadata_identical": True,
+        "cache_stable_metadata_sha256": before["cache_stable_metadata_sha256"],
+    }
+
+
 def validate_redis_worker_proof(value: object, *, clone: bool) -> dict:
     auth = value.get("auth_proofs") if isinstance(value, dict) else None
     expected_auth = {
@@ -508,12 +562,16 @@ class RedisAofRecoveryController(boot.BootController):
         self.offline_helper_ids.pop(name, None)
         return value
 
-    def cold_manifest(self, volume: str, tag: str) -> dict:
+    def cold_manifest(
+        self, volume: str, tag: str, *, cache_proof: bool = False
+    ) -> dict:
         if self.cold_snapshot is None:
             reject("PINNED_COLD_REDIS_WORKER_REQUIRED")
         name = PREFIX + "-manifest-" + tag + "-" + self.run_id[:8]
         argv = cold._worker_command(
-            "manifest-only", source=volume, script_path=self.cold_snapshot
+            "manifest-aof-cache" if cache_proof else "manifest-only",
+            source=volume,
+            script_path=self.cold_snapshot,
         )
         argv[1:1] = ["--user=999:999"]
         expected = {
@@ -1020,7 +1078,7 @@ class RedisAofRecoveryController(boot.BootController):
         task_before = self.preserved["task_state"]
         self._make_snapshots()
         self.original_manifest_before = self.cold_manifest(
-            self.names["redis_volume"], "verify-before"
+            self.names["redis_volume"], "verify-before", cache_proof=True
         )
         if self.original_manifest_before.get("file_count") != 4:
             reject("ORIGINAL_REDIS_VOLUME_DIFFERS_FROM_QUALIFIED_SOURCE")
@@ -1050,12 +1108,17 @@ class RedisAofRecoveryController(boot.BootController):
         if any(original_proof[key] != clone_proof[key] for key in compared):
             reject("ORIGINAL_REDIS_STATE_DIFFERS_FROM_QUALIFIED_CLONE")
         after_aof = self.aof_inventory(self.names["redis_volume"], "verify-after")
-        after_manifest = self.cold_manifest(self.names["redis_volume"], "verify-after")
+        after_manifest = self.cold_manifest(
+            self.names["redis_volume"], "verify-after", cache_proof=True
+        )
         validate_authoritative_persistence(
             after_manifest.get("persistence"), original_authority
         )
-        if after_aof != current_aof or after_manifest != self.original_manifest_before:
+        if after_aof != current_aof:
             reject("ORIGINAL_REDIS_CHANGED_DURING_READONLY_VERIFICATION")
+        cache_proof = validate_readonly_manifest_stability(
+            self.original_manifest_before, after_manifest
+        )
         resources_after = self.validate_resources(allow_running=True)
         if self._source_view_fingerprint(resources_after) != source_fingerprint:
             reject("ORIGINAL_REDIS_CONTAINER_METADATA_CHANGED")
@@ -1080,6 +1143,7 @@ class RedisAofRecoveryController(boot.BootController):
             "candidate_acl_sha256": accepted["candidate_acl_sha256"],
             "redis_proof": original_proof,
             "aof_inventory": current_aof,
+            "original_manifest_cache_proof": cache_proof,
             "original_redis_stopped_or_restarted": False,
             "primary_acl_changed_by_this_run": False,
             "trading_started": False,

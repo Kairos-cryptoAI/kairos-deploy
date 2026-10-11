@@ -814,6 +814,67 @@ class ColdRedisAcceptanceTests(unittest.TestCase):
                 cold._manifest_tree(source)["manifest_sha256"],
             )
 
+    def test_epoch_cache_metadata_rejects_aof_metadata_and_empty_directories(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "appendonlydir"
+            directory.mkdir()
+            for name in (
+                "appendonly.aof.manifest",
+                "appendonly.aof.1.base.rdb",
+                "appendonly.aof.1.incr.aof",
+            ):
+                (directory / name).write_bytes(b"unchanged authoritative bytes")
+            cache = root / "dump.rdb"
+            cache.write_bytes(b"old cache")
+            before = cold._cache_stable_metadata(root)
+            cache.write_bytes(b"new much larger cache")
+            self.assertEqual(cold._cache_stable_metadata(root), before)
+            segment = directory / "appendonly.aof.1.incr.aof"
+            info = segment.stat()
+            os.utime(segment, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+            self.assertNotEqual(cold._cache_stable_metadata(root), before)
+            extra = root / "unapproved-empty-directory"
+            extra.mkdir()
+            with self.assertRaises(cold.ColdRedisError):
+                cold._cache_stable_metadata(root)
+
+    def test_epoch_cache_metadata_digest_keeps_security_and_all_noncache_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "appendonlydir"
+            directory.mkdir()
+            for name in (
+                "appendonly.aof.manifest",
+                "appendonly.aof.1.base.rdb",
+                "appendonly.aof.1.incr.aof",
+            ):
+                (directory / name).write_bytes(b"unchanged")
+            (root / "dump.rdb").write_bytes(b"cache")
+            with mock.patch.object(cold, "_digest", side_effect=lambda rows: rows):
+                rows = cold._cache_stable_metadata(root)
+            mapped = {row["path"]: row for row in rows}
+            self.assertEqual(
+                set(mapped["dump.rdb"]), {"path", "kind", "mode", "uid", "gid"}
+            )
+            self.assertEqual(set(mapped["."]), {"path", "mode", "uid", "gid"})
+            for path in mapped.keys() - {".", "dump.rdb"}:
+                self.assertEqual(
+                    set(mapped[path]),
+                    {
+                        "path",
+                        "kind",
+                        "size",
+                        "mode",
+                        "uid",
+                        "gid",
+                        "mtime_ns",
+                        "ctime_ns",
+                    },
+                )
+
     def test_redis_clone_is_loopback_only_and_resource_bounded(self) -> None:
         args = cold._metadata_only_docker_command(
             "owner", "owned-volume", "owned-redis", cold.SOURCE_IMAGE_ID
