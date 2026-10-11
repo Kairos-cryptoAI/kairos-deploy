@@ -106,6 +106,57 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_windows_task_user_aliases_normalize_to_sid_but_other_drift_is_refused(
+        self,
+    ) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows account SID translation requires Windows")
+        executable = shutil.which("powershell") or shutil.which("pwsh")
+        if executable is None:
+            self.skipTest("PowerShell is not installed")
+        command = (
+            "$tokens=$null; $errors=$null; "
+            f"$ast=[System.Management.Automation.Language.Parser]::ParseFile('{INSTALLER.as_posix()}',"
+            "[ref]$tokens,[ref]$errors); "
+            "$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] "
+            "-and $node.Name -in @('Test-SameWindowsAccount','Test-EquivalentTask')},$false) "
+            "| ForEach-Object {Invoke-Expression $_.Extent.Text}; "
+            "$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); "
+            "$task=[pscustomobject]@{Actions=@([pscustomobject]@{Execute='powershell.exe';Arguments='safe';WorkingDirectory='repo'}); "
+            "Triggers=@([pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskLogonTrigger'};UserId=$identity.Name;Delay='PT30S'}); "
+            "Principal=[pscustomobject]@{UserId=$identity.Name;LogonType='Interactive';RunLevel='Limited'}; "
+            "Settings=[pscustomobject]@{ExecutionTimeLimit='PT1H15M';MultipleInstances='IgnoreNew';RestartCount=0;Hidden=$true;StartWhenAvailable=$false}}; "
+            "function Assert-TaskMatch([bool]$Expected) { "
+            "if ((Test-EquivalentTask -Task $task -PowerShellPath 'powershell.exe' -Arguments 'safe' "
+            "-WorkingDirectory 'repo' -UserName $identity.Name) -ne $Expected) {throw 'Task equivalence mismatch'} }; "
+            "$aliases=@($identity.Name,$identity.User.Value,$identity.Name.Split('\\')[-1]); "
+            "foreach($alias in $aliases){$task.Principal.UserId=$alias;$task.Triggers[0].UserId=$alias;Assert-TaskMatch $true}; "
+            "$task.Principal.UserId='S-1-5-18';Assert-TaskMatch $false;$task.Principal.UserId=$identity.Name; "
+            "$task.Principal.RunLevel='Highest';Assert-TaskMatch $false;$task.Principal.RunLevel='Limited'; "
+            "$task.Settings.RestartCount=1;Assert-TaskMatch $false;$task.Settings.RestartCount=0; "
+            "$task.Settings.MultipleInstances='Parallel';Assert-TaskMatch $false;$task.Settings.MultipleInstances='IgnoreNew'; "
+            "$task.Settings.StartWhenAvailable=$true;Assert-TaskMatch $false;$task.Settings.StartWhenAvailable=$false; "
+            "$task.Actions[0].Arguments='changed';Assert-TaskMatch $false; "
+            "Write-Output 'WINDOWS_TASK_SID_AND_DEFINITION_GUARDS_PASS'"
+        )
+        result = subprocess.run(
+            [
+                executable,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("WINDOWS_TASK_SID_AND_DEFINITION_GUARDS_PASS", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

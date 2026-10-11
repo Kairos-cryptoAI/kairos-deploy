@@ -167,6 +167,26 @@ function ConvertTo-WindowsCommandLineArgument {
     return $builder.ToString()
 }
 
+function Test-SameWindowsAccount {
+    param([string]$First, [string]$Second)
+
+    try {
+        $ids = @($First, $Second) | ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) { throw 'Task user identity is missing' }
+            if ($_ -match '^S-\d-\d+(?:-\d+)+$') {
+                [System.Security.Principal.SecurityIdentifier]::new($_).Value
+            }
+            else {
+                [System.Security.Principal.NTAccount]::new($_).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            }
+        }
+        return $ids.Count -eq 2 -and [string]::Equals($ids[0], $ids[1], [System.StringComparison]::Ordinal)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-EquivalentTask {
     param($Task, [string]$PowerShellPath, [string]$Arguments, [string]$WorkingDirectory, [string]$UserName)
 
@@ -178,8 +198,8 @@ function Test-EquivalentTask {
     return (
         [string]::Equals([string]$action.Execute, $PowerShellPath, [System.StringComparison]::OrdinalIgnoreCase) -and
         [string]$action.Arguments -ceq $Arguments -and [string]$action.WorkingDirectory -ceq $WorkingDirectory -and
-        $trigger.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and [string]$trigger.UserId -ieq $UserName -and [string]$trigger.Delay -eq 'PT30S' -and
-        [string]$principal.UserId -ieq $UserName -and [string]$principal.LogonType -eq 'Interactive' -and [string]$principal.RunLevel -eq 'Limited' -and
+        $trigger.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and (Test-SameWindowsAccount -First ([string]$trigger.UserId) -Second $UserName) -and [string]$trigger.Delay -eq 'PT30S' -and
+        (Test-SameWindowsAccount -First ([string]$principal.UserId) -Second $UserName) -and [string]$principal.LogonType -eq 'Interactive' -and [string]$principal.RunLevel -eq 'Limited' -and
         [string]$settings.ExecutionTimeLimit -eq 'PT1H15M' -and [string]$settings.MultipleInstances -eq 'IgnoreNew' -and
         [int]$settings.RestartCount -eq 0 -and [bool]$settings.Hidden -and -not [bool]$settings.StartWhenAvailable
     )
