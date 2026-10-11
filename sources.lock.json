@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "785cbd9fa6f43188e258183d3072691479cebb63",
+      "revision": "009ba69a5a10e52417d9a3d161039d31a2fa2e3d",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
@@ -43,13 +43,13 @@
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "ea338bbbd4a96ec59487e0050762c0c71776d5dd",
+      "revision": "983bcc0a494e901b25d94a87fd1d2f701ff6c07d",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
     "macro-strategist": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist",
-      "revision": "e6e7725e85d01ae8d13c1bb7ce2649d0331a2d53",
+      "revision": "b34ed2715d2a5f3375ae513b80f88573afe2d253",
       "package_dir": "kairos_macro",
       "command": "kairos-macro-strategist"
     },
