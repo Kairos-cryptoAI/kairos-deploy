@@ -24,6 +24,7 @@ else:
     import runtime_epoch_controller as epoch
 
 fresh = epoch.fresh
+IS_WINDOWS = os.name == "nt"
 OWNER = epoch.CONTINUATION_OWNER
 ROOT = Path("D:/Kairos/runtime/epoch-boot-20261011")
 PARENT = epoch.ROOT / ("run-" + OWNER)
@@ -551,7 +552,7 @@ def main(argv=None) -> int:
                 )
             )
             return 0
-        if os.name != "nt" or re.fullmatch(r"[0-9]{15,20}", args.boot_id or "") is None:
+        if not IS_WINDOWS or re.fullmatch(r"[0-9]{15,20}", args.boot_id or "") is None:
             raise epoch.Rejected("WINDOWS_BOOT_ID_REQUIRED")
         if (
             fresh.safe(args.binding) != ROOT / "binding.json"

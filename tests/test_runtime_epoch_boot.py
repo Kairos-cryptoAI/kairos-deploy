@@ -398,7 +398,7 @@ class BootAdmissionTests(unittest.TestCase):
             with (
                 mock.patch.object(boot, "ROOT", root),
                 mock.patch.object(boot, "LEASE", lease),
-                mock.patch.object(boot.os, "name", "nt"),
+                mock.patch.object(boot, "IS_WINDOWS", True),
                 mock.patch.object(boot, "validate_binding"),
                 mock.patch.object(boot, "verify_source"),
                 mock.patch.object(boot, "BootController") as controller,
