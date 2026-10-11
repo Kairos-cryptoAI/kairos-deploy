@@ -23,6 +23,11 @@ boot = recovery.boot
 RUN = "5bfd8f013eb74f08b93ba8381dec8350"
 WORK = recovery.ROOT / ("run-" + RUN)
 LATCH = recovery.ROOT / "retained-adjudication.active"
+TERMINAL_REVIEW_LATCH = recovery.ROOT / "retained-terminal-manifest-review.active"
+PREVIOUS_ADJUDICATION = WORK / "readonly-adjudication-8c2d5ad7b19840248be1c9abe52e9ca9"
+PREVIOUS_REVIEW_FAILURE_SHA256 = (
+    "24da7103a9622c87edc0ceafe86169b5307593a8b3f22f3504ecc644d2adcfaf"
+)
 WORKER_REVISION = "7aaf2ee27a2a71603558925d2323932fa13a201a"
 CLONE_ID = "9ff3b898369b9eb84bb38c5ab8ea88bd426ed31f3d84e2dd658122e59f9253f3"
 FAILURE_SHA256 = "869bd34e81b4d1ecc610af39e8b08b83a163b3f13b4e38995f48710a976416d6"
@@ -272,6 +277,7 @@ def adjudicate(
         named_roles_acl_byte_identical=True,
         cold_worker_sha256=epoch.fresh.sha(controller.cold_snapshot),
         aof_inventory_module_sha256=epoch.fresh.sha(controller.aof_snapshot),
+        replayed_clone_manifest=replayed,
     )
     return {
         "schema_version": 1,
@@ -296,7 +302,7 @@ def adjudicate(
         "clone_container": recovery.CLONE_CONTAINER,
         "clone_container_id": CLONE_ID,
         "retained_evidence_adjudication": {
-            "result": "PASS_MOUNT_ORDER_ONLY_ADJUDICATION",
+            "result": "PASS_RETAINED_CLONE_ADJUDICATION",
             "failure_sha256": FAILURE_SHA256,
             "worker_source_revision": WORKER_REVISION,
             "source_revision": controller.expected_revision,
@@ -320,9 +326,10 @@ def adjudicate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adjudicate-retained", action="store_true")
+    parser.add_argument("--review-closed-segment", action="store_true")
     parser.add_argument("--expected-revision")
     args = parser.parse_args(argv)
-    if not args.adjudicate_retained:
+    if not args.adjudicate_retained and not args.review_closed_segment:
         print(
             json.dumps(
                 {
@@ -341,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
         if re.fullmatch(r"[0-9a-f]{40}", args.expected_revision or "") is None:
             recovery.reject("EXPECTED_SIGNED_MAIN_REVISION_REQUIRED")
         boot.verify_source(args.expected_revision)
+        if args.adjudicate_retained and args.review_closed_segment:
+            recovery.reject("SELECT_EXACTLY_ONE_RETAINED_REVIEW_ACTION")
         boot.git("verify-commit", WORKER_REVISION)
         if (
             boot.git("log", "-1", "--format=%G? %GF", WORKER_REVISION)
@@ -349,26 +358,36 @@ def main(argv: list[str] | None = None) -> int:
             recovery.reject("SIGNED_RETAINED_WORKER_REVISION_REQUIRED")
         values, lease = load_evidence()
         validate_observations(values)
+        review_latch = TERMINAL_REVIEW_LATCH if args.review_closed_segment else LATCH
+        if args.review_closed_segment and (
+            epoch.fresh.sha(LATCH)
+            != "a51191a64c20621785a8a803f08a57cd641befff7a3abef0af5c1bde33ac770d"
+            or epoch.fresh.sha(PREVIOUS_ADJUDICATION / "adjudication-failure.json")
+            != PREVIOUS_REVIEW_FAILURE_SHA256
+            or epoch.fresh.sha(PREVIOUS_ADJUDICATION / "cli-050.stdout")
+            != "c5328f4697f23898f27d8e11e442215cd7183309ebc0c2d84bc8d96abd5bad34"
+        ):
+            recovery.reject("EXACT_REVIEWED_TERMINAL_MANIFEST_FAILURE_REQUIRED")
         receipt = WORK / "redis-aof-clone-qualification.json"
         if (
             receipt.exists()
             or receipt.is_symlink()
-            or LATCH.exists()
-            or LATCH.is_symlink()
+            or review_latch.exists()
+            or review_latch.is_symlink()
         ):
             recovery.reject("RETAINED_ADJUDICATION_ALREADY_ATTEMPTED")
         identifier = uuid.uuid4().hex
         work = WORK / ("readonly-adjudication-" + identifier)
         epoch._private_directory(work)
         recovery._create_only(
-            LATCH,
+            review_latch,
             json.dumps(
                 {"owner": recovery.OWNER, "run": RUN, "adjudication_run": identifier},
                 sort_keys=True,
             ).encode("ascii")
             + b"\n",
         )
-        adjudication_latch_bytes = LATCH.read_bytes()
+        adjudication_latch_bytes = review_latch.read_bytes()
         controller = recovery.RedisAofRecoveryController(
             recovery.OWNER,
             expected_revision=args.expected_revision,
@@ -378,8 +397,18 @@ def main(argv: list[str] | None = None) -> int:
             run_id=identifier,
         )
         result = adjudicate(controller, values, lease)
-        if LATCH.read_bytes() != adjudication_latch_bytes:
+        if review_latch.read_bytes() != adjudication_latch_bytes:
             recovery.reject("RETAINED_ADJUDICATION_LATCH_CHANGED")
+        if args.review_closed_segment:
+            result["retained_evidence_adjudication"].update(
+                previous_readonly_review_failure_sha256=PREVIOUS_REVIEW_FAILURE_SHA256,
+                previous_readonly_review_failure_preserved=True,
+                exact_terminal_annotation="endoffset 3256200",
+                reviewed_raw_manifest_hashes=[
+                    recovery.OPEN_SEGMENT_MANIFEST_SHA256,
+                    recovery.CLOSED_SEGMENT_MANIFEST_SHA256,
+                ],
+            )
         epoch.fresh.save(receipt, result)
         print(
             json.dumps(

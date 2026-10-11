@@ -44,6 +44,22 @@ MAX_SECONDS = 3600
 MAX_AOF_BYTES = 8 * 1024 * 1024
 EXPECTED_ROWS = 2220
 EXPECTED_STREAM = 2221
+OPEN_SEGMENT_MANIFEST_SHA256 = (
+    "c5ae0c02c2388c4f500bffe3590ba7687884e4ba6ad665bb9f2e8f3a68ce1e65"
+)
+CLOSED_SEGMENT_MANIFEST_SHA256 = (
+    "fb00f2179825f719a7ba600f7b9cf2d4624191af6bc9d90bef0cd8efc1fd1840"
+)
+EXACT_SEGMENT_FILES = [
+    {
+        "relative_path": "appendonlydir/appendonly.aof.1.base.rdb",
+        "sha256": "21d5885cd631bbc5b955de4e01b0245a85f1d6c66ff5ba68861ccc19bfe7ffdf",
+    },
+    {
+        "relative_path": "appendonlydir/appendonly.aof.1.incr.aof",
+        "sha256": "79d2a09bf0e204b92c50a9362566b7cffe67d70b27f6a12465b6d01d7f4183f8",
+    },
+]
 
 
 def reject(code: str) -> None:
@@ -222,7 +238,12 @@ def validate_copy_proof(value: object, *, source_manifest: dict) -> dict:
 
 
 def validate_authoritative_persistence(current: object, expected: object) -> dict:
-    """Bind AOF manifest/base/increment hashes, excluding mutable root dump.rdb."""
+    """Bind data bytes; admit only the measured same-segment shutdown endoffset.
+
+    Redis adds exactly `endoffset 3256200` to this frozen manifest on clean
+    shutdown. Both raw manifest hashes remain recorded; no other difference
+    or any base/increment byte change is admitted, even on another segment.
+    """
     if not isinstance(current, dict) or not isinstance(expected, dict):
         reject("REDIS_AOF_AUTHORITATIVE_PERSISTENCE_REQUIRED")
     files = current.get("aof_file_hashes")
@@ -232,9 +253,21 @@ def validate_authoritative_persistence(current: object, expected: object) -> dic
         or re.fullmatch(r"[0-9a-f]{64}", current["aof_manifest_sha256"]) is None
         or not isinstance(files, list)
         or len(files) < 2
-        or current != expected
     ):
         reject("REDIS_AOF_AUTHORITATIVE_PERSISTENCE_CHANGED")
+    if current != expected:
+        other_current = {k: v for k, v in current.items() if k != "aof_manifest_sha256"}
+        other_expected = {
+            k: v for k, v in expected.items() if k != "aof_manifest_sha256"
+        }
+        if (
+            other_current != other_expected
+            or current.get("rdb_present") is not True
+            or files != EXACT_SEGMENT_FILES
+            or {current.get("aof_manifest_sha256"), expected.get("aof_manifest_sha256")}
+            != {OPEN_SEGMENT_MANIFEST_SHA256, CLOSED_SEGMENT_MANIFEST_SHA256}
+        ):
+            reject("REDIS_AOF_AUTHORITATIVE_PERSISTENCE_CHANGED")
     return current
 
 
@@ -925,7 +958,7 @@ class RedisAofRecoveryController(boot.BootController):
             adjudication = accepted.get("retained_evidence_adjudication")
             if (
                 not isinstance(adjudication, dict)
-                or adjudication.get("result") != "PASS_MOUNT_ORDER_ONLY_ADJUDICATION"
+                or adjudication.get("result") != "PASS_RETAINED_CLONE_ADJUDICATION"
                 or adjudication.get("failure_sha256") != epoch.fresh.sha(failure_path)
                 or adjudication.get("clone_restarted") is not False
                 or adjudication.get("evidence_rewritten") is not False

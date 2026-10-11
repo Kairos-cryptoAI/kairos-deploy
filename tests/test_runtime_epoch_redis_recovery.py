@@ -335,6 +335,38 @@ class RedisAofRecoveryTests(unittest.TestCase):
             ):
                 recovery.validate_authoritative_persistence(changed, persistence)
 
+    def test_only_exact_frozen_manifest_shutdown_endoffset_is_admitted(self):
+        opened = {
+            "format": "REDIS_MULTIPART_AOF",
+            "aof_manifest_sha256": recovery.OPEN_SEGMENT_MANIFEST_SHA256,
+            "aof_file_hashes": recovery.EXACT_SEGMENT_FILES,
+            "rdb_present": True,
+        }
+        closed = {
+            **opened,
+            "aof_manifest_sha256": recovery.CLOSED_SEGMENT_MANIFEST_SHA256,
+        }
+        self.assertEqual(
+            recovery.validate_authoritative_persistence(closed, opened), closed
+        )
+        self.assertEqual(
+            recovery.validate_authoritative_persistence(opened, closed), opened
+        )
+        for mutation in (
+            {"aof_manifest_sha256": "0" * 64},
+            {"rdb_present": False},
+            {
+                "aof_file_hashes": [
+                    {**recovery.EXACT_SEGMENT_FILES[0], "sha256": "1" * 64},
+                    recovery.EXACT_SEGMENT_FILES[1],
+                ]
+            },
+        ):
+            with self.assertRaises(epoch.Rejected):
+                recovery.validate_authoritative_persistence(
+                    {**closed, **mutation}, opened
+                )
+
     def test_aof_inventory_requires_exact_replay_command_shape_and_matches_worker_ledger(
         self,
     ):
