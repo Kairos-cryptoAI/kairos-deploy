@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -64,6 +65,7 @@ def config(mode: str, **overrides: object) -> dict:
             "admin_password": HEX_SECRET,
             "history_password": "d" * 64,
         },
+        "history-state": {"admin_password": HEX_SECRET},
         "verify-restore": {
             "admin_password": HEX_SECRET,
             "restore_host": "kairos-epoch-0123456789ab-restore",
@@ -505,6 +507,7 @@ class RuntimeEpochControllerTests(unittest.TestCase):
             "seed",
             "catchup",
             "rotate-history",
+            "history-state",
             "verify-restore",
             "qualify",
             "serve",
@@ -516,6 +519,428 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                     epoch.validate_worker_config(
                         {**config(mode), "unexpected": "secret"}, mode=mode
                     )
+
+    def test_attempt_04_history_state_requires_exact_prefix_queues_and_anchor_totals(
+        self,
+    ):
+        last_open = epoch.CONTINUATION_04_ORIGINAL_LAST_OPEN_MS + 600 * epoch.MINUTE_MS
+        first_open = last_open - 10_000 * epoch.MINUTE_MS
+        anchors = {
+            symbol: {
+                "count": 35_270 if symbol != "XRPUSDT" else 35_268,
+                "first_open_time_ms": first_open,
+                "last_open_time_ms": last_open,
+                "last_close_time_ms": last_open + epoch.MINUTE_MS - 1,
+            }
+            for symbol in epoch.SYMBOLS
+        }
+        value = {
+            "owner": epoch.CONTINUATION_OWNER,
+            "mode": "history-state",
+            "new_epoch_database": "kairos_epoch_" + epoch.CONTINUATION_OWNER[:12],
+            "state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
+            "rows": epoch.CONTINUATION_04_CURRENT_AUDIT_ROWS,
+            "audit_table_sha256": "a" * 64,
+            "anchors": anchors,
+            "original_prefix": {
+                "rows": epoch.CONTINUATION_04_ORIGINAL_PREFIX_ROWS,
+                "audit_table_sha256": epoch.CONTINUATION_04_ORIGINAL_PREFIX_TABLE_SHA256,
+                "last_open_time_ms": epoch.CONTINUATION_04_ORIGINAL_LAST_OPEN_MS,
+            },
+            "outbox_rows": 0,
+            "inbox_rows": 0,
+            "orders_rows": 0,
+            "effects_rows": 0,
+            "matched_public_tables": 32,
+            "trading_started": False,
+        }
+        with (
+            patch.object(epoch, "CONTINUATION_04_CURRENT_AUDIT_SHA256", "a" * 64),
+            patch.object(epoch, "CONTINUATION_04_CURRENT_ANCHORS", anchors),
+        ):
+            self.assertEqual(
+                epoch.validate_attempt_04_history_state(
+                    value, owner=epoch.CONTINUATION_OWNER
+                ),
+                value,
+            )
+            for invalid in (
+                {**value, "outbox_rows": 1},
+                {**value, "matched_public_tables": 39},
+                {**value, "original_prefix": {**value["original_prefix"], "rows": 1}},
+                {
+                    **value,
+                    "anchors": {
+                        **anchors,
+                        "BTCUSDT": {**anchors["BTCUSDT"], "count": 35_269},
+                    },
+                },
+            ):
+                with self.assertRaises(epoch.Rejected):
+                    epoch.validate_attempt_04_history_state(
+                        invalid, owner=epoch.CONTINUATION_OWNER
+                    )
+
+    def test_attempt_04_failure_validator_pins_receipts_worker_config_and_dump(self):
+        with TemporaryDirectory() as directory:
+            attempt04 = Path(directory) / "continuation-04"
+            paths = {
+                "failure": attempt04 / "runtime-epoch-failure.json",
+                "operator": attempt04 / "operator.zip",
+                "dump": attempt04 / "epoch-history-precontinuation.dump",
+                "verify": attempt04
+                / "output-verify-restore-precontinuation"
+                / "verify-restore.json",
+                "rotation": attempt04
+                / "output-rotate-history-history-credential"
+                / "rotate-history.json",
+                "status": attempt04 / "output-catchup-continue-01" / "status.json",
+                "config": attempt04 / "config-catchup-continue-01.json",
+            }
+            for key in ("verify", "rotation", "status"):
+                paths[key].parent.mkdir(parents=True, exist_ok=True)
+            failure_value = {
+                "owner": epoch.CONTINUATION_OWNER,
+                "phase": "catchup-continue-01",
+                "error_category": "WORKER_MODE_FAILED_CATCHUP",
+                "active_lease_preserved": True,
+                "trading_started": False,
+            }
+            rotation_value = {
+                "owner": epoch.CONTINUATION_OWNER,
+                "state": "HISTORY_CREDENTIAL_ROTATED",
+                "credential_rotated": True,
+            }
+            for path, value, size in (
+                (paths["failure"], failure_value, 1_162),
+                (paths["rotation"], rotation_value, 258),
+            ):
+                payload = json.dumps(value, sort_keys=True).encode("utf-8")
+                self.assertLess(len(payload), size)
+                path.write_bytes(payload + b" " * (size - len(payload)))
+            paths["operator"].write_bytes(b"x" * 37_039)
+            with paths["dump"].open("wb") as stream:
+                stream.truncate(20_692_780)
+            paths["verify"].write_bytes(b"v" * 4_675)
+            paths["status"].write_bytes(b"s" * 204)
+            paths["config"].write_bytes(b"c" * 342)
+            hashes = {
+                paths["failure"]: epoch.CONTINUATION_04_FAILURE_SHA256,
+                paths["operator"]: epoch.CONTINUATION_04_OPERATOR_SHA256,
+                paths["dump"]: epoch.CONTINUATION_04_PREBACKUP_DUMP_SHA256,
+                paths["verify"]: epoch.CONTINUATION_04_PREBACKUP_VERIFY_SHA256,
+                paths["rotation"]: epoch.CONTINUATION_04_ROTATION_RECEIPT_SHA256,
+                paths["status"]: epoch.CONTINUATION_04_CATCHUP_STATUS_SHA256,
+                paths["config"]: epoch.CONTINUATION_04_CATCHUP_CONFIG_SHA256,
+            }
+            with patch.object(epoch, "_sha", side_effect=lambda path: hashes[path]):
+                result = epoch.validate_attempt_04_partial_catchup_failure(
+                    owner=epoch.CONTINUATION_OWNER,
+                    attempt04_work=attempt04,
+                    expected_sha256=epoch.CONTINUATION_04_FAILURE_SHA256,
+                )
+                self.assertEqual(result["worker_id"], epoch.CONTINUATION_04_WORKER_ID)
+                with self.assertRaises(epoch.Rejected):
+                    epoch.validate_attempt_04_partial_catchup_failure(
+                        owner=epoch.CONTINUATION_OWNER,
+                        attempt04_work=attempt04,
+                        expected_sha256="0" * 64,
+                    )
+
+    def test_attempt_05_prebackup_failure_never_repeats_rotation_or_catchup(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            controller.continuation_attempt = "05"
+            controller.work = Path(directory) / "continuation-05"
+            controller.work.mkdir()
+            attempt01 = Path(directory) / "continuation-01"
+            attempt02 = Path(directory) / "continuation-02"
+            attempt03 = Path(directory) / "continuation-03"
+            attempt04 = Path(directory) / "continuation-04"
+            for path in (attempt01, attempt02, attempt03, attempt04):
+                path.mkdir()
+            history_state = {
+                "owner": controller.owner,
+                "mode": "history-state",
+                "new_epoch_database": old_private["database"],
+                "state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
+                "rows": epoch.CONTINUATION_04_CURRENT_AUDIT_ROWS,
+                "audit_table_sha256": epoch.CONTINUATION_04_CURRENT_AUDIT_SHA256,
+                "anchors": epoch.CONTINUATION_04_CURRENT_ANCHORS,
+                "original_prefix": {
+                    "rows": epoch.CONTINUATION_04_ORIGINAL_PREFIX_ROWS,
+                    "audit_table_sha256": epoch.CONTINUATION_04_ORIGINAL_PREFIX_TABLE_SHA256,
+                    "last_open_time_ms": epoch.CONTINUATION_04_ORIGINAL_LAST_OPEN_MS,
+                },
+                "outbox_rows": 0,
+                "inbox_rows": 0,
+                "orders_rows": 0,
+                "effects_rows": 0,
+                "matched_public_tables": 32,
+                "trading_started": False,
+            }
+            events = []
+            controller.assert_existing_epoch = lambda **_kwargs: (
+                events.append("existing-resources") or {"state": "verified"}
+            )
+            controller.phase = lambda mode, _config, *, suffix="": (
+                events.append(mode + ":" + suffix) or history_state
+            )
+            controller.create_volume = lambda _name: events.append("new-restore-volume")
+            controller.initialize_volume = lambda *_args, **_kwargs: events.append(
+                "initialize-restore-volume"
+            )
+
+            def fail_backup(**kwargs):
+                events.append("prebackup-" + kwargs["tag"])
+                raise epoch.Rejected("PREBACKUP_RESTORE_FAILED")
+
+            controller.backup_and_verify = fail_backup
+            with (
+                patch.object(
+                    epoch,
+                    "validate_attempt_02_backup_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_02_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_03_fresh_schema_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_03_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_04_partial_catchup_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_04_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "read_attempt_04_rotated_history_secret",
+                    return_value="f" * 64,
+                ),
+                patch.object(
+                    epoch,
+                    "_sha",
+                    return_value="a" * 64,
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_04_history_state",
+                    return_value=history_state,
+                ),
+                self.assertRaisesRegex(epoch.Rejected, "PREBACKUP_RESTORE_FAILED"),
+            ):
+                controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                    attempt01_work=attempt01,
+                    attempt02_work=attempt02,
+                    attempt03_work=attempt03,
+                    attempt04_work=attempt04,
+                )
+            self.assertEqual(
+                events,
+                [
+                    "existing-resources",
+                    "history-state:partial04",
+                    "new-restore-volume",
+                    "initialize-restore-volume",
+                    "prebackup-precontinuation",
+                ],
+            )
+
+    def test_attempt_05_final_tail_updates_rows_before_postcatchup_snapshot(self):
+        with TemporaryDirectory() as directory:
+            controller, seed, old_private = self._continuation_fixture(directory)
+            controller.continuation_attempt = "05"
+            root = Path(directory) / "epoch-root"
+            controller.work = root / "continuation-05"
+            controller.work.mkdir(parents=True)
+            attempt01 = root / "continuation-01"
+            attempt02 = root / "continuation-02"
+            attempt03 = root / "continuation-03"
+            attempt04 = root / "continuation-04"
+            for path in (attempt01, attempt02, attempt03, attempt04):
+                path.mkdir(parents=True)
+            attempt04_private = attempt04 / "continuation-private.json"
+            attempt04_private.write_text("{}", encoding="utf-8")
+
+            source_work = root / ("run-" + controller.owner)
+            (source_work / "output-seed").mkdir(parents=True)
+            source_operator = source_work / "operator.zip"
+            source_failure = source_work / "runtime-epoch-failure.json"
+            source_seed = source_work / "output-seed" / "seed.json"
+            source_operator.write_bytes(b"operator")
+            source_failure.write_bytes(b"failure")
+            source_seed.write_bytes(b"seed")
+            attempt01_failure = attempt01 / "runtime-epoch-failure.json"
+            attempt01_stderr = attempt01 / "cli-017.stderr"
+            attempt01_failure.write_bytes(b"attempt01")
+            attempt01_stderr.write_bytes(b"attempt01 stderr")
+            lease = root / "runtime-epoch.active"
+            lease.write_text(controller.owner + "\n", encoding="ascii")
+            expected_hashes = {
+                source_operator: epoch.CONTINUATION_PARENT_OPERATOR_SHA256,
+                source_failure: epoch.CONTINUATION_FAILURE_SHA256,
+                source_seed: epoch.CONTINUATION_SEED_SHA256,
+                attempt01_failure: epoch.CONTINUATION_01_FAILURE_SHA256,
+                attempt01_stderr: epoch.CONTINUATION_01_LOG_SHA256,
+                attempt04_private: "b" * 64,
+            }
+
+            history_state = {
+                "owner": controller.owner,
+                "mode": "history-state",
+                "new_epoch_database": old_private["database"],
+                "state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
+                "rows": seed["rows"],
+                "audit_table_sha256": epoch.CONTINUATION_04_CURRENT_AUDIT_SHA256,
+                "anchors": copy.deepcopy(seed["anchors"]),
+                "original_prefix": {
+                    "rows": epoch.CONTINUATION_04_ORIGINAL_PREFIX_ROWS,
+                    "audit_table_sha256": epoch.CONTINUATION_04_ORIGINAL_PREFIX_TABLE_SHA256,
+                    "last_open_time_ms": epoch.CONTINUATION_04_ORIGINAL_LAST_OPEN_MS,
+                },
+                "outbox_rows": 0,
+                "inbox_rows": 0,
+                "orders_rows": 0,
+                "effects_rows": 0,
+                "matched_public_tables": 32,
+                "trading_started": False,
+            }
+            current_legacy = {"state": "stopped", "metadata_sha256": {"source": "same"}}
+            controller.assert_existing_epoch = lambda **_kwargs: current_legacy
+            controller.assert_legacy_sources_stopped = lambda **_kwargs: current_legacy
+            controller.create_volume = lambda *_args, **_kwargs: None
+            controller.initialize_volume = lambda *_args, **_kwargs: None
+            controller.backup_and_verify = lambda **kwargs: "backup-" + kwargs["tag"]
+            controller.restart_serve_and_validate = lambda *_args: {
+                "state": "RUNNING_NONTRADING"
+            }
+
+            def phase(mode, _config, *, suffix=""):
+                if mode == "history-state" and suffix == "partial04":
+                    return history_state
+                if mode == "catchup":
+                    self.assertEqual(suffix, "continue-final-01")
+                    return {"appended": dict.fromkeys(epoch.SYMBOLS, 1)}
+                if mode == "history-state" and suffix == "postcatchup":
+                    return {"post": True}
+                if mode == "qualify":
+                    return {"state": "NONTRADING_RUNTIME_QUALIFIED"}
+                if mode == "serve":
+                    status_path = controller.work / "output-serve" / "status.json"
+                    status_path.parent.mkdir()
+                    status_path.write_text(
+                        json.dumps({"state": "RUNNING_NONTRADING"}), encoding="utf-8"
+                    )
+                    return {"state": "RUNNING_NONTRADING"}
+                self.fail(f"unexpected worker phase {mode}:{suffix}")
+
+            controller.phase = phase
+            checked_post_snapshot = []
+            validators = (
+                patch.object(
+                    epoch,
+                    "validate_attempt_02_backup_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_02_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_03_fresh_schema_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_03_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_04_partial_catchup_failure",
+                    return_value={
+                        "failure_sha256": epoch.CONTINUATION_04_FAILURE_SHA256
+                    },
+                ),
+                patch.object(
+                    epoch,
+                    "read_attempt_04_rotated_history_secret",
+                    return_value="f" * 64,
+                ),
+                patch.object(
+                    epoch,
+                    "validate_attempt_04_history_state",
+                    return_value=history_state,
+                ),
+                patch.object(
+                    epoch,
+                    "validate_history_state",
+                    side_effect=lambda value, **kwargs: (
+                        checked_post_snapshot.append(
+                            (
+                                value,
+                                kwargs["expected_rows"],
+                                copy.deepcopy(kwargs["expected_anchors"]),
+                            )
+                        )
+                        or value
+                    ),
+                ),
+                patch.object(
+                    epoch,
+                    "validate_running_status",
+                    side_effect=lambda value, *_a, **_kw: value,
+                ),
+                patch.object(epoch, "ROOT", root),
+                patch.object(epoch, "ACTIVE_LEASE", lease),
+                patch.object(
+                    epoch.time, "time", side_effect=(1_800_000_305.0, 1_800_000_425.0)
+                ),
+                patch.object(
+                    epoch, "_sha", side_effect=lambda path: expected_hashes[Path(path)]
+                ),
+            )
+            with (
+                validators[0],
+                validators[1],
+                validators[2],
+                validators[3],
+                validators[4],
+                validators[5],
+                validators[6],
+                validators[7],
+                validators[8],
+                validators[9],
+                validators[10],
+            ):
+                result = controller.run_continuation(
+                    seed=seed,
+                    old_private=old_private,
+                    rotated_history="f" * 64,
+                    attempt01_work=attempt01,
+                    attempt02_work=attempt02,
+                    attempt03_work=attempt03,
+                    attempt04_work=attempt04,
+                )
+
+            self.assertEqual(
+                result["result"], "PASS_NONTRADING_RUNTIME_EPOCH_CONTINUATION"
+            )
+            self.assertEqual(len(checked_post_snapshot), 1)
+            _snapshot, rows, anchors = checked_post_snapshot[0]
+            self.assertEqual(rows, seed["rows"] + len(epoch.SYMBOLS))
+            self.assertEqual(
+                {symbol: anchor["count"] for symbol, anchor in anchors.items()},
+                {
+                    symbol: seed["anchors"][symbol]["count"] + 1
+                    for symbol in epoch.SYMBOLS
+                },
+            )
 
     def test_consumer_phase_config_does_not_include_admin_or_history_credentials(self):
         value = config("serve")

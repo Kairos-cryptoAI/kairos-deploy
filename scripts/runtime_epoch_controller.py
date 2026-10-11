@@ -122,6 +122,80 @@ CONTINUATION_03_VERIFY_WORKER_ID = (
 CONTINUATION_03_OPERATOR_SHA256 = (
     "5077a33c6a97eebc8859c995846ab3ffedea03d14ce6c509b9e02750a2983341"
 )
+CONTINUATION_04_CURRENT_AUDIT_ROWS = 176_348
+CONTINUATION_04_ORIGINAL_PREFIX_ROWS = 173_164
+CONTINUATION_04_ORIGINAL_PREFIX_TABLE_SHA256 = (
+    "f23b4060feae703c568b0204f4b3ff8932fe2813b20f578bc0a0d983e5600499"
+)
+CONTINUATION_04_ORIGINAL_LAST_OPEN_MS = 1_789_832_580_000
+CONTINUATION_04_CURRENT_AUDIT_SHA256 = (
+    "a68b53a7784613ef7011d589a00d813391c32987d70aea4fcbba10ad672000ef"
+)
+CONTINUATION_04_CURRENT_ANCHORS: dict[str, dict[str, int]] = {
+    "BTCUSDT": {
+        "count": 35_429,
+        "first_open_time_ms": 1_787_754_660_000,
+        "last_open_time_ms": 1_789_880_340_000,
+        "last_close_time_ms": 1_789_880_399_999,
+    },
+    "ETHUSDT": {
+        "count": 35_429,
+        "first_open_time_ms": 1_787_754_660_000,
+        "last_open_time_ms": 1_789_880_340_000,
+        "last_close_time_ms": 1_789_880_399_999,
+    },
+    "SOLUSDT": {
+        "count": 35_429,
+        "first_open_time_ms": 1_787_754_660_000,
+        "last_open_time_ms": 1_789_880_340_000,
+        "last_close_time_ms": 1_789_880_399_999,
+    },
+    "BNBUSDT": {
+        "count": 34_633,
+        "first_open_time_ms": 1_787_754_660_000,
+        "last_open_time_ms": 1_789_832_580_000,
+        "last_close_time_ms": 1_789_832_639_999,
+    },
+    "XRPUSDT": {
+        "count": 35_428,
+        "first_open_time_ms": 1_787_754_720_000,
+        "last_open_time_ms": 1_789_880_340_000,
+        "last_close_time_ms": 1_789_880_399_999,
+    },
+}
+CONTINUATION_04_FAILURE_SHA256 = (
+    "ee818e46c4c07e083f249919fb2b1eb17fac6dda5c122ad3bcd0d1e749d05109"
+)
+CONTINUATION_04_WORKER_NAME = (
+    "kairos-epoch-69893dc7b7c6-continue-04-catchup-continue-01"
+)
+CONTINUATION_04_WORKER_ID = (
+    "37ce8782cc57ccad239fff2d162cc9632b326806767e53fef414951ded7cecb3"
+)
+CONTINUATION_04_OPERATOR_SHA256 = (
+    "0a6caa509290fd17cb0b35c5d4bdadc4b99812de06f93916f382a3244cf5522e"
+)
+CONTINUATION_04_PREBACKUP_DUMP_SHA256 = (
+    "731f6b07558e6644c2b4d449c1b3744d0fc3d85c4ba344874a16542ec4f99dfc"
+)
+CONTINUATION_04_PREBACKUP_VERIFY_SHA256 = (
+    "2b6b9d70e3071a22a035f3faa697bff4efcf600246dbc5cb1b5ff07cf9868ae7"
+)
+CONTINUATION_04_ROTATION_RECEIPT_SHA256 = (
+    "325a4abb78afcefc3ba691f1ca9d9f01085ffb2ffe45a88ae211b1c2982dd7aa"
+)
+CONTINUATION_04_CATCHUP_STATUS_SHA256 = (
+    "78e1aaaf2e078e11d20a278a9c0ece4a9424bc5391449217ea312f8b3be7b9ed"
+)
+CONTINUATION_04_CATCHUP_CONFIG_SHA256 = (
+    "3778211a02019302cf608797e214fd74ee5df95b29d533cd3cf9667a63a081ac"
+)
+CONTINUATION_04_TARGET_PG_ID = (
+    "9dbce00f1d682871a177fba9fc4a63caa8ed28b355044598b1bc3718f7058e7e"
+)
+CONTINUATION_04_REDIS_ID = (
+    "c8d57b7e6c22817eac5fb176aca8b645d0a577039b01719c338dd397a8029b8f"
+)
 QUANT_REPO = Path("D:/Kairos/kairos-quant-scouts")
 QUANT_REVISION = "77c3d3e813faeb042661dacecd148226d8a25834"
 CORE_REVISION = "6937eb4773fc00afaf5ba4e020b28b689f48e377"
@@ -201,6 +275,7 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         },
         "catchup": common | {"history_password", "end_exclusive_ms", "maximum_bars"},
         "rotate-history": common | {"admin_password", "history_password"},
+        "history-state": common | {"admin_password"},
         "verify-restore": common
         | {
             "admin_password",
@@ -266,6 +341,11 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         or re.fullmatch(r"[0-9a-f]{64}", value["history_password"]) is None
     ):
         raise Rejected("EXACT_NEW_EPOCH_HISTORY_ROTATION_REQUIRED")
+    if mode == "history-state" and (
+        value["pg_host"] != "kairos-epoch-" + value["owner"][:12] + "-pg"
+        or re.fullmatch(r"[0-9a-f]{64}", value["admin_password"]) is None
+    ):
+        raise Rejected("EXACT_READ_ONLY_HISTORY_STATE_IDENTITY_REQUIRED")
     return value
 
 
@@ -411,6 +491,7 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "catchup",
         "rotate-history",
         "verify-restore",
+        "history-state",
         "qualify",
         "serve",
     }:
@@ -1441,7 +1522,9 @@ class EpochController:
         )
         if result.strip() != "0":
             raise Rejected("WORKER_MODE_FAILED_" + mode.upper())
-        output_path = output_dir / (mode + ".json")
+        output_path = output_dir / (
+            "history-state.json" if mode == "history-state" else mode + ".json"
+        )
         if output_path.is_symlink() or not output_path.is_file():
             raise Rejected("WORKER_RECEIPT_FILE_REQUIRED")
         receipt = json.loads(output_path.read_text(encoding="utf-8"))
@@ -1452,6 +1535,7 @@ class EpochController:
             "verify-restore": "PASS_ISOLATED_EPOCH_RESTORE",
             "qualify": "NONTRADING_RUNTIME_QUALIFIED",
             "rotate-history": "HISTORY_CREDENTIAL_ROTATED",
+            "history-state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
         }
         if (
             not isinstance(receipt, dict)
@@ -1639,6 +1723,13 @@ class EpochController:
                     self.names["restore_pg"],
                 }
             )
+        if self.continuation_attempt == "05":
+            expected_owned.update(
+                {
+                    continuation_worker_name(self.owner, "03"),
+                    CONTINUATION_04_WORKER_NAME,
+                }
+            )
         if set(all_owned) != expected_owned:
             raise Rejected("EXACT_FAILED_EPOCH_RESOURCE_SET_REQUIRED")
         continuation_prefix = (
@@ -1658,7 +1749,16 @@ class EpochController:
             view = self.inspect_container(name)
             labels = view.get("labels") or {}
             if (
-                view.get("name") != "/" + name
+                (
+                    self.continuation_attempt == "05"
+                    and view.get("id")
+                    != (
+                        CONTINUATION_04_TARGET_PG_ID
+                        if name == self.names["target_pg"]
+                        else CONTINUATION_04_REDIS_ID
+                    )
+                )
+                or view.get("name") != "/" + name
                 or view.get("image")
                 not in {
                     image,
@@ -1750,6 +1850,7 @@ class EpochController:
                 or type(verify_exit_code) is not int
                 or verify_exit_code == 0
                 or verify.get("name") != "/" + old_verify
+                or verify.get("network") != self.names["network"]
                 or (verify.get("labels") or {}).get(EPOCH_LABEL) != self.owner
                 or (verify.get("labels") or {}).get("com.kairos.runtime-epoch.scope")
                 != EPOCH_SCOPE
@@ -1800,11 +1901,108 @@ class EpochController:
                 },
             )
             self.assert_attempt_03_restore_clone(source_work=source_work)
-        volume_names = (
-            self.names["target_volume"],
-            self.names["restore_volume"],
-            self.names["redis_volume"],
-        )
+        elif self.continuation_attempt == "05":
+            old_verify = continuation_worker_name(self.owner, "03")
+            verify = self.inspect_container(old_verify)
+            if (
+                verify.get("id") != CONTINUATION_03_VERIFY_WORKER_ID
+                or (verify.get("state") or {}).get("Status") != "exited"
+                or type((verify.get("state") or {}).get("ExitCode")) is not int
+                or (verify.get("state") or {}).get("ExitCode") == 0
+                or (verify.get("labels") or {}).get(EPOCH_LABEL) != self.owner
+                or (verify.get("labels") or {}).get("com.kairos.runtime-epoch.scope")
+                != EPOCH_SCOPE
+                or verify.get("image")
+                not in {
+                    WORKER_IMAGE,
+                    WORKER_IMAGE.split("@", 1)[-1],
+                    "sha256:" + WORKER_IMAGE.rsplit("sha256:", 1)[-1],
+                }
+                or verify.get("ports")
+                or verify.get("readonly") is not True
+                or verify.get("caps") != ["ALL"]
+                or verify.get("privileged") is not False
+                or verify.get("memory") != 512 * 1024**2
+                or verify.get("swap") != 512 * 1024**2
+                or verify.get("cpus") != 1_000_000_000
+            ):
+                raise Rejected("EXACT_STOPPED_ATTEMPT_03_VERIFY_WORKER_REQUIRED")
+            attempt03_work = source_work / "continuation-03"
+            self.require_mount_set(
+                old_verify,
+                {
+                    str(
+                        attempt03_work / "config-verify-restore-precontinuation.json"
+                    ): (
+                        CONFIG_PATH_IN_CONTAINER,
+                        False,
+                    ),
+                    str(attempt03_work / "output-verify-restore-precontinuation"): (
+                        "/output",
+                        True,
+                    ),
+                    str(attempt03_work / "operator"): ("/operator", False),
+                    str(attempt03_work / "runtime-wheelhouse"): (
+                        "/wheelhouse",
+                        False,
+                    ),
+                    str(attempt03_work / "quant"): ("/quant", False),
+                    str(AUX_WHEELHOUSE): ("/aux-wheels", False),
+                },
+            )
+            partial_worker = self.inspect_container(CONTINUATION_04_WORKER_NAME)
+            partial_state = partial_worker.get("state") or {}
+            if (
+                partial_worker.get("id") != CONTINUATION_04_WORKER_ID
+                or partial_worker.get("name") != "/" + CONTINUATION_04_WORKER_NAME
+                or partial_state.get("Status") != "exited"
+                or type(partial_state.get("ExitCode")) is not int
+                or partial_state.get("ExitCode") != 1
+                or partial_worker.get("network") != self.names["network"]
+                or (partial_worker.get("labels") or {}).get(EPOCH_LABEL) != self.owner
+                or (partial_worker.get("labels") or {}).get(
+                    "com.kairos.runtime-epoch.scope"
+                )
+                != EPOCH_SCOPE
+                or partial_worker.get("image")
+                not in {
+                    WORKER_IMAGE,
+                    WORKER_IMAGE.split("@", 1)[-1],
+                    "sha256:" + WORKER_IMAGE.rsplit("sha256:", 1)[-1],
+                }
+                or partial_worker.get("ports")
+                or partial_worker.get("readonly") is not True
+                or partial_worker.get("caps") != ["ALL"]
+                or partial_worker.get("privileged") is not False
+                or partial_worker.get("memory") != 512 * 1024**2
+                or partial_worker.get("swap") != 512 * 1024**2
+                or partial_worker.get("cpus") != 1_000_000_000
+            ):
+                raise Rejected("EXACT_STOPPED_ATTEMPT_04_PARTIAL_WORKER_REQUIRED")
+            attempt04_work = source_work / "continuation-04"
+            self.require_mount_set(
+                CONTINUATION_04_WORKER_NAME,
+                {
+                    str(attempt04_work / "config-catchup-continue-01.json"): (
+                        CONFIG_PATH_IN_CONTAINER,
+                        False,
+                    ),
+                    str(attempt04_work / "output-catchup-continue-01"): (
+                        "/output",
+                        True,
+                    ),
+                    str(attempt04_work / "operator"): ("/operator", False),
+                    str(attempt04_work / "runtime-wheelhouse"): (
+                        "/wheelhouse",
+                        False,
+                    ),
+                    str(attempt04_work / "quant"): ("/quant", False),
+                    str(AUX_WHEELHOUSE): ("/aux-wheels", False),
+                },
+            )
+        volume_names = [self.names["target_volume"], self.names["redis_volume"]]
+        if self.continuation_attempt != "05":
+            volume_names.append(self.names["restore_volume"])
         for volume in volume_names:
             metadata = json.loads(
                 self.docker(["volume", "inspect", "--format", "{{json .}}", volume])
@@ -1828,6 +2026,48 @@ class EpochController:
         ).splitlines()
         if self.names["source_volume"] in source_volumes:
             raise Rejected("DISPOSABLE_SOURCE_CLONE_MUST_BE_ABSENT")
+        if self.continuation_attempt == "05":
+            restore_volumes = self.docker(
+                [
+                    "volume",
+                    "ls",
+                    "--filter",
+                    "name=" + self.names["restore_volume"],
+                    "--format",
+                    "{{.Name}}",
+                ]
+            ).splitlines()
+            restore_containers = self.docker(
+                [
+                    "ps",
+                    "-a",
+                    "--filter",
+                    "name=" + self.names["restore_pg"],
+                    "--format",
+                    "{{.Names}}",
+                ]
+            ).splitlines()
+            if self.names["restore_volume"] in restore_volumes or restore_containers:
+                raise Rejected("ATTEMPT_05_RESTORE_RESOURCES_MUST_BE_ABSENT")
+            owned_volumes = set(
+                self.docker(
+                    [
+                        "volume",
+                        "ls",
+                        "--filter",
+                        "label=" + EPOCH_LABEL + "=" + self.owner,
+                        "--filter",
+                        "label=com.kairos.runtime-epoch.scope=" + EPOCH_SCOPE,
+                        "--format",
+                        "{{.Name}}",
+                    ]
+                ).splitlines()
+            )
+            if owned_volumes != {
+                self.names["target_volume"],
+                self.names["redis_volume"],
+            }:
+                raise Rejected("EXACT_ATTEMPT_05_OWNED_VOLUME_SET_REQUIRED")
         network = json.loads(
             self.docker(
                 ["network", "inspect", "--format", "{{json .}}", self.names["network"]]
@@ -1857,6 +2097,13 @@ class EpochController:
                 {
                     continuation_worker_name(self.owner, "03"),
                     self.names["restore_pg"],
+                }
+            )
+        if self.continuation_attempt == "05":
+            allowed_endpoints.update(
+                {
+                    continuation_worker_name(self.owner, "03"),
+                    CONTINUATION_04_WORKER_NAME,
                 }
             )
         if (
@@ -2335,6 +2582,7 @@ class EpochController:
         attempt01_work: Path | None = None,
         attempt02_work: Path | None = None,
         attempt03_work: Path | None = None,
+        attempt04_work: Path | None = None,
     ) -> dict:
         """Continue the pinned zero-append failure without adopting its worker."""
         owner = self.owner
@@ -2343,7 +2591,11 @@ class EpochController:
         failed_initializer = None
         attempt02_artifacts = None
         attempt03_artifacts = None
-        if self.continuation_attempt in {"02", "03", "04"} and attempt01_work is None:
+        attempt04_artifacts = None
+        if (
+            self.continuation_attempt in {"02", "03", "04", "05"}
+            and attempt01_work is None
+        ):
             raise Rejected("ATTEMPT_01_FAILURE_EVIDENCE_REQUIRED")
         if self.continuation_attempt == "02":
             failed_initializer = "kairos-epoch-" + self.owner[:12] + "-volume-init-70"
@@ -2371,6 +2623,43 @@ class EpochController:
             )
             self.proofs["attempt_02_backup_failure"] = attempt02_artifacts
             self.proofs["attempt_03_fresh_schema_failure"] = attempt03_artifacts
+        if self.continuation_attempt == "05":
+            if (
+                attempt02_work is None
+                or attempt03_work is None
+                or attempt04_work is None
+            ):
+                raise Rejected("COMPLETE_PRIOR_CONTINUATION_CHAIN_REQUIRED")
+            attempt02_artifacts = validate_attempt_02_backup_failure(
+                owner=owner,
+                attempt02_work=attempt02_work,
+                expected_sha256=CONTINUATION_02_FAILURE_SHA256,
+            )
+            attempt03_artifacts = validate_attempt_03_fresh_schema_failure(
+                owner=owner,
+                attempt03_work=attempt03_work,
+                expected_sha256=CONTINUATION_03_FAILURE_SHA256,
+            )
+            attempt04_artifacts = validate_attempt_04_partial_catchup_failure(
+                owner=owner,
+                attempt04_work=attempt04_work,
+                expected_sha256=CONTINUATION_04_FAILURE_SHA256,
+            )
+            self.proofs["attempt_02_backup_failure"] = attempt02_artifacts
+            self.proofs["attempt_03_fresh_schema_failure"] = attempt03_artifacts
+            self.proofs["attempt_04_partial_catchup_failure"] = attempt04_artifacts
+            history_private_path = attempt04_work / "continuation-private.json"
+            if (
+                read_attempt_04_rotated_history_secret(
+                    history_private_path, owner=owner
+                )
+                != rotated_history
+            ):
+                raise Rejected("ATTEMPT_04_ROTATED_HISTORY_CREDENTIAL_MISMATCH")
+            history_private_sha = _sha(history_private_path)
+            self.proofs["attempt_04_rotated_history_private_sha256"] = (
+                history_private_sha
+            )
         before = self.assert_existing_epoch(
             source_work=source_work, failed_initializer=failed_initializer
         )
@@ -2388,6 +2677,23 @@ class EpochController:
                 source_work=source_work
             )
             self.proofs["attempt_03_restore_clone_cleanup"] = cleanup
+        elif self.continuation_attempt == "05":
+            history_state = self.phase(
+                "history-state",
+                {
+                    "owner": owner,
+                    "database": old_private["database"],
+                    "pg_host": self.names["target_pg"],
+                    "redis_host": self.names["redis"],
+                    "admin_password": old_private["admin_password"],
+                },
+                suffix="partial04",
+            )
+            validate_attempt_04_history_state(history_state, owner=owner)
+            self.proofs["current_history_state"] = history_state
+            seed = history_state
+            self.create_volume(self.names["restore_volume"])
+            self.initialize_volume(self.names["restore_volume"], uid=70)
         elif self.continuation_attempt != "03":
             raise Rejected("EXACT_CONTINUATION_ATTEMPT_REQUIRED")
         pre_backup_hash = self.backup_and_verify(
@@ -2397,21 +2703,27 @@ class EpochController:
         )
         self.proofs["precontinuation_backup_sha256"] = pre_backup_hash
 
-        rotated = self.phase(
-            "rotate-history",
-            {
-                "owner": owner,
-                "database": old_private["database"],
-                "pg_host": self.names["target_pg"],
-                "redis_host": self.names["redis"],
-                "admin_password": old_private["admin_password"],
-                "history_password": rotated_history,
-            },
-            suffix="history-credential",
-        )
-        if rotated.get("credential_rotated") is not True:
-            raise Rejected("HISTORY_ROLE_ROTATION_PROOF_REQUIRED")
-        self.proofs["history_credential_rotated"] = True
+        if self.continuation_attempt == "05":
+            self.proofs["history_credential_rotated"] = True
+            self.proofs["history_credential_rotation_receipt_sha256"] = (
+                CONTINUATION_04_ROTATION_RECEIPT_SHA256
+            )
+        else:
+            rotated = self.phase(
+                "rotate-history",
+                {
+                    "owner": owner,
+                    "database": old_private["database"],
+                    "pg_host": self.names["target_pg"],
+                    "redis_host": self.names["redis"],
+                    "admin_password": old_private["admin_password"],
+                    "history_password": rotated_history,
+                },
+                suffix="history-credential",
+            )
+            if rotated.get("credential_rotated") is not True:
+                raise Rejected("HISTORY_ROLE_ROTATION_PROOF_REQUIRED")
+            self.proofs["history_credential_rotated"] = True
 
         rolling = copy.deepcopy(seed)
         end_target = ((int(time.time() * 1000) - 5_000) // MINUTE_MS) * MINUTE_MS
@@ -2445,23 +2757,35 @@ class EpochController:
                 or sum(appended.values()) > MAX_CATCHUP_BARS
             ):
                 raise Rejected("CONTINUATION_BOUNDED_CATCHUP_RECEIPT_REQUIRED")
+            expected_appended = {
+                symbol: max(
+                    0,
+                    (end - anchor["last_close_time_ms"] - 1) // MINUTE_MS,
+                )
+                for symbol, anchor in rolling["anchors"].items()
+            }
+            if appended != expected_appended:
+                raise Rejected("CONTINUATION_CATCHUP_ANCHOR_DELTA_MISMATCH")
             for symbol, anchor in rolling["anchors"].items():
                 anchor["count"] += appended[symbol]
-                anchor["last_open_time_ms"] = end - MINUTE_MS
-                anchor["last_close_time_ms"] = end - 1
+                if appended[symbol]:
+                    anchor["last_open_time_ms"] = end - MINUTE_MS
+                    anchor["last_close_time_ms"] = end - 1
+            rolling["rows"] += sum(appended.values())
         self.proofs["continuation_catchup_batches"] = batches
         self.proofs["continuation_initial_end_exclusive_ms"] = end_target
 
-        # A second restore proof covers the catch-up snapshot before the short
-        # qualification tail is allowed to publish.
-        self.create_volume(self.names["restore_volume"])
-        self.initialize_volume(self.names["restore_volume"], uid=70)
-        post_backup_hash = self.backup_and_verify(
-            seed=rolling,
-            restore_password=secrets.token_hex(32),
-            tag="postcatchup",
-        )
-        self.proofs["postcatchup_backup_sha256"] = post_backup_hash
+        # The 05 continuation includes the short final tail before its single
+        # post-catch-up snapshot/restore proof; earlier attempts retain history.
+        if self.continuation_attempt != "05":
+            self.create_volume(self.names["restore_volume"])
+            self.initialize_volume(self.names["restore_volume"], uid=70)
+            post_backup_hash = self.backup_and_verify(
+                seed=rolling,
+                restore_password=secrets.token_hex(32),
+                tag="postcatchup",
+            )
+            self.proofs["postcatchup_backup_sha256"] = post_backup_hash
 
         final_end = ((int(time.time() * 1000) - 5_000) // MINUTE_MS) * MINUTE_MS
         final_batches = 0
@@ -2494,11 +2818,49 @@ class EpochController:
                 or sum(appended.values()) > MAX_CATCHUP_BARS
             ):
                 raise Rejected("CONTINUATION_FINAL_CATCHUP_RECEIPT_REQUIRED")
+            expected_appended = {
+                symbol: max(
+                    0,
+                    (end - anchor["last_close_time_ms"] - 1) // MINUTE_MS,
+                )
+                for symbol, anchor in rolling["anchors"].items()
+            }
+            if appended != expected_appended:
+                raise Rejected("CONTINUATION_FINAL_CATCHUP_ANCHOR_DELTA_MISMATCH")
             for symbol, anchor in rolling["anchors"].items():
                 anchor["count"] += appended[symbol]
-                anchor["last_open_time_ms"] = end - MINUTE_MS
-                anchor["last_close_time_ms"] = end - 1
+                if appended[symbol]:
+                    anchor["last_open_time_ms"] = end - MINUTE_MS
+                    anchor["last_close_time_ms"] = end - 1
+            rolling["rows"] += sum(appended.values())
         self.proofs["continuation_final_batches"] = final_batches
+        if self.continuation_attempt == "05":
+            post_state = self.phase(
+                "history-state",
+                {
+                    "owner": owner,
+                    "database": old_private["database"],
+                    "pg_host": self.names["target_pg"],
+                    "redis_host": self.names["redis"],
+                    "admin_password": old_private["admin_password"],
+                },
+                suffix="postcatchup",
+            )
+            validate_history_state(
+                post_state,
+                owner=owner,
+                expected_rows=rolling["rows"],
+                expected_anchors=rolling["anchors"],
+            )
+            self.proofs["postcatchup_history_state"] = post_state
+            self.create_volume(self.names["restore_volume"])
+            self.initialize_volume(self.names["restore_volume"], uid=70)
+            post_backup_hash = self.backup_and_verify(
+                seed=post_state,
+                restore_password=secrets.token_hex(32),
+                tag="postcatchup",
+            )
+            self.proofs["postcatchup_backup_sha256"] = post_backup_hash
         runtime = {
             "owner": owner,
             "database": old_private["database"],
@@ -2543,7 +2905,7 @@ class EpochController:
             or ACTIVE_LEASE.read_text(encoding="ascii") != owner + "\n"
         ):
             raise Rejected("PRESERVED_FAILED_EPOCH_EVIDENCE_CHANGED")
-        if self.continuation_attempt in {"02", "03", "04"}:
+        if self.continuation_attempt in {"02", "03", "04", "05"}:
             attempt01_failure = attempt01_work / "runtime-epoch-failure.json"
             attempt01_stderr = attempt01_work / "cli-017.stderr"
             if (
@@ -2575,6 +2937,30 @@ class EpochController:
                 or current_attempt03_artifacts != attempt03_artifacts
             ):
                 raise Rejected("PRESERVED_ATTEMPT_03_FAILURE_CHANGED")
+        if self.continuation_attempt == "05":
+            current_attempt02_artifacts = validate_attempt_02_backup_failure(
+                owner=owner,
+                attempt02_work=attempt02_work,
+                expected_sha256=CONTINUATION_02_FAILURE_SHA256,
+            )
+            current_attempt03_artifacts = validate_attempt_03_fresh_schema_failure(
+                owner=owner,
+                attempt03_work=attempt03_work,
+                expected_sha256=CONTINUATION_03_FAILURE_SHA256,
+            )
+            current_attempt04_artifacts = validate_attempt_04_partial_catchup_failure(
+                owner=owner,
+                attempt04_work=attempt04_work,
+                expected_sha256=CONTINUATION_04_FAILURE_SHA256,
+            )
+            if (
+                current_attempt02_artifacts != attempt02_artifacts
+                or current_attempt03_artifacts != attempt03_artifacts
+                or current_attempt04_artifacts != attempt04_artifacts
+                or _sha(attempt04_work / "continuation-private.json")
+                != history_private_sha
+            ):
+                raise Rejected("PRESERVED_ATTEMPT_04_FAILURE_CHAIN_CHANGED")
         self.proofs["legacy_after"] = after
         self.proofs["serve_restart_status"] = restarted
         self.proofs["continuation_attempt"] = self.continuation_attempt
@@ -3122,6 +3508,183 @@ def validate_attempt_03_fresh_schema_failure(
     }
 
 
+def validate_history_state(
+    value: object,
+    *,
+    owner: str,
+    expected_rows: int,
+    expected_anchors: dict[str, dict[str, int]],
+    expected_digest: str | None = None,
+) -> dict:
+    """Validate a read-only history snapshot before or after bounded catch-up."""
+    expected_keys = {
+        "owner",
+        "mode",
+        "new_epoch_database",
+        "state",
+        "rows",
+        "audit_table_sha256",
+        "anchors",
+        "original_prefix",
+        "outbox_rows",
+        "inbox_rows",
+        "orders_rows",
+        "effects_rows",
+        "matched_public_tables",
+        "trading_started",
+    }
+    if (
+        not isinstance(value, dict)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("audit_table_sha256", "")))
+        or set(value) != expected_keys
+        or value.get("owner") != owner
+        or value.get("mode") != "history-state"
+        or value.get("new_epoch_database") != "kairos_epoch_" + owner[:12]
+        or value.get("state") != "VERIFIED_AUDIT_ONLY_HISTORY_STATE"
+        or value.get("rows") != expected_rows
+        or (
+            expected_digest is not None
+            and value.get("audit_table_sha256") != expected_digest
+        )
+        or value.get("outbox_rows") != 0
+        or value.get("inbox_rows") != 0
+        or value.get("orders_rows") != 0
+        or value.get("effects_rows") != 0
+        or value.get("matched_public_tables") != 32
+        or value.get("trading_started") is not False
+        or value.get("original_prefix")
+        != {
+            "rows": CONTINUATION_04_ORIGINAL_PREFIX_ROWS,
+            "audit_table_sha256": CONTINUATION_04_ORIGINAL_PREFIX_TABLE_SHA256,
+            "last_open_time_ms": CONTINUATION_04_ORIGINAL_LAST_OPEN_MS,
+        }
+    ):
+        raise Rejected("EXACT_VERIFIED_ATTEMPT_04_HISTORY_STATE_REQUIRED")
+    anchors = value.get("anchors")
+    if (
+        not isinstance(anchors, dict)
+        or set(anchors) != set(SYMBOLS)
+        or anchors != expected_anchors
+    ):
+        raise Rejected("EXACT_FIVE_SYMBOL_HISTORY_STATE_REQUIRED")
+    if sum(
+        anchor.get("count", -1)
+        for anchor in anchors.values()
+        if isinstance(anchor, dict)
+    ) != expected_rows or any(
+        not isinstance(anchor, dict)
+        or set(anchor)
+        != {"count", "first_open_time_ms", "last_open_time_ms", "last_close_time_ms"}
+        or type(anchor.get("count")) is not int
+        or anchor["count"] < 1
+        or type(anchor.get("first_open_time_ms")) is not int
+        or type(anchor.get("last_open_time_ms")) is not int
+        or type(anchor.get("last_close_time_ms")) is not int
+        or anchor["first_open_time_ms"] % MINUTE_MS
+        or anchor["last_open_time_ms"] % MINUTE_MS
+        or anchor["last_close_time_ms"] != anchor["last_open_time_ms"] + MINUTE_MS - 1
+        or anchor["last_open_time_ms"] < CONTINUATION_04_ORIGINAL_LAST_OPEN_MS
+        for anchor in anchors.values()
+    ):
+        raise Rejected("CONTINUATION_04_HISTORY_ANCHOR_AGGREGATES_REQUIRED")
+    return value
+
+
+def validate_attempt_04_history_state(value: object, *, owner: str) -> dict:
+    """Admit only the exact read-only snapshot observed after partial batch 04."""
+    if not re.fullmatch(r"[0-9a-f]{64}", CONTINUATION_04_CURRENT_AUDIT_SHA256):
+        raise Rejected("PINNED_ATTEMPT_04_HISTORY_STATE_DIGEST_REQUIRED")
+    return validate_history_state(
+        value,
+        owner=owner,
+        expected_rows=CONTINUATION_04_CURRENT_AUDIT_ROWS,
+        expected_anchors=CONTINUATION_04_CURRENT_ANCHORS,
+        expected_digest=CONTINUATION_04_CURRENT_AUDIT_SHA256,
+    )
+
+
+def validate_attempt_04_partial_catchup_failure(
+    *, owner: str, attempt04_work: Path, expected_sha256: str
+) -> dict:
+    """Pin the failed attempt-04 batch and every successful pre-catch-up proof."""
+    failure = attempt04_work / "runtime-epoch-failure.json"
+    operator = attempt04_work / "operator.zip"
+    dump = attempt04_work / "epoch-history-precontinuation.dump"
+    restore = (
+        attempt04_work / "output-verify-restore-precontinuation" / "verify-restore.json"
+    )
+    rotation = (
+        attempt04_work
+        / "output-rotate-history-history-credential"
+        / "rotate-history.json"
+    )
+    status = attempt04_work / "output-catchup-continue-01" / "status.json"
+    config_path = attempt04_work / "config-catchup-continue-01.json"
+    pinned_files = (
+        (failure, CONTINUATION_04_FAILURE_SHA256, 1_162),
+        (operator, CONTINUATION_04_OPERATOR_SHA256, 37_039),
+        (dump, CONTINUATION_04_PREBACKUP_DUMP_SHA256, 20_692_780),
+        (restore, CONTINUATION_04_PREBACKUP_VERIFY_SHA256, 4_675),
+        (rotation, CONTINUATION_04_ROTATION_RECEIPT_SHA256, 258),
+        (status, CONTINUATION_04_CATCHUP_STATUS_SHA256, 204),
+        (config_path, CONTINUATION_04_CATCHUP_CONFIG_SHA256, 342),
+    )
+    if (
+        owner != CONTINUATION_OWNER
+        or expected_sha256 != CONTINUATION_04_FAILURE_SHA256
+        or attempt04_work.is_symlink()
+        or not attempt04_work.is_dir()
+        or any(
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size != size
+            or _sha(path) != expected
+            for path, expected, size in pinned_files
+        )
+    ):
+        raise Rejected("EXACT_ATTEMPT_04_PARTIAL_CATCHUP_FAILURE_REQUIRED")
+    failure_value = json.loads(failure.read_text(encoding="utf-8"))
+    rotation_value = json.loads(rotation.read_text(encoding="utf-8"))
+    if (
+        failure_value.get("owner") != owner
+        or failure_value.get("phase") != "catchup-continue-01"
+        or failure_value.get("error_category") != "WORKER_MODE_FAILED_CATCHUP"
+        or failure_value.get("active_lease_preserved") is not True
+        or failure_value.get("trading_started") is not False
+        or rotation_value.get("owner") != owner
+        or rotation_value.get("state") != "HISTORY_CREDENTIAL_ROTATED"
+        or rotation_value.get("credential_rotated") is not True
+    ):
+        raise Rejected("ATTEMPT_04_ROTATION_AND_FAILURE_RECEIPTS_REQUIRED")
+    return {
+        "failure_sha256": CONTINUATION_04_FAILURE_SHA256,
+        "worker_name": CONTINUATION_04_WORKER_NAME,
+        "worker_id": CONTINUATION_04_WORKER_ID,
+        "worker_status_sha256": CONTINUATION_04_CATCHUP_STATUS_SHA256,
+        "catchup_config_sha256": CONTINUATION_04_CATCHUP_CONFIG_SHA256,
+        "operator_sha256": CONTINUATION_04_OPERATOR_SHA256,
+        "precontinuation_dump_sha256": CONTINUATION_04_PREBACKUP_DUMP_SHA256,
+        "precontinuation_verify_sha256": CONTINUATION_04_PREBACKUP_VERIFY_SHA256,
+        "history_rotation_receipt_sha256": CONTINUATION_04_ROTATION_RECEIPT_SHA256,
+    }
+
+
+def read_attempt_04_rotated_history_secret(path: Path, *, owner: str) -> str:
+    """Read the already-rotated epoch credential only for internal worker use."""
+    if path.is_symlink() or not path.is_file():
+        raise Rejected("ATTEMPT_04_ROTATED_HISTORY_PRIVATE_FILE_REQUIRED")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"owner", "history_password"}
+        or value.get("owner") != owner
+        or not isinstance(value.get("history_password"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["history_password"]) is None
+    ):
+        raise Rejected("ATTEMPT_04_ROTATED_HISTORY_PRIVATE_FILE_REQUIRED")
+    return value["history_password"]
+
+
 def _verify_source_signature(work: Path) -> None:
     """Use the already-pinned local signer/keyring path; never fetch keys."""
 
@@ -3434,9 +3997,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--continue-initializer-repair", action="store_true")
     parser.add_argument("--continue-backup-stream-repair", action="store_true")
     parser.add_argument("--continue-fresh-schema-repair", action="store_true")
+    parser.add_argument("--continue-partial-catchup-after-04", action="store_true")
     parser.add_argument("--expected-attempt-01-failure-sha256")
     parser.add_argument("--expected-attempt-02-failure-sha256")
     parser.add_argument("--expected-attempt-03-failure-sha256")
+    parser.add_argument("--expected-attempt-04-failure-sha256")
     parser.add_argument("--owner")
     parser.add_argument("--expected-parent-revision")
     parser.add_argument("--expected-parent-operator-sha256")
@@ -3455,6 +4020,8 @@ def main(argv: list[str] | None = None) -> int:
                     "result": "PLAN_ONLY",
                     "operation": "same-owner attempt-02 initializer repair"
                     if args.continue_initializer_repair
+                    else "same-owner attempt-05 partial-catchup continuation"
+                    if args.continue_partial_catchup_after_04
                     else "same-owner attempt-04 fresh-schema repair"
                     if args.continue_fresh_schema_repair
                     else "same-owner attempt-03 binary backup stream repair"
@@ -3479,6 +4046,105 @@ def main(argv: list[str] | None = None) -> int:
     private_ready = False
     try:
         _validate_admission(args)
+        if args.continue_partial_catchup_after_04:
+            owner = args.owner
+            if (
+                args.continue_failed_catchup
+                or args.continue_initializer_repair
+                or args.continue_backup_stream_repair
+                or args.continue_fresh_schema_repair
+                or args.end_exclusive_ms is not None
+            ):
+                raise Rejected("PARTIAL_CATCHUP_CONTINUATION_FLAGS_EXCLUSIVE_REQUIRED")
+            if args.owner != CONTINUATION_OWNER:
+                raise Rejected("EXACT_FAILED_EPOCH_OWNER_REQUIRED")
+            _verify_parent_revision(args.expected_parent_revision or "")
+            source_work = fresh.safe(ROOT / ("run-" + args.owner))
+            seed_value, old_private, _old_catchup = validate_continuation_artifacts(
+                owner=args.owner,
+                parent_revision=args.expected_parent_revision,
+                parent_operator_sha256=args.expected_parent_operator_sha256 or "",
+                parent_operator=source_work / "operator.zip",
+                lease=ACTIVE_LEASE,
+                failure=source_work / "runtime-epoch-failure.json",
+                seed=source_work / "output-seed" / "seed.json",
+                original_private=source_work / "epoch-private.json",
+                original_catchup_config=source_work / "config-catchup-01.json",
+            )
+            attempt01 = source_work / "continuation-01"
+            validate_attempt_01_initializer_failure(
+                owner=args.owner,
+                receipt_path=attempt01 / "runtime-epoch-failure.json",
+                expected_sha256=args.expected_attempt_01_failure_sha256 or "",
+            )
+            if (
+                (attempt01 / "cli-017.stderr").is_symlink()
+                or not (attempt01 / "cli-017.stderr").is_file()
+                or _sha(attempt01 / "cli-017.stderr") != CONTINUATION_01_LOG_SHA256
+            ):
+                raise Rejected("PINNED_ATTEMPT_01_DIAGNOSTIC_REQUIRED")
+            attempt02 = source_work / "continuation-02"
+            validate_attempt_02_backup_failure(
+                owner=args.owner,
+                attempt02_work=attempt02,
+                expected_sha256=args.expected_attempt_02_failure_sha256 or "",
+            )
+            attempt03 = source_work / "continuation-03"
+            validate_attempt_03_fresh_schema_failure(
+                owner=args.owner,
+                attempt03_work=attempt03,
+                expected_sha256=args.expected_attempt_03_failure_sha256 or "",
+            )
+            attempt04 = source_work / "continuation-04"
+            validate_attempt_04_partial_catchup_failure(
+                owner=args.owner,
+                attempt04_work=attempt04,
+                expected_sha256=args.expected_attempt_04_failure_sha256 or "",
+            )
+            rotated_history = read_attempt_04_rotated_history_secret(
+                attempt04 / "continuation-private.json", owner=args.owner
+            )
+            attempt = "05"
+            work = fresh.safe(source_work / ("continuation-" + attempt))
+            if work.exists() or work.is_symlink():
+                raise Rejected("CREATE_ONLY_ATTEMPT_05_REQUIRED")
+            _private_directory(work)
+            private_ready = True
+            _verify_source_signature(work)
+            controller = EpochController(
+                args.owner,
+                expected_revision=args.expected_revision,
+                wheelhouse=args.wheelhouse,
+                deadline=time.monotonic() + MAX_SECONDS,
+                workdir=work,
+                continuation_attempt=attempt,
+            )
+            controller.prepare_snapshots()
+            result = controller.run_continuation(
+                seed=seed_value,
+                old_private=old_private,
+                rotated_history=rotated_history,
+                attempt01_work=attempt01,
+                attempt02_work=attempt02,
+                attempt03_work=attempt03,
+                attempt04_work=attempt04,
+            )
+            receipt = work / "runtime-epoch-continuation-receipt.json"
+            fresh.save(receipt, result)
+            print(
+                json.dumps(
+                    {
+                        "result": result["result"],
+                        "owner": owner,
+                        "attempt": attempt,
+                        "receipt": str(receipt),
+                        "secrets": "private-file-only",
+                        "native_operations": "bounded-owner-only",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
         if args.continue_fresh_schema_repair:
             owner = args.owner
             if (
@@ -3808,6 +4474,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.expected_attempt_01_failure_sha256,
                 args.expected_attempt_02_failure_sha256,
                 args.expected_attempt_03_failure_sha256,
+                args.expected_attempt_04_failure_sha256,
             )
         ):
             raise Rejected("CONTINUATION_FLAGS_REQUIRE_CONTINUATION_MODE")

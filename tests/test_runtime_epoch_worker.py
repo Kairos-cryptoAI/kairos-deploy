@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import sys
@@ -190,6 +191,238 @@ class EpochTableInventoryTests(unittest.TestCase):
                 ),
             ):
                 worker.validate_epoch_table_inventory(value)
+
+
+class PartialHistoryStateTests(unittest.TestCase):
+    @staticmethod
+    def value():
+        counts = {s: 35428 if s == "XRPUSDT" else 35429 for s in worker.SYMBOLS}
+        counts["BNBUSDT"] = 34633
+        anchors = {}
+        for symbol, count in counts.items():
+            first = 1787754720000 if symbol == "XRPUSDT" else 1787754660000
+            last = first + (count - 1) * worker.MINUTE
+            anchors[symbol] = {
+                "count": count,
+                "first_open_time_ms": first,
+                "last_open_time_ms": last,
+                "last_close_time_ms": last + worker.MINUTE - 1,
+            }
+        return {
+            "rows": 176348,
+            "audit_table_sha256": "a68b53a7784613ef7011d589a00d813391c32987d70aea4fcbba10ad672000ef",
+            "anchors": anchors,
+            "matched_public_tables": 32,
+            "original_prefix": {
+                "rows": worker.ORIGINAL_PREFIX_ROWS,
+                "audit_table_sha256": worker.ORIGINAL_PREFIX_TABLE_SHA256,
+                "last_open_time_ms": worker.ORIGINAL_PREFIX_LAST_OPEN_MS,
+            },
+            "outbox_rows": 0,
+            "inbox_rows": 0,
+            "orders_rows": 0,
+            "effects_rows": 0,
+            "trading_started": False,
+        }
+
+    def test_valid_partial_state_has_exact_original_prefix_and_contiguous_chains(self):
+        worker.validate_history_state(self.value())
+
+    def test_original_prefix_alteration_is_rejected(self):
+        for key, value in (
+            ("rows", 173165),
+            ("audit_table_sha256", "0" * 64),
+            ("last_open_time_ms", 0),
+        ):
+            state = self.value()
+            state["original_prefix"][key] = value
+            with self.subTest(key=key), self.assertRaises(worker.EpochError):
+                worker.validate_history_state(state)
+
+    def test_queue_trading_missing_symbol_gap_or_shifted_first_bar_are_rejected(self):
+        states = []
+        for key in ("outbox_rows", "inbox_rows", "orders_rows", "effects_rows"):
+            state = self.value()
+            state[key] = 1
+            states.append(state)
+        state = self.value()
+        del state["anchors"]["BNBUSDT"]
+        states.append(state)
+        state = self.value()
+        state["anchors"]["BTCUSDT"]["count"] -= 1
+        states.append(state)
+        state = self.value()
+        for key in ("first_open_time_ms", "last_open_time_ms", "last_close_time_ms"):
+            state["anchors"]["BTCUSDT"][key] += worker.MINUTE
+        states.append(state)
+        for state in states:
+            with self.subTest(state=state), self.assertRaises(worker.EpochError):
+                worker.validate_history_state(state)
+
+    def test_explicit_audit_digest_is_enforced_without_changing_legacy_seed_contract(
+        self,
+    ):
+        digest = self.value()["audit_table_sha256"]
+        worker.validate_expected_audit_digest({"rows": 173164}, {"sha256": "0" * 64})
+        worker.validate_expected_audit_digest(
+            {"audit_table_sha256": digest}, {"sha256": digest}
+        )
+        for expected in ("0" * 64, "not-a-hash"):
+            with self.assertRaisesRegex(
+                worker.EpochError, "EXPECTED_FULL_AUDIT_DIGEST_CONFLICT"
+            ):
+                worker.validate_expected_audit_digest(
+                    {"audit_table_sha256": expected}, {"sha256": digest}
+                )
+
+    def test_history_state_configuration_is_exact_and_has_no_runtime_credentials(self):
+        config = {
+            k: v
+            for k, v in _catchup_config().items()
+            if k in {"owner", "database", "pg_host", "redis_host"}
+        }
+        config["admin_password"] = "a" * 64
+        worker.validate_config(config, "history-state")
+        for changed in (
+            {**config, "consumer_password": "b" * 64},
+            {k: v for k, v in config.items() if k != "admin_password"},
+        ):
+            with self.assertRaisesRegex(
+                worker.EpochError, "EXACT_READONLY_HISTORY_STATE_CONFIG_REQUIRED"
+            ):
+                worker.validate_config(changed, "history-state")
+
+    def test_native_snapshot_uses_one_readonly_repeatable_transaction_and_closes(self):
+        state = self.value()
+
+        class Transaction:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Connection:
+            def __init__(self):
+                self.closed = False
+                self.tx = None
+
+            def transaction(self, **kwargs):
+                self.tx = kwargs
+                return Transaction()
+
+            async def fetch(self, _query):
+                return [{"relname": n} for n in worker.CONTROLLED_RUNTIME_PUBLIC_TABLES]
+
+            async def fetchrow(self, query, *args):
+                if "row_sha" in query:
+                    return {"n": 173164, "digest": worker.ORIGINAL_PREFIX_TABLE_SHA256}
+                anchor = state["anchors"][args[-1]]
+                return {
+                    "n": anchor["count"],
+                    "u": anchor["count"],
+                    "lo": anchor["first_open_time_ms"],
+                    "hi": anchor["last_open_time_ms"],
+                }
+
+            async def fetchval(self, query):
+                self_test.assertTrue(query.startswith("SELECT count(*) FROM public."))
+                return 0
+
+            async def close(self):
+                self.closed = True
+
+        self_test = self
+        connection = Connection()
+        helper = types.ModuleType("controlled_runtime_worker")
+        helper.Budget = lambda: object()
+        helper._table_digest = mock.AsyncMock(
+            return_value={"count": 176348, "sha256": state["audit_table_sha256"]}
+        )
+        with (
+            mock.patch.dict(sys.modules, {"controlled_runtime_worker": helper}),
+            mock.patch.object(
+                worker, "connect", new=mock.AsyncMock(return_value=connection)
+            ),
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()),
+        ):
+            result = asyncio.run(worker.history_state({}))
+        self.assertEqual(result["state"], "VERIFIED_AUDIT_ONLY_HISTORY_STATE")
+        self.assertEqual(
+            connection.tx, {"isolation": "repeatable_read", "readonly": True}
+        )
+        self.assertTrue(connection.closed)
+
+
+class FetchTimeoutRetryTests(unittest.TestCase):
+    @staticmethod
+    def session(outcomes):
+        class Content:
+            async def iter_chunked(self, _size):
+                yield b"[]"
+
+        class Response:
+            status = 200
+            content_length = 2
+            content = Content()
+
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            async def __aenter__(self):
+                if isinstance(self.outcome, BaseException):
+                    raise self.outcome
+                self.status = self.outcome
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, copy.deepcopy(kwargs)))
+                return Response(outcomes[len(self.calls) - 1])
+
+        return Session()
+
+    def test_timeout_get_retry_keeps_identical_parameters_and_never_publishes(self):
+        session = self.session([TimeoutError(), 200])
+        with mock.patch.object(worker.asyncio, "sleep", new=mock.AsyncMock()) as pause:
+            self.assertEqual(
+                asyncio.run(
+                    worker.fetch_closed_bar_page(session, "BTCUSDT", 60000, 120000)
+                ),
+                [],
+            )
+        self.assertEqual(session.calls[0], session.calls[1])
+        pause.assert_awaited_once_with(2)
+
+    def test_three_timed_out_reads_fail_closed_with_safe_reason(self):
+        session = self.session([TimeoutError()] * 3)
+        with (
+            mock.patch.object(worker.asyncio, "sleep", new=mock.AsyncMock()) as pause,
+            self.assertRaisesRegex(
+                worker.EpochError, "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+            ),
+        ):
+            asyncio.run(worker.fetch_closed_bar_page(session, "BTCUSDT", 60000, 120000))
+        self.assertEqual(len(session.calls), 3)
+        self.assertEqual(pause.await_args_list, [mock.call(2), mock.call(4)])
+
+    def test_http_rejection_is_not_retried(self):
+        session = self.session([429])
+        with (
+            mock.patch.object(worker.asyncio, "sleep", new=mock.AsyncMock()) as pause,
+            self.assertRaisesRegex(
+                worker.EpochError, "OFFICIAL_CLOSED_BAR_FETCH_FAILED"
+            ),
+        ):
+            asyncio.run(worker.fetch_closed_bar_page(session, "BTCUSDT", 60000, 120000))
+        self.assertEqual(len(session.calls), 1)
+        pause.assert_not_awaited()
 
 
 class HistorySnapshotTests(unittest.TestCase):
@@ -677,12 +910,20 @@ class FailureHandlingTests(unittest.TestCase):
                 worker, "anchors", new=mock.AsyncMock(return_value=anchor_map)
             ),
             mock.patch.object(worker, "required_bars", return_value=5),
+            mock.patch.object(worker, "write_status") as status_writer,
             self.assertRaisesRegex(
                 worker.EpochError, "OFFICIAL_CLOSED_BAR_FETCH_FAILED"
             ),
         ):
             asyncio.run(worker.recover(current, publish=False, status_path=status))
         self.assertTrue(pool.closed)
+        self.assertEqual(status_writer.call_count, len(worker.SYMBOLS))
+        self.assertTrue(
+            all(
+                call.kwargs.get("immutable") is True
+                for call in status_writer.call_args_list
+            )
+        )
 
     def _run_chunked_recovery(self, chunks, *, content_length=None):
         pool = _FakePool(_FakeOutboxConnection([]))

@@ -25,6 +25,13 @@ MAX_BARS = 150_000
 MAX_PENDING = 100
 FINALITY_MS = 5_000
 MAX_STATUS_BYTES = 32_768
+FETCH_TIMEOUT_ATTEMPTS = 3
+FETCH_RETRY_SECONDS = (2, 4)
+ORIGINAL_PREFIX_ROWS = 173_164
+ORIGINAL_PREFIX_LAST_OPEN_MS = 1_789_832_580_000
+ORIGINAL_PREFIX_TABLE_SHA256 = (
+    "f23b4060feae703c568b0204f4b3ff8932fe2813b20f578bc0a0d983e5600499"
+)
 SOURCE = "kairos-quant-scouts"
 SOURCE_DUMP_SHA256 = "2408db1335dc856122750e4604f14a436184f54a7f4ffab22bc35eb69747a7bc"
 DB_ROLES = ("kairos_epoch_history", "kairos_epoch_producer", "kairos_epoch_consumer")
@@ -70,6 +77,7 @@ MODES = (
     "catchup",
     "verify-restore",
     "rotate-history",
+    "history-state",
     "qualify",
     "serve",
 )
@@ -111,6 +119,14 @@ def validate_config(value: dict, mode: str) -> None:
     for key, item in value.items():
         if key.endswith("password") and not re.fullmatch(r"[0-9a-f]{64}", item):
             raise EpochError("NEW_PRIVATE_CREDENTIAL_REQUIRED")
+    if mode == "history-state" and set(value) != {
+        "owner",
+        "database",
+        "pg_host",
+        "redis_host",
+        "admin_password",
+    }:
+        raise EpochError("EXACT_READONLY_HISTORY_STATE_CONFIG_REQUIRED")
     if mode in {"qualify", "serve"}:
         if any(
             k in value
@@ -428,6 +444,112 @@ def validate_epoch_table_inventory(tables: list[str]) -> None:
         raise EpochError("EXACT_EPOCH_TABLE_INVENTORY_REQUIRED")
 
 
+def validate_expected_audit_digest(expected_seed: dict, audit: dict) -> None:
+    if "audit_table_sha256" in expected_seed and (
+        re.fullmatch(r"[0-9a-f]{64}", str(expected_seed["audit_table_sha256"])) is None
+        or audit.get("sha256") != expected_seed["audit_table_sha256"]
+    ):
+        raise EpochError("EXPECTED_FULL_AUDIT_DIGEST_CONFLICT")
+
+
+def validate_history_state(value: dict) -> None:
+    prefix = value.get("original_prefix")
+    if (
+        value.get("matched_public_tables") != len(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        or prefix
+        != {
+            "rows": ORIGINAL_PREFIX_ROWS,
+            "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
+            "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+        }
+        or type(value.get("rows")) is not int
+        or not ORIGINAL_PREFIX_ROWS <= value["rows"] <= 1_000_000
+        or re.fullmatch(r"[0-9a-f]{64}", str(value.get("audit_table_sha256", "")))
+        is None
+        or any(
+            type(value.get(k)) is not int or value[k] != 0
+            for k in ("outbox_rows", "inbox_rows", "orders_rows", "effects_rows")
+        )
+        or value.get("trading_started") is not False
+    ):
+        raise EpochError("VERIFIED_AUDIT_ONLY_HISTORY_STATE_REQUIRED")
+    history = value.get("anchors")
+    validate_history_snapshot(
+        value["rows"], history, {"rows": value["rows"], "anchors": history}
+    )
+    for symbol, anchor in history.items():
+        first = 1_787_754_720_000 if symbol == "XRPUSDT" else 1_787_754_660_000
+        if (
+            anchor["first_open_time_ms"] != first
+            or anchor["last_open_time_ms"] < ORIGINAL_PREFIX_LAST_OPEN_MS
+        ):
+            raise EpochError("ORIGINAL_HISTORY_PREFIX_BOUNDARY_REQUIRED")
+
+
+async def history_state(config: dict) -> dict:
+    """Read only the owned epoch and prove the immutable original row prefix."""
+    from controlled_runtime_worker import Budget, _table_digest
+
+    connection = await connect(config, "kairos")
+    try:
+        async with connection.transaction(isolation="repeatable_read", readonly=True):
+            await verify_schema(connection)
+            tables = [
+                r["relname"]
+                for r in await connection.fetch(
+                    "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relispartition ORDER BY c.relname"
+                )
+            ]
+            validate_epoch_table_inventory(tables)
+            audit = await _table_digest(connection, "event_audit", Budget())
+            prefix = await connection.fetchrow(
+                """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r""",
+                ORIGINAL_PREFIX_LAST_OPEN_MS,
+            )
+            history = {}
+            for symbol in SYMBOLS:
+                row = await connection.fetchrow(
+                    """SELECT count(*) n,count(DISTINCT (payload->>'open_time_ms')::bigint) u,min((payload->>'open_time_ms')::bigint) lo,max((payload->>'open_time_ms')::bigint) hi FROM event_audit WHERE topic=$1 AND source=$2 AND payload->>'symbol'=$3""",
+                    TOPIC,
+                    SOURCE,
+                    symbol,
+                )
+                if not row["n"] or row["n"] != row["u"]:
+                    raise EpochError("HISTORY_STATE_UNIQUE_CHAIN_REQUIRED")
+                history[symbol] = {
+                    "count": row["n"],
+                    "first_open_time_ms": row["lo"],
+                    "last_open_time_ms": row["hi"],
+                    "last_close_time_ms": row["hi"] + MINUTE - 1,
+                }
+            result = {
+                "state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
+                "rows": audit["count"],
+                "audit_table_sha256": audit["sha256"],
+                "anchors": history,
+                "matched_public_tables": len(tables),
+                "original_prefix": {
+                    "rows": prefix["n"],
+                    "audit_table_sha256": prefix["digest"],
+                    "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+                },
+                "trading_started": False,
+            }
+            for key, table in (
+                ("outbox_rows", "message_outbox"),
+                ("inbox_rows", "message_inbox"),
+                ("orders_rows", "execution_orders"),
+                ("effects_rows", "execution_effects"),
+            ):
+                result[key] = await connection.fetchval(
+                    f'SELECT count(*) FROM public."{table}"'
+                )
+            validate_history_state(result)
+            return result
+    finally:
+        await connection.close()
+
+
 async def verify_restore(config: dict) -> dict:
     import asyncpg
     from controlled_runtime_worker import Budget, _table_digest
@@ -460,6 +582,9 @@ async def verify_restore(config: dict) -> dict:
             budget = Budget()
             for table in tables:
                 result[table] = await _table_digest(connection, table, budget)
+            validate_expected_audit_digest(
+                config["expected_seed"], result["event_audit"]
+            )
             for table in (
                 "message_outbox",
                 "message_inbox",
@@ -595,6 +720,42 @@ class EpochWriter:
                 )
 
 
+async def fetch_closed_bar_page(session, symbol: str, start: int, finish: int):
+    """Retry only timed-out public GETs, never a database append or publication."""
+    for attempt in range(FETCH_TIMEOUT_ATTEMPTS):
+        try:
+            async with session.get(
+                "https://fapi.binance.com/fapi/v1/klines",
+                params={
+                    "symbol": symbol,
+                    "interval": "1m",
+                    "startTime": start,
+                    "endTime": finish - 1,
+                    "limit": (finish - start) // MINUTE,
+                },
+                allow_redirects=False,
+            ) as response:
+                if (
+                    response.status != 200
+                    or response.content_length
+                    and response.content_length > 2_000_000
+                ):
+                    raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_FAILED")
+                chunks = []
+                size = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    size += len(chunk)
+                    if size > 2_000_000:
+                        raise EpochError("REST_RESPONSE_BOUND_EXCEEDED")
+                    chunks.append(chunk)
+                return json.loads(b"".join(chunks))
+        except TimeoutError:
+            if attempt + 1 == FETCH_TIMEOUT_ATTEMPTS:
+                raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT") from None
+            await asyncio.sleep(FETCH_RETRY_SECONDS[attempt])
+    raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT")
+
+
 async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
     import aiohttp
     import asyncpg
@@ -625,31 +786,7 @@ async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
             ) as session:
 
                 async def fetch(symbol, start, finish):
-                    async with session.get(
-                        "https://fapi.binance.com/fapi/v1/klines",
-                        params={
-                            "symbol": symbol,
-                            "interval": "1m",
-                            "startTime": start,
-                            "endTime": finish - 1,
-                            "limit": (finish - start) // MINUTE,
-                        },
-                        allow_redirects=False,
-                    ) as response:
-                        if (
-                            response.status != 200
-                            or response.content_length
-                            and response.content_length > 2_000_000
-                        ):
-                            raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_FAILED")
-                        chunks = []
-                        size = 0
-                        async for chunk in response.content.iter_chunked(65536):
-                            size += len(chunk)
-                            if size > 2_000_000:
-                                raise EpochError("REST_RESPONSE_BOUND_EXCEEDED")
-                            chunks.append(chunk)
-                        return json.loads(b"".join(chunks))
+                    return await fetch_closed_bar_page(session, symbol, start, finish)
 
                 async def one(symbol):
                     def report(item):
@@ -679,15 +816,34 @@ async def recover(config: dict, *, publish: bool, status_path: Path) -> dict:
                     async def pause():
                         await asyncio.sleep(5)
 
-                    count = await recover_symbol(
-                        values[symbol],
-                        end_exclusive=end,
-                        fetch=fetch,
-                        publish=append,
-                        pause=pause,
-                        progress=lambda _item: None,
-                        status=state,
-                    )
+                    try:
+                        count = await recover_symbol(
+                            values[symbol],
+                            end_exclusive=end,
+                            fetch=fetch,
+                            publish=append,
+                            pause=pause,
+                            progress=lambda _item: None,
+                            status=state,
+                        )
+                    except Exception as exc:
+                        write_status(
+                            status_path.parent / ("failure-" + symbol + ".json"),
+                            {
+                                "state": "FAILED_CLOSED",
+                                "symbol": symbol,
+                                "phase": getattr(state, "phase", "UNOBSERVED"),
+                                "error_type": type(exc).__name__,
+                                "appended_bars": getattr(
+                                    state, "total_appended_bars", None
+                                ),
+                                "publish_outcome_unknown": getattr(state, "phase", None)
+                                == "DURABLE_PUBLISH",
+                                "trading_started": False,
+                            },
+                            immutable=True,
+                        )
+                        raise
                     totals[symbol] = count
                     write_status(
                         status_path,
@@ -1056,6 +1212,8 @@ async def dispatch(mode: str, config: dict, output: Path) -> dict:
         return await seed(config)
     if mode == "rotate-history":
         return await rotate_history(config)
+    if mode == "history-state":
+        return await history_state(config)
     if mode == "catchup":
         return await recover(
             config, publish=False, status_path=output / "progress.json"
