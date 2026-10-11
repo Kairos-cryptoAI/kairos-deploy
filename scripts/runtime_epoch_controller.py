@@ -1759,7 +1759,7 @@ def _private_directory(path: Path) -> None:
     command = (
         "$ErrorActionPreference='Stop'; $p='"
         + quoted
-        + "'; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetAccessRuleProtection($true,$false); $ids=@([Security.Principal.WindowsIdentity]::GetCurrent().User,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')); foreach($id in $ids){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}; Set-Acl -LiteralPath $p -AclObject $acl; $got=Get-Acl -LiteralPath $p; if(!$got.AreAccessRulesProtected -or @($got.Access).Count -ne 3){throw 'PRIVATE_EPOCH_ACL_REQUIRED'}"
+        + "'; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetAccessRuleProtection($true,$false); $ids=@([Security.Principal.WindowsIdentity]::GetCurrent().User,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')); foreach($id in $ids){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($id,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}; [IO.Directory]::SetAccessControl($p,$acl); $got=[IO.Directory]::GetAccessControl($p,[Security.AccessControl.AccessControlSections]::Access); $rules=$got.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]); if(!$got.AreAccessRulesProtected -or $rules.Count -ne 3){throw 'PRIVATE_EPOCH_ACL_REQUIRED'}; foreach($rule in $rules){if($rule.IsInherited -or $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl' -or $rule.IdentityReference.Value -notin @($ids.Value)){throw 'PRIVATE_EPOCH_EXACT_DACL_REQUIRED'}}"
     )
     result = subprocess.run(
         [str(PS), "-NoProfile", "-NonInteractive", "-Command", command],
@@ -1769,6 +1769,7 @@ def _private_directory(path: Path) -> None:
         timeout=15,
         check=False,
         shell=False,
+        env=fresh.supervisor_environment(),
     )
     if result.returncode:
         raise Rejected("PRIVATE_EPOCH_DIRECTORY_ACL_FAILED")

@@ -440,6 +440,20 @@ class RuntimeEpochControllerTests(unittest.TestCase):
                 )
             self.assertEqual([call[0] for call in calls], ["stop", "start"])
 
+    def test_private_acl_process_does_not_inherit_powershell_module_path(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "owned"
+            with (
+                patch.dict(epoch.os.environ, {"PSModulePath": "untrusted-module-path"}),
+                patch.object(
+                    epoch.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ) as run,
+            ):
+                epoch._private_directory(path)
+            self.assertNotIn("PSModulePath", run.call_args.kwargs["env"])
+            self.assertEqual(run.call_args.args[0][0], str(epoch.PS))
+            self.assertTrue(path.is_dir())
+
     def test_private_wheel_snapshot_requires_exact_manifest_and_two_packages(self):
         self.assertEqual(
             epoch.PERSISTENCE_REVISION, "11df49ce455b89fd252d5f3d948099a8e9211cb3"
