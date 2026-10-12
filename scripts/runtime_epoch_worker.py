@@ -33,6 +33,8 @@ FINALITY_MS = 5_000
 MAX_STATUS_BYTES = 32_768
 FETCH_TIMEOUT_ATTEMPTS = 3
 FETCH_RETRY_SECONDS = (2, 4)
+SOURCE_WAIT_SECONDS = (5, 15, 30, 60)
+SOURCE_HEARTBEAT_SECONDS = 5
 MAX_UNPUBLISHED_CONFIRMATION_RETRIES = 2  # Three complete rounds including the first.
 RUNTIME_REDIS_BLOCK_MS = 1_000
 RUNTIME_REDIS_COMMAND_SECONDS = 6.0
@@ -95,6 +97,9 @@ MODES = (
     "r5-state",
     "r5-verify-restore",
     "r5-drain",
+    "r6-state",
+    "r6-verify-restore",
+    "r6-drain",
     "boot-verify-restore",
     "boot-catchup",
     "boot-redis-state",
@@ -174,6 +179,17 @@ def safe_unpublished_confirmation(
 
 
 def validate_config(value: dict, mode: str) -> None:
+    if mode in {"r6-state", "r6-verify-restore", "r6-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_feed_recovery_worker import (
+                validate_config as validate_r6,
+            )
+        else:
+            from runtime_epoch_feed_recovery_worker import (
+                validate_config as validate_r6,
+            )
+        validate_r6(mode, value)
+        return
     if mode in {"r5-state", "r5-verify-restore", "r5-drain"}:
         if __package__:
             from scripts.runtime_epoch_read_recovery_worker import (
@@ -292,6 +308,11 @@ def validate_config(value: dict, mode: str) -> None:
                 ),
                 *(
                     {"kairos-epoch-69893dc7b7c6-restore-transport05"}
+                    if owner == "69893dc7b7c647f49967387e7efca9fb"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-69893dc7b7c6-restore-transport06"}
                     if owner == "69893dc7b7c647f49967387e7efca9fb"
                     else set()
                 ),
@@ -1406,6 +1427,86 @@ def required_bars(values: dict, end: int) -> int:
     return sum(n // MINUTE for n in intervals)
 
 
+def bounded_runtime_end(values: dict, target: int) -> int:
+    """Catch up an outage in <=100-bar batches, never relabel a lag as fresh."""
+    if set(values) != set(SYMBOLS) or type(target) is not int or target % MINUTE:
+        raise EpochError("FIXED_CATCHUP_INTERVAL_REQUIRED")
+    latest = max(e.close_time_ms + 1 for e in values.values())
+    if latest > target:
+        raise EpochError("FINALITY_CLOCK_REGRESSION")
+    baseline = required_bars(values, latest)
+    if baseline > MAX_PENDING:
+        raise EpochError("RUNTIME_WATERMARK_SKEW_EXCEEDS_PENDING_CAP")
+    capacity_minutes = (MAX_PENDING - baseline) // len(SYMBOLS)
+    end = min(target, latest + capacity_minutes * MINUTE)
+    if required_bars(values, end) > MAX_PENDING:
+        raise EpochError("EPOCH_INTERVAL_EXCEEDS_FIXED_CAP")
+    return end
+
+
+def source_wait_reason(error: BaseException) -> str | None:
+    """Only admitted public-GET timeouts can defer; mixed groups stay fatal."""
+    if isinstance(error, ExceptionGroup):
+        reasons = [source_wait_reason(child) for child in error.exceptions]
+        return reasons[0] if reasons and all(reasons) else None
+    if (
+        isinstance(error, EpochError)
+        and str(error) == "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+    ):
+        return "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+    return None
+
+
+class SourceCircuit:
+    """Finite per-round retry budget and capped, cancellable outage backoff."""
+
+    def __init__(self):
+        self.timeouts = 0
+        self.recoveries = 0
+        self.consecutive = 0
+
+    def failed(self, error: BaseException) -> str:
+        reason = source_wait_reason(error)
+        if reason is None:
+            raise error
+        self.timeouts += 1
+        self.consecutive += 1
+        return reason
+
+    def succeeded(self) -> None:
+        if self.consecutive:
+            self.recoveries += 1
+        self.consecutive = 0
+
+    def snapshot(self) -> dict:
+        return {
+            "timeout_rounds": self.timeouts,
+            "recoveries": self.recoveries,
+            "consecutive_timeout_rounds": self.consecutive,
+        }
+
+    async def wait(self, requested, consumer, heartbeat) -> None:
+        delay = SOURCE_WAIT_SECONDS[
+            min(max(self.consecutive - 1, 0), len(SOURCE_WAIT_SECONDS) - 1)
+        ]
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline and not requested.is_set():
+            if consumer.done():
+                await consumer
+                raise EpochError("CONSUMER_STOPPED")
+            heartbeat()
+            try:
+                await asyncio.wait_for(
+                    requested.wait(),
+                    timeout=min(
+                        SOURCE_HEARTBEAT_SECONDS,
+                        max(0.001, deadline - time.monotonic()),
+                    ),
+                )
+            except TimeoutError:
+                pass
+
+
 class EpochWriter:
     def __init__(self, pool):
         from kairos_persistence.repository import AuditRepository
@@ -1491,6 +1592,7 @@ async def recover(
     publish: bool,
     status_path: Path,
     boot_expected: dict | None = None,
+    failure_suffix: str = "",
 ) -> dict:
     import aiohttp
     import asyncpg
@@ -1640,7 +1742,8 @@ async def recover(
                         count = await recover_with_confirmation_retries()
                     except asyncio.CancelledError as exc:
                         write_status(
-                            status_path.parent / ("failure-" + symbol + ".json"),
+                            status_path.parent
+                            / ("failure-" + symbol + failure_suffix + ".json"),
                             {
                                 "state": "FAILED_CLOSED",
                                 "symbol": symbol,
@@ -1661,7 +1764,8 @@ async def recover(
                         raise
                     except Exception as exc:
                         write_status(
-                            status_path.parent / ("failure-" + symbol + ".json"),
+                            status_path.parent
+                            / ("failure-" + symbol + failure_suffix + ".json"),
                             {
                                 "state": "FAILED_CLOSED",
                                 "symbol": symbol,
@@ -1709,7 +1813,21 @@ async def recover(
                     # TaskGroup cancels and awaits siblings before returning. Keep
                     # the original operational exception as the top-level reason;
                     # per-symbol immutable failure receipts retain sibling outcomes.
+                    # Never let the first timeout hide a sibling integrity/DB
+                    # failure when the serving circuit decides whether to wait.
                     original = errors
+                    leaves = []
+                    pending_errors = [errors]
+                    while pending_errors:
+                        item = pending_errors.pop()
+                        if isinstance(item, ExceptionGroup):
+                            pending_errors.extend(item.exceptions)
+                        else:
+                            leaves.append(item)
+                    if any(source_wait_reason(e) for e in leaves) and any(
+                        source_wait_reason(e) is None for e in leaves
+                    ):
+                        raise
                     while isinstance(original, ExceptionGroup):
                         original = original.exceptions[0]
                     raise original
@@ -2251,6 +2369,7 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
     supervisor = None
     qualification_proofs = {}
     redis_telemetry = {"transport_failures": 0, "recoveries": 0, "pending_replays": 0}
+    source_circuit = SourceCircuit()
     shutdown_requested = asyncio.Event()
     loop = asyncio.get_running_loop()
     signals = (
@@ -2287,10 +2406,24 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
             if task.done():
                 await task
                 raise EpochError("CONSUMER_STOPPED")
-            end = ((int(time.time() * 1000) - FINALITY_MS) // MINUTE) * MINUTE
+            target = ((int(time.time() * 1000) - FINALITY_MS) // MINUTE) * MINUTE
             await flush(config, pool, producer)
+            end = bounded_runtime_end(await anchors(pool), target)
             current = {**config, "end_exclusive_ms": end}
-            await recover(current, publish=True, status_path=output / "progress.json")
+            waiting_reason = None
+            try:
+                await recover(
+                    current,
+                    publish=True,
+                    status_path=output / "progress.json",
+                    failure_suffix="-" + str(time.time_ns()),
+                )
+            except Exception as source_error:
+                if qualification:
+                    raise
+                waiting_reason = source_circuit.failed(source_error)
+            else:
+                source_circuit.succeeded()
             sent = await flush(config, pool, producer)
             deadline = time.monotonic() + 30
             while True:
@@ -2326,12 +2459,25 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                     raise EpochError("CONSUMER_COMPLETION_DEADLINE")
                 await asyncio.sleep(0.25)
             watermarks = await anchors(pool)
+            current_target = (
+                (int(time.time() * 1000) - FINALITY_MS) // MINUTE
+            ) * MINUTE
+            source_fresh = waiting_reason is None and all(
+                event.close_time_ms + 1 >= current_target
+                for event in watermarks.values()
+            )
             if qualification and completed > 0 and not qualification_proofs:
                 qualification_proofs = await verify_duplicate_delivery(
                     config, pool, producer, consumer_probe, task
                 )
             report = {
-                "state": "RUNNING_NONTRADING",
+                "state": (
+                    "WAITING_SOURCE_NONTRADING"
+                    if waiting_reason
+                    else "CATCHING_UP_NONTRADING"
+                    if not source_fresh
+                    else "RUNNING_NONTRADING"
+                ),
                 "owner": config["owner"],
                 "cycles": cycles + 1,
                 "watermarks_ms": {
@@ -2349,10 +2495,21 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                 "STRATEGY_POLICY": "REJECT_ALL",
                 "qualification_proofs": qualification_proofs,
                 "redis_transport": dict(redis_telemetry),
+                "source_transport": source_circuit.snapshot(),
+                "source_wait_reason": waiting_reason,
+                "finalized_target_ms": current_target,
+                "batch_end_exclusive_ms": end,
+                "source_fresh": source_fresh,
+                "trading_started": False,
             }
             write_status(output / "status.json", report)
             cycles += 1
-            if qualification and completed > 0 and cycles >= 2:
+            if (
+                qualification
+                and completed > 0
+                and cycles >= 2
+                and report["source_fresh"]
+            ):
                 return {**report, "state": "NONTRADING_RUNTIME_QUALIFIED"}
             if shutdown_requested.is_set():
                 return {
@@ -2360,7 +2517,24 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                     "state": "STOPPED_NONTRADING",
                     "graceful_shutdown": True,
                 }
-            await runtime_idle(shutdown_requested)
+            if waiting_reason:
+
+                def heartbeat(_report=report):
+                    _report["observed_at_utc"] = datetime.now(UTC).isoformat()
+                    write_status(output / "status.json", _report)
+
+                await source_circuit.wait(shutdown_requested, task, heartbeat)
+                if shutdown_requested.is_set():
+                    return {
+                        **report,
+                        "state": "STOPPED_NONTRADING",
+                        "graceful_shutdown": True,
+                    }
+            elif not source_fresh:
+                # Every bounded batch is flushed and fully consumed first.
+                await asyncio.sleep(0)
+            else:
+                await runtime_idle(shutdown_requested)
     finally:
         for signum in signals:
             loop.remove_signal_handler(signum)
@@ -2378,6 +2552,12 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
 
 async def dispatch(mode: str, config: dict, output: Path) -> dict:
     validate_config(config, mode)
+    if mode in {"r6-state", "r6-verify-restore", "r6-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_feed_recovery_worker import dispatch_r6
+        else:
+            from runtime_epoch_feed_recovery_worker import dispatch_r6
+        return await dispatch_r6(mode, config, output)
     if mode in {"r5-state", "r5-verify-restore", "r5-drain"}:
         if __package__:
             from scripts.runtime_epoch_read_recovery_worker import dispatch_r5
@@ -2440,6 +2620,8 @@ def failure_locations(error: BaseException) -> list[dict]:
                         "scripts.runtime_epoch_worker",
                         "runtime_epoch_read_recovery_worker",
                         "scripts.runtime_epoch_read_recovery_worker",
+                        "runtime_epoch_feed_recovery_worker",
+                        "scripts.runtime_epoch_feed_recovery_worker",
                     }
                     or module.startswith(("asyncio.", "asyncpg.", "aiohttp.", "redis."))
                 )

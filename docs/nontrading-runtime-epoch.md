@@ -135,3 +135,39 @@ receipt; it does not interrupt an inbox transaction or overwrite a prior receipt
 Implementation and finite acceptance are not a claim of month-long uptime.
 Boot and technical notifications must be separately bound to the accepted R5
 receipt and exact signed sources. Trading and all readiness flags remain off.
+
+## Feed outage handling and exact R5-to-R6 continuation
+
+The later R5 failure is a distinct public closed-bar GET timeout. A successful
+short observation or Redis fix is not proof that the feed path is resilient.
+R6 retains every prior generation, source snapshot, latch and receipt.
+
+The separate `runtime_epoch_feed_recovery.py` path is create-only and plan-only
+by default. Its admitted pre-state is 339,618 audit rows, 5,795 outbox rows,
+5,791 completed inbox rows, and exactly four fixed **unpublished** messages.
+It requires a new full 32-table/sequence/five-chain isolated restore before
+publishing those four once through the existing dispatcher and completing their
+durable inbox/ACKs. Old publications and queue prefixes remain unchanged.
+Only then does it perform audit-only backfill, another complete restore and
+fresh five-symbol progression before/after a graceful same-container restart.
+Legacy clusters, cursors and leases are never reset or connected for recovery.
+
+The serving circuit recognizes only the admitted public-GET timeout. It keeps
+the existing three attempts per GET round and waits with a capped 5/15/30/60s
+backoff, five-second status heartbeat and cooperative stop. Its state is
+`WAITING_SOURCE_NONTRADING`, not a fresh/healthy trading feed. Mixed timeout and
+integrity/database failures remain fatal. HTTP rejection, TLS validation,
+malformed payloads and other unadmitted failures are not converted into retries.
+
+On source recovery, live catch-up is split into batches of at most 100 aggregate
+bars; the cap is not raised after an outage. Each batch is flushed and fully
+consumed before proceeding. `CATCHING_UP_NONTRADING` remains unready; only actual
+watermarks at the current finalized target can yield `RUNNING_NONTRADING`.
+Per-attempt failure diagnostics are create-only, so repeated timeouts do not
+overwrite an earlier failure receipt. Offline fault tests exercise the actual
+supervisor loop, timeout/defer/recovery, same-consumer lifecycle, mixed-failure
+rejection, capped batches and cancellation without any trading authority.
+
+Source/test completion does not imply native R6 acceptance, external alert
+delivery, OS-reboot qualification or long-duration availability. Those require
+their separate receipts. All project readiness flags remain false.
