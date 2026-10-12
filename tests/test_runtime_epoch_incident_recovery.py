@@ -37,6 +37,16 @@ def observation() -> dict:
 
 
 class IncidentRecoveryTests(unittest.TestCase):
+    def test_every_worker_mode_is_launchable_with_fixed_paths(self):
+        from scripts.runtime_epoch_worker import MODES
+
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                argv = epoch.build_worker_argv(
+                    mode, epoch.CONFIG_PATH_IN_CONTAINER, epoch.OUTPUT_PATH_IN_CONTAINER
+                )
+                self.assertEqual(argv[4], mode)
+
     def test_plan_does_not_read_private_files_or_contact_services(self):
         with (
             mock.patch.object(recovery, "load_observation") as read,

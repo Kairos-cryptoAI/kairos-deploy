@@ -385,7 +385,15 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         "boot-verify-restore",
         "incident-verify-restore",
     } and (
-        value["restore_host"] != "kairos-epoch-" + value["owner"][:12] + "-restore"
+        value["restore_host"]
+        not in {
+            "kairos-epoch-" + value["owner"][:12] + "-restore",
+            *(
+                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-incident03"}
+                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                else set()
+            ),
+        }
         or value["restore_database"]
         != "kairos_recovery_" + value["owner"][:12] + "_epochrestore"
         or not isinstance(value["expected_seed"], dict)
@@ -575,6 +583,7 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "boot-state",
         "incident-state",
         "incident-drain",
+        "incident-verify-restore",
         "boot-redis-state",
         "boot-redis-clone",
         "boot-catchup",

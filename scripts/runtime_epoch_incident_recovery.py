@@ -36,6 +36,17 @@ PREBACKUP_STATE_SHA256 = (
     "1c9a1b1473f77cfa26c91127595cd753263d9203e69337669032dbc14fa41b9d"
 )
 REVIEWED_LEASE = ROOT / "reviewed-prebackup-02.active"
+RESTORE_REFUSAL_WORK = ROOT / "recovery-1006ced2555a4e90a609b2f436146667"
+RESTORE_REFUSAL_SHA256 = (
+    "ce580c73e069fb7c88a3c3965ba4b4d7c976e8998c2fd8d2e58d9a5b8381b987"
+)
+RESTORE_REFUSAL_DUMP_SHA256 = (
+    "38bb064ad6d6e53dc9e35381bf2e5c1323326cf40a8b00518027e79e767fad4f"
+)
+RESTORE_REFUSAL_CLONE_ID = (
+    "04c62398273ac7bedcfa036e2d035ff0ac7406aeb6deb1b43a3aefb69ef75895"
+)
+REVIEWED_RESTORE_LEASE = ROOT / "reviewed-restore-03.active"
 OBSERVATION = ROOT / "observation-eca4d844945b493daf669366945d266e/receipt.json"
 OBSERVATION_SHA256 = "f47dff8bfc56cb5c387188cd5b7fb465809321c55c9d0580c3d172b97059b312"
 GENERATION_NAME = "kairos-epoch-" + boot.OWNER[:12] + "-serve-r2"
@@ -75,7 +86,10 @@ def load_observation() -> dict:
 
 
 def validate_reviewed_prebackup_failure(
-    claim: str, *, accepted_work: Path | None = None
+    claim: str,
+    *,
+    accepted_work: Path | None = None,
+    active_lease: Path = REVIEWED_LEASE,
 ) -> dict:
     """One exact operator-reviewed refusal, before dump or publication, not an automatic retry."""
     failure_path = PREBACKUP_WORK / "failure.json"
@@ -104,7 +118,7 @@ def validate_reviewed_prebackup_failure(
     ):
         raise epoch.Rejected("EXACT_REVIEWED_PREBACKUP_REFUSAL_REQUIRED")
     if accepted_work is not None:
-        active = boot.read_json(REVIEWED_LEASE)
+        active = boot.read_json(active_lease)
         if (
             active.get("owner") != boot.OWNER
             or re.fullmatch(r"[0-9a-f]{32}", str(active.get("run"))) is None
@@ -131,6 +145,45 @@ def validate_reviewed_prebackup_failure(
         "inventory_sha256": fresh.digest(inventory),
         "lease_sha256": fresh.sha(LEASE),
         "state": boot.read_json(state_path),
+        "old_attempt_retained": True,
+    }
+
+
+def validate_reviewed_restore_refusal(claim: str) -> dict:
+    if (
+        claim != RESTORE_REFUSAL_SHA256
+        or fresh.sha(RESTORE_REFUSAL_WORK / "failure.json") != claim
+        or fresh.sha(RESTORE_REFUSAL_WORK / "epoch-history-bootbefore.dump")
+        != RESTORE_REFUSAL_DUMP_SHA256
+        or boot.read_json(RESTORE_REFUSAL_WORK / "failure.json")
+        != {
+            "automatic_retry": False,
+            "phase": "incident-verify-restore-bootbefore",
+            "reason": "WORKER_MODE_REQUIRED",
+            "result": "FAILED_CLOSED",
+            "trading_started": False,
+        }
+        or boot.read_json(REVIEWED_LEASE)
+        != {
+            "owner": boot.OWNER,
+            "run": "1006ced2555a4e90a609b2f436146667",
+            "source_revision": "297c9e3edb876e6efaa03cc3bd85135de47f271f",
+        }
+        or (RESTORE_REFUSAL_WORK / "config-incident-drain.json").exists()
+        or (RESTORE_REFUSAL_WORK / "output-incident-drain").exists()
+    ):
+        raise epoch.Rejected("EXACT_REVIEWED_RESTORE_REFUSAL_REQUIRED")
+    inventory = {
+        path.relative_to(RESTORE_REFUSAL_WORK).as_posix(): fresh.sha(fresh.safe(path))
+        for path in sorted(RESTORE_REFUSAL_WORK.rglob("*"))
+        if path.is_file()
+    }
+    return {
+        "failure_sha256": claim,
+        "backup_sha256": RESTORE_REFUSAL_DUMP_SHA256,
+        "inventory_sha256": fresh.digest(inventory),
+        "lease_sha256": fresh.sha(REVIEWED_LEASE),
+        "retained_clone_id": RESTORE_REFUSAL_CLONE_ID,
         "old_attempt_retained": True,
     }
 
@@ -250,6 +303,18 @@ class IncidentController(boot.BootController):
         ):
             raise epoch.Rejected("ACCEPTED_ORIGINAL_EPOCH_AND_OWNER_REQUIRED")
         before_resources = self.validate_resources(allow_running=True)
+        reviewed_restore = getattr(self, "reviewed_restore", None)
+        retained_clone = None
+        if reviewed_restore is not None:
+            retained_clone = self.inspect_container(RESTORE_REFUSAL_CLONE_ID)
+            if (
+                retained_clone.get("state", {}).get("Status") != "exited"
+                or retained_clone.get("id") != RESTORE_REFUSAL_CLONE_ID
+                or retained_clone.get("image") != epoch.PG_IMAGE.split("@", 1)[-1]
+                or retained_clone.get("labels", {}).get(epoch.EPOCH_LABEL) != boot.OWNER
+                or retained_clone.get("ports")
+            ):
+                raise epoch.Rejected("EXACT_STOPPED_RESTORE_REFUSAL_CLONE_REQUIRED")
         if before_resources["views"]["serve"]["state"]["Status"] != "exited" or any(
             before_resources["views"][key]["state"]["Status"] != "running"
             for key in ("pg", "redis")
@@ -269,7 +334,11 @@ class IncidentController(boot.BootController):
                 raise epoch.Rejected("REVIEWED_PREBACKUP_NATIVE_STATE_CHANGED")
             # Preserve the original initialized-but-unused volume, too. A wholly
             # new disposable restore volume is used by the reviewed continuation.
-            self.names["restore_volume"] += "-incident02"
+            self.names["restore_volume"] += (
+                "-incident03" if reviewed_restore is not None else "-incident02"
+            )
+            if reviewed_restore is not None:
+                self.names["restore_pg"] += "-incident03"
         self.prepare_boot_restore_volume("bootbefore")
         backup_before = self.backup_and_verify(
             seed=before,
@@ -320,8 +389,17 @@ class IncidentController(boot.BootController):
         if reviewed is not None and reviewed != validate_reviewed_prebackup_failure(
             PREBACKUP_FAILURE_SHA256,
             accepted_work=self.work,
+            active_lease=REVIEWED_RESTORE_LEASE
+            if reviewed_restore is not None
+            else REVIEWED_LEASE,
         ):
             raise epoch.Rejected("REVIEWED_PREBACKUP_EVIDENCE_CHANGED")
+        if reviewed_restore is not None and (
+            reviewed_restore
+            != validate_reviewed_restore_refusal(RESTORE_REFUSAL_SHA256)
+            or retained_clone != self.inspect_container(RESTORE_REFUSAL_CLONE_ID)
+        ):
+            raise epoch.Rejected("REVIEWED_RESTORE_REFUSAL_EVIDENCE_CHANGED")
         return {
             "result": "PASS_NEW_NONTRADING_GENERATION",
             "owner": boot.OWNER,
@@ -337,6 +415,7 @@ class IncidentController(boot.BootController):
             "generation": generation,
             "original_inputs_sha256": fresh.digest(input_before),
             "original_failure_sha256": fresh.digest(failure_before),
+            "reviewed_restore_refusal": reviewed_restore,
             "reviewed_prebackup_failure": (
                 {k: v for k, v in reviewed.items() if k != "state"}
                 if reviewed is not None
@@ -358,6 +437,7 @@ def main(argv=None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--expected-revision")
     parser.add_argument("--reviewed-prebackup-failure-sha256")
+    parser.add_argument("--reviewed-restore-refusal-sha256")
     args = parser.parse_args(argv)
     if not args.execute:
         print(
@@ -377,7 +457,19 @@ def main(argv=None) -> int:
         boot.verify_source(args.expected_revision or "")
         load_observation()
         reviewed = None
-        if args.reviewed_prebackup_failure_sha256:
+        reviewed_restore = None
+        if (
+            args.reviewed_prebackup_failure_sha256
+            and args.reviewed_restore_refusal_sha256
+        ):
+            raise epoch.Rejected("REVIEWED_CONTINUATION_CHOICES_ARE_EXCLUSIVE")
+        if args.reviewed_restore_refusal_sha256:
+            reviewed = validate_reviewed_prebackup_failure(PREBACKUP_FAILURE_SHA256)
+            reviewed_restore = validate_reviewed_restore_refusal(
+                args.reviewed_restore_refusal_sha256
+            )
+            active_lease = REVIEWED_RESTORE_LEASE
+        elif args.reviewed_prebackup_failure_sha256:
             reviewed = validate_reviewed_prebackup_failure(
                 args.reviewed_prebackup_failure_sha256
             )
@@ -403,6 +495,7 @@ def main(argv=None) -> int:
             deadline=time.monotonic() + MAX_SECONDS,
         )
         controller.reviewed_prebackup = reviewed
+        controller.reviewed_restore = reviewed_restore
         result = controller.run_incident_recovery()
         path = work / "receipt.json"
         fresh.save(path, result)

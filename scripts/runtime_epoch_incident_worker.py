@@ -76,7 +76,11 @@ def validate_incident_config(mode: str, config: dict) -> None:
     if mode == "incident-drain" and not isinstance(config["expected_state"], dict):
         raise epoch.EpochError("INCIDENT_FULL_PRESTATE_REQUIRED")
     if mode == "incident-verify-restore" and (
-        config["restore_host"] != "kairos-epoch-" + OWNER[:12] + "-restore"
+        config["restore_host"]
+        not in {
+            "kairos-epoch-" + OWNER[:12] + "-restore",
+            "kairos-epoch-" + OWNER[:12] + "-restore-incident03",
+        }
         or config["restore_database"]
         != "kairos_recovery_" + OWNER[:12] + "_epochrestore"
         or not isinstance(config["expected_seed"], dict)

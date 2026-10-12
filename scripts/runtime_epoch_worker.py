@@ -252,7 +252,15 @@ def validate_config(value: dict, mode: str) -> None:
                 "restore_admin_password",
                 "expected_seed",
             }
-            or value.get("restore_host") != "kairos-epoch-" + owner[:12] + "-restore"
+            or value.get("restore_host")
+            not in {
+                "kairos-epoch-" + owner[:12] + "-restore",
+                *(
+                    {"kairos-epoch-69893dc7b7c6-restore-incident03"}
+                    if owner == "69893dc7b7c647f49967387e7efca9fb"
+                    else set()
+                ),
+            }
             or value.get("restore_database")
             != "kairos_recovery_" + owner[:12] + "_epochrestore"
         ):
