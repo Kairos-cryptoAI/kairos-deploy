@@ -398,6 +398,11 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
                 if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
                 else set()
             ),
+            *(
+                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport04"}
+                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                else set()
+            ),
         }
         or value["restore_database"]
         != "kairos_recovery_" + value["owner"][:12] + "_epochrestore"

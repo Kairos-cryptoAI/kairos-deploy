@@ -380,7 +380,22 @@ class BootAdmissionTests(unittest.TestCase):
             "networks": {boot.STANDBY_NETWORK: {}},
             "ports": {},
             "privileged": False,
-            "state": {"Status": "running"},
+            "state": {
+                "Status": "running",
+                "Health": {
+                    "Status": "healthy",
+                    "FailingStreak": 0,
+                    "Log": [
+                        {
+                            "Start": "2026-10-12T01:00:00.000000000Z",
+                            "End": "2026-10-12T01:00:01.000000000Z",
+                            "ExitCode": 0,
+                            "Output": "ready",
+                        }
+                    ],
+                },
+            },
+            "mounts": [],
         }
         controller = self._resource_controller(views)
         controller.docker = mock.Mock(
@@ -390,6 +405,10 @@ class BootAdmissionTests(unittest.TestCase):
         )
         result = controller.validate_resources()
         self.assertTrue(result["standby"]["left_untouched"])
+        self.assertEqual(
+            result["standby"]["metadata"],
+            boot.stable_standby_metadata(views[boot.STANDBY_NAME]),
+        )
         self.assertTrue(
             all(
                 call.args[0][0] in {"inspect", "ps"}

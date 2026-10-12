@@ -53,6 +53,48 @@ STANDBY_ID = "658849c3945081f628ed2acd78ae85f4a95513f6a72517c533c05a1d3a9f8079"
 STANDBY_NETWORK = "kairos-shadow-gate_data"
 
 
+def stable_standby_metadata(value: dict) -> dict:
+    """Canonicalize only natural Docker health-check clock churn.
+
+    This is intentionally pinned to the one reviewed standby identity. Every
+    other metadata field remains in the projection; only Start/End strings in
+    its bounded health log are removed after validating the complete schema.
+    """
+    projected = epoch.normalize_container_metadata(json.loads(json.dumps(value)))
+    state = projected.get("state")
+    health = state.get("Health") if isinstance(state, dict) else None
+    logs = health.get("Log") if isinstance(health, dict) else None
+    if (
+        projected.get("id") != STANDBY_ID
+        or (state or {}).get("Status") != "running"
+        or not isinstance(health, dict)
+        or set(health) != {"Status", "FailingStreak", "Log"}
+        or health.get("Status") != "healthy"
+        or type(health.get("FailingStreak")) is not int
+        or health["FailingStreak"] != 0
+        or not isinstance(logs, list)
+        or not 1 <= len(logs) <= 5
+    ):
+        raise epoch.Rejected("BOOT_STANDBY_HEALTH_METADATA_CONFLICT")
+    timestamp = re.compile(r"^\d{4}-\d{2}-\d{2}T[^\s]{1,40}Z$")
+    for row in logs:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"Start", "End", "ExitCode", "Output"}
+            or not isinstance(row.get("Start"), str)
+            or not timestamp.fullmatch(row["Start"])
+            or not isinstance(row.get("End"), str)
+            or not timestamp.fullmatch(row["End"])
+            or type(row.get("ExitCode")) is not int
+            or not isinstance(row.get("Output"), str)
+            or len(row["Output"]) > 4096
+        ):
+            raise epoch.Rejected("BOOT_STANDBY_HEALTH_LOG_SHAPE_CONFLICT")
+        del row["Start"]
+        del row["End"]
+    return projected
+
+
 def configure_generation_r2() -> None:
     """Bind only the accepted new generation; never restart the failed original."""
     global \
@@ -275,7 +317,10 @@ class BootController(epoch.EpochController):
                 ),
             },
         )
-        return {"id": STANDBY_ID, "network": STANDBY_NETWORK, "left_untouched": True}
+        return {
+            "left_untouched": True,
+            "metadata": stable_standby_metadata(value),
+        }
 
     def fail_closed_cleanup(self) -> None:
         candidates = set(self.created)
