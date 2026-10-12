@@ -21,7 +21,7 @@ TIMESCALE_IMAGE = (
 )
 PINS = {
     "kairos-core": "6937eb4773fc00afaf5ba4e020b28b689f48e377",
-    "kairos-persistence": "11df49ce455b89fd252d5f3d948099a8e9211cb3",
+    "kairos-persistence": "a01348a38ea5f04a36ffff40b4d4a4b1cb06f35b",
     "kairos-strategy-engine": "79020570cd1218152b4b8fe2195739a8e63b9c28",
     "kairos-router": "ac02f94f1380f4890334321065b3f668c367dbce",
     "kairos-llm": "eb70fa0558463b2bd5a438c1e5a9d9613024f54b",

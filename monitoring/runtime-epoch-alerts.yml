@@ -1,0 +1,38 @@
+groups:
+  - name: kairos-runtime-epoch-serve
+    rules:
+      - alert: KairosRuntimeEpochServeStatusUnavailable
+        expr: absent(kairos_runtime_epoch_serve_status_age_seconds{job="kairos-durable-runtime", instance="ops-exporter:9108"})
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Configured runtime epoch status metrics are absent
+      - alert: KairosRuntimeEpochServeStatusMissing
+        expr: kairos_runtime_epoch_serve_status_missing{job="kairos-durable-runtime", instance="ops-exporter:9108"} == 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Configured runtime epoch status file is missing
+      - alert: KairosRuntimeEpochServeStatusInvalid
+        expr: kairos_runtime_epoch_serve_status_invalid{job="kairos-durable-runtime", instance="ops-exporter:9108"} == 1 or kairos_runtime_epoch_serve_status_unknown_owner{job="kairos-durable-runtime", instance="ops-exporter:9108"} == 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Configured runtime epoch status is invalid or owned by another epoch
+      - alert: KairosRuntimeEpochServeFailedClosed
+        expr: kairos_runtime_epoch_serve_status_failed_closed{job="kairos-durable-runtime", instance="ops-exporter:9108"} == 1
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: Configured runtime epoch entered FAILED_CLOSED
+      - alert: KairosRuntimeEpochServeStale
+        expr: kairos_runtime_epoch_serve_heartbeat_stale{job="kairos-durable-runtime", instance="ops-exporter:9108"} == 1
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: Configured runtime epoch status heartbeat is stale

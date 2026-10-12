@@ -52,13 +52,13 @@ class TemporalAlertFixtureTests(unittest.TestCase):
 
     def test_ci_runs_temporal_fixtures_with_pinned_provider_free_promtool(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        step = workflow.split("      - name: Test temporal base and PAPER alert rules without runtime access\n", 1)[1].split("      - name:", 1)[0]
+        step = workflow.split("      - name: Test temporal base, PAPER, and runtime epoch alert rules without runtime access\n", 1)[1].split("      - name:", 1)[0]
         self.assertIn(PROMETHEUS_IMAGE, step)
         for setting in ("--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges:true", "--memory 256m", "--cpus 1", "--pids-limit 64"):
             self.assertIn(setting, step)
-        self.assertEqual(step.count("--mount"), 4)
-        self.assertEqual(step.count(",readonly"), 4)
-        self.assertIn("test rules /work/tests/base-alerts.test.yml /work/tests/paper-alerts.test.yml", step)
+        self.assertEqual(step.count("--mount"), 6)
+        self.assertEqual(step.count(",readonly"), 6)
+        self.assertIn("test rules /work/tests/base-alerts.test.yml /work/tests/paper-alerts.test.yml /work/tests/runtime-epoch-alerts.test.yml", step)
         self.assertNotIn("docker compose", step)
         self.assertNotIn("--env", step)
         self.assertNotIn("--publish", step)

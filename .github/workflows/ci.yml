@@ -155,14 +155,22 @@ jobs:
           --entrypoint promtool
           prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
           check config /etc/prometheus/prometheus.yml
+      - name: Validate opt-in runtime-status Prometheus config
+        run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --security-opt no-new-privileges:true --pids-limit 64 --memory 256m --cpus 1
+          --mount "type=bind,source=$PWD/monitoring,target=/etc/prometheus,readonly"
+          --entrypoint promtool
+          prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+          check config /etc/prometheus/prometheus.runtime-status.yml
       - name: Validate base and PAPER alert rules
         run: >-
           docker run --rm
           -v "$PWD/monitoring:/etc/prometheus:ro"
           --entrypoint promtool
           prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
-          check rules /etc/prometheus/alerts.base.yml /etc/prometheus/alerts.yml
-      - name: Test temporal base and PAPER alert rules without runtime access
+          check rules /etc/prometheus/alerts.base.yml /etc/prometheus/alerts.yml /etc/prometheus/runtime-epoch-alerts.yml
+      - name: Test temporal base, PAPER, and runtime epoch alert rules without runtime access
         run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges:true --pids-limit 64 --memory 256m --cpus 1
@@ -171,9 +179,11 @@ jobs:
           --mount "type=bind,source=$PWD/monitoring/alerts.yml,target=/work/alerts.yml,readonly"
           --mount "type=bind,source=$PWD/monitoring/tests/base-alerts.test.yml,target=/work/tests/base-alerts.test.yml,readonly"
           --mount "type=bind,source=$PWD/monitoring/tests/paper-alerts.test.yml,target=/work/tests/paper-alerts.test.yml,readonly"
+          --mount "type=bind,source=$PWD/monitoring/runtime-epoch-alerts.yml,target=/work/runtime-epoch-alerts.yml,readonly"
+          --mount "type=bind,source=$PWD/monitoring/tests/runtime-epoch-alerts.test.yml,target=/work/tests/runtime-epoch-alerts.test.yml,readonly"
           --workdir /work --entrypoint promtool
           prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
-          test rules /work/tests/base-alerts.test.yml /work/tests/paper-alerts.test.yml
+          test rules /work/tests/base-alerts.test.yml /work/tests/paper-alerts.test.yml /work/tests/runtime-epoch-alerts.test.yml
       - name: Lint Dockerfile
         run: >-
           docker run --rm

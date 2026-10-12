@@ -1,0 +1,19 @@
+# Opt-in overlay for observing one explicitly owned non-trading runtime epoch.
+# Combine with docker-compose.yml only when the host has the intended status file.
+services:
+  ops-exporter:
+    environment:
+      KAIROS_RUNTIME_EPOCH_STATUS_PATH: /run/kairos-runtime/status.json
+      KAIROS_RUNTIME_EPOCH_STATUS_OWNER: ${KAIROS_RUNTIME_EPOCH_STATUS_OWNER:?set the exact 32-hex runtime epoch owner}
+    volumes:
+      - type: bind
+        source: ${KAIROS_RUNTIME_EPOCH_STATUS_HOST_PATH:?set the exact host status.json path}
+        target: /run/kairos-runtime/status.json
+        read_only: true
+        bind:
+          create_host_path: false
+
+  prometheus:
+    volumes:
+      - ./monitoring/prometheus.runtime-status.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/runtime-epoch-alerts.yml:/etc/prometheus/runtime-epoch-alerts.yml:ro

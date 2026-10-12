@@ -11,7 +11,7 @@
   "build": { "python": "3.11.15", "uv": "0.12.3" },
   "dependencies": {
     "kairos-core": { "repository": "https://github.com/Kairos-cryptoAI/kairos-core", "revision": "6937eb4773fc00afaf5ba4e020b28b689f48e377" },
-    "kairos-persistence": { "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence", "revision": "11df49ce455b89fd252d5f3d948099a8e9211cb3" },
+    "kairos-persistence": { "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence", "revision": "a01348a38ea5f04a36ffff40b4d4a4b1cb06f35b" },
     "kairos-llm": { "repository": "https://github.com/Kairos-cryptoAI/kairos-llm", "revision": "eb70fa0558463b2bd5a438c1e5a9d9613024f54b" },
     "kairos-text-scouts": { "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts", "revision": "009ba69a5a10e52417d9a3d161039d31a2fa2e3d" },
     "kairos-macro-strategist": { "repository": "https://github.com/Kairos-cryptoAI/kairos-macro-strategist", "revision": "b34ed2715d2a5f3375ae513b80f88573afe2d253" },

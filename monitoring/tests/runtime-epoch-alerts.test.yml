@@ -1,0 +1,127 @@
+# Prometheus promtool test fixture; exercises only synthetic local series.
+rule_files:
+  - ../runtime-epoch-alerts.yml
+evaluation_interval: 15s
+tests:
+  - name: fresh running epoch remains healthy
+    interval: 15s
+    input_series:
+      - series: 'kairos_runtime_epoch_serve_status_age_seconds{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "5x8"
+      - series: 'kairos_runtime_epoch_serve_status_running{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "1x8"
+      - series: 'kairos_runtime_epoch_serve_heartbeat_stale{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0x8"
+      - series: 'kairos_runtime_epoch_serve_status_missing{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0x8"
+      - series: 'kairos_runtime_epoch_serve_status_invalid{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0x8"
+      - series: 'kairos_runtime_epoch_serve_status_unknown_owner{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0x8"
+      - series: 'kairos_runtime_epoch_serve_status_failed_closed{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0x8"
+    alert_rule_test:
+      - eval_time: 1m45s
+        alertname: KairosRuntimeEpochServeStatusUnavailable
+        exp_alerts: []
+      - eval_time: 1m45s
+        alertname: KairosRuntimeEpochServeStatusMissing
+        exp_alerts: []
+      - eval_time: 1m45s
+        alertname: KairosRuntimeEpochServeStatusInvalid
+        exp_alerts: []
+      - eval_time: 1m45s
+        alertname: KairosRuntimeEpochServeFailedClosed
+        exp_alerts: []
+      - eval_time: 1m45s
+        alertname: KairosRuntimeEpochServeStale
+        exp_alerts: []
+  - name: missing configured file alerts and recovers
+    interval: 15s
+    input_series:
+      - series: 'kairos_runtime_epoch_serve_status_age_seconds{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "-1 -1 -1 5x5"
+      - series: 'kairos_runtime_epoch_serve_status_missing{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "1 1 1 0x5"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: KairosRuntimeEpochServeStatusMissing
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch status file is missing
+      - eval_time: 45s
+        alertname: KairosRuntimeEpochServeStatusMissing
+        exp_alerts: []
+  - name: invalid ownership and failure states alert
+    interval: 15s
+    input_series:
+      - series: 'kairos_runtime_epoch_serve_status_invalid{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0 1x5"
+      - series: 'kairos_runtime_epoch_serve_status_unknown_owner{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0 0 1x4"
+      - series: 'kairos_runtime_epoch_serve_status_failed_closed{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0 0 0 1x3"
+      - series: 'kairos_runtime_epoch_serve_heartbeat_stale{job="kairos-durable-runtime",instance="ops-exporter:9108"}'
+        values: "0 0 0 0 1x2"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: KairosRuntimeEpochServeStatusInvalid
+        exp_alerts: []
+      - eval_time: 45s
+        alertname: KairosRuntimeEpochServeStatusInvalid
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch status is invalid or owned by another epoch
+      - eval_time: 45s
+        alertname: KairosRuntimeEpochServeFailedClosed
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: KairosRuntimeEpochServeFailedClosed
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch entered FAILED_CLOSED
+      - eval_time: 1m
+        alertname: KairosRuntimeEpochServeStale
+        exp_alerts: []
+      - eval_time: 1m15s
+        alertname: KairosRuntimeEpochServeStale
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch status heartbeat is stale
+  - name: missing metrics signal broken observation path
+    interval: 15s
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: KairosRuntimeEpochServeStatusUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch status metrics are absent
+      - eval_time: 45s
+        alertname: KairosRuntimeEpochServeStatusUnavailable
+        exp_alerts:
+          - exp_labels:
+              job: kairos-durable-runtime
+              instance: ops-exporter:9108
+              severity: critical
+            exp_annotations:
+              summary: Configured runtime epoch status metrics are absent
