@@ -260,6 +260,11 @@ def validate_config(value: dict, mode: str) -> None:
                     if owner == "69893dc7b7c647f49967387e7efca9fb"
                     else set()
                 ),
+                *(
+                    {"kairos-epoch-69893dc7b7c6-restore-transport03"}
+                    if owner == "69893dc7b7c647f49967387e7efca9fb"
+                    else set()
+                ),
             }
             or value.get("restore_database")
             != "kairos_recovery_" + owner[:12] + "_epochrestore"
@@ -1926,6 +1931,46 @@ async def verify_duplicate_delivery(
     }
 
 
+async def close_runtime_resources(
+    *,
+    stop,
+    task,
+    producer,
+    consumer_probe,
+    supervisor,
+    pool,
+    output: Path,
+    primary_error,
+) -> None:
+    """Close every owned resource without replacing the operational failure."""
+    stop.set()
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    failures = []
+    for resource in (producer, consumer_probe, supervisor, pool):
+        if resource is None:
+            continue
+        try:
+            closer = getattr(resource, "aclose", None) or resource.close
+            await closer()
+        except (Exception, asyncio.CancelledError) as error:  # noqa: BLE001 - close every owner resource; diagnostics contain no driver text.
+            failures.append(error)
+    if failures:
+        write_status(
+            output / "cleanup-failure.json",
+            {
+                "state": "FAILED_CLOSED",
+                "failure_locations": [failure_locations(e) for e in failures],
+                "primary_failure_preserved": primary_error is not None,
+                "trading_started": False,
+            },
+            immutable=True,
+        )
+        if primary_error is None:
+            raise failures[0]
+
+
 async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
     import asyncpg
     import redis.asyncio as aioredis
@@ -2051,15 +2096,16 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                 return {**report, "state": "NONTRADING_RUNTIME_QUALIFIED"}
             await asyncio.sleep(10)
     finally:
-        stop.set()
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        await producer.aclose()
-        await consumer_probe.aclose()
-        if supervisor:
-            await supervisor.close()
-        await pool.close()
+        await close_runtime_resources(
+            stop=stop,
+            task=task,
+            producer=producer,
+            consumer_probe=consumer_probe,
+            supervisor=supervisor,
+            pool=pool,
+            output=output,
+            primary_error=sys.exc_info()[1],
+        )
 
 
 async def dispatch(mode: str, config: dict, output: Path) -> dict:
@@ -2098,6 +2144,44 @@ async def dispatch(mode: str, config: dict, output: Path) -> dict:
     return await runtime(config, output, qualification=mode == "qualify")
 
 
+def failure_locations(error: BaseException) -> list[dict]:
+    """Bounded public code locations only: no paths, locals, or driver text."""
+    result = []
+    seen = set()
+    for _ in range(3):
+        if id(error) in seen:
+            break
+        seen.add(id(error))
+        locations = []
+        trace = error.__traceback__
+        while trace is not None:
+            module = str(trace.tb_frame.f_globals.get("__name__", ""))
+            function = trace.tb_frame.f_code.co_name
+            if (
+                (
+                    module
+                    in {
+                        "__main__",
+                        "runtime_epoch_worker",
+                        "scripts.runtime_epoch_worker",
+                    }
+                    or module.startswith(("asyncio.", "asyncpg.", "aiohttp.", "redis."))
+                )
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,95}", module)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,95}", function)
+            ):
+                locations.append(
+                    {"module": module, "function": function, "line": trace.tb_lineno}
+                )
+            trace = trace.tb_next
+        result.append({"error_type": type(error).__name__, "locations": locations[-8:]})
+        previous = error.__cause__ or error.__context__
+        if previous is None:
+            break
+        error = previous
+    return result
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=MODES, required=True)
@@ -2130,6 +2214,7 @@ def main(argv=None) -> int:
                 "mode": args.mode,
                 "error_type": type(exc).__name__,
                 "reason": reason,
+                "failure_locations": failure_locations(exc),
                 "observed_at_utc": datetime.now(UTC).isoformat(),
                 "trading_started": False,
             },

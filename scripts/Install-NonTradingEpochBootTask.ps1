@@ -7,7 +7,10 @@ param(
     [string]$BindingSha256,
 
     [Parameter(Mandatory = $true)]
-    [string]$PythonPath
+    [string]$PythonPath,
+
+    [ValidateSet('original', 'r2')]
+    [string]$Generation = 'original'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +23,11 @@ $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-20261011'
 $ExpectedEntryScript = 'scripts/runtime_epoch_boot.py'
 $ExpectedLauncherScript = 'scripts/Invoke-NonTradingEpochBoot.ps1'
 $TaskName = 'Kairos-NonTradingEpoch-69893dc7b7c6-Boot'
+if ($Generation -ceq 'r2') {
+    $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r2-v1'
+    $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r2-20261012'
+    $TaskName = 'Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R2'
+}
 
 function Get-Sha256Hex {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -107,6 +115,11 @@ function Assert-InstallBinding {
         throw 'Binding hash does not match the requested immutable binding'
     }
     $binding = [System.IO.File]::ReadAllText($fullBindingPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $generationProperty = $binding.PSObject.Properties['generation']
+    if (($null -eq $generationProperty -and $Generation -cne 'original') -or
+        ($null -ne $generationProperty -and [string]$generationProperty.Value -cne $Generation)) {
+        throw 'Binding generation is not the explicitly selected non-trading generation'
+    }
     if ($binding.schema_version -ne 1 -or $binding.owner -cne $ExpectedOwner -or $binding.scope -cne $ExpectedScope -or
         -not [string]::Equals([System.IO.Path]::GetFullPath([string]$binding.repo).TrimEnd('\'), $ExpectedRepo, [System.StringComparison]::OrdinalIgnoreCase) -or
         $binding.entry_script -cne $ExpectedEntryScript -or $binding.launcher_script -cne $ExpectedLauncherScript) {
@@ -216,7 +229,8 @@ try {
         '-File', (ConvertTo-WindowsCommandLineArgument -Value $launcherPath),
         '-BindingPath', (ConvertTo-WindowsCommandLineArgument -Value $validated.BindingPath),
         '-BindingSha256', (ConvertTo-WindowsCommandLineArgument -Value $BindingSha256.ToLowerInvariant()),
-        '-PythonPath', (ConvertTo-WindowsCommandLineArgument -Value ([System.IO.Path]::GetFullPath($PythonPath)))
+        '-PythonPath', (ConvertTo-WindowsCommandLineArgument -Value ([System.IO.Path]::GetFullPath($PythonPath))),
+        '-Generation', (ConvertTo-WindowsCommandLineArgument -Value $Generation)
     ) -join ' '
     $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory $validated.RepoRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userName

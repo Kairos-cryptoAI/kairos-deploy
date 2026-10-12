@@ -29,6 +29,50 @@ def state() -> dict:
 
 
 class BootAdmissionTests(unittest.TestCase):
+    def test_r2_boot_scope_is_exact_new_container_and_does_not_relabel_original(self):
+        keys = (
+            "ROOT",
+            "SERVE_WORK",
+            "SCOPE",
+            "GENERATION",
+            "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256",
+            "CONTAINERS",
+            "LEASE",
+        )
+        patches = [mock.patch.object(boot, key, getattr(boot, key)) for key in keys]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        original = boot.CONTAINERS.copy()
+        boot.configure_generation_r2()
+        self.assertEqual(boot.GENERATION, "r2")
+        self.assertEqual(boot.RECEIPT_NAME, "receipt.json")
+        self.assertEqual(boot.CONTAINERS["pg"], original["pg"])
+        self.assertEqual(boot.CONTAINERS["redis"], original["redis"])
+        self.assertNotEqual(boot.CONTAINERS["serve"], original["serve"])
+        self.assertEqual(
+            boot.CONTAINERS["serve"],
+            "87b9c085beb1f7666fefc8e3bc2fded72c44397992482fd6efc2a43459a046b0",
+        )
+        self.assertEqual(boot.LEASE.parent, boot.ROOT)
+        self.assertIn("epoch-boot-r2-20261012", boot.ROOT.as_posix())
+
+    def test_r2_constructor_never_adopts_the_retained_unverified_restore_clone(self):
+        def initialize(controller, *_args, **_kwargs):
+            controller.names = epoch.resource_names(boot.OWNER)
+
+        with (
+            mock.patch.object(boot, "GENERATION", "r2"),
+            mock.patch.object(epoch.EpochController, "__init__", new=initialize),
+        ):
+            controller = boot.BootController(boot.OWNER, expected_revision="a" * 40)
+        self.assertTrue(controller.names["serve"].endswith("-serve-r2"))
+        self.assertTrue(controller.names["restore_pg"].endswith("-restore-incident03"))
+        self.assertTrue(
+            controller.names["restore_volume"].endswith("-restore-data-incident03")
+        )
+
     def test_stopped_epoch_full_path_requires_two_restores_and_readonly_redis_before_serve(
         self,
     ):

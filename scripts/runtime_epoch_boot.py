@@ -30,6 +30,8 @@ ROOT = Path("D:/Kairos/runtime/epoch-boot-20261011")
 PARENT = epoch.ROOT / ("run-" + OWNER)
 SERVE_WORK = PARENT / "continuation-05"
 SCOPE = "kairos-nontrading-runtime-epoch-boot-v1"
+GENERATION = "original"
+RECEIPT_NAME = "runtime-epoch-continuation-receipt.json"
 PYTHON = Path(
     # Task Scheduler runs outside Codex's packaged AppData virtualization.
     # Pin the physical installation, not its in-app Roaming alias.
@@ -49,6 +51,35 @@ LEASE = ROOT / "boot.active"
 STANDBY_NAME = "kairos-shadow-gate-timescaledb-1"
 STANDBY_ID = "658849c3945081f628ed2acd78ae85f4a95513f6a72517c533c05a1d3a9f8079"
 STANDBY_NETWORK = "kairos-shadow-gate_data"
+
+
+def configure_generation_r2() -> None:
+    """Bind only the accepted new generation; never restart the failed original."""
+    global \
+        ROOT, \
+        SERVE_WORK, \
+        SCOPE, \
+        GENERATION, \
+        RECEIPT_NAME, \
+        PARENT_RECEIPT_SHA256, \
+        CONTAINERS, \
+        LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r2-20261012")
+    SERVE_WORK = Path(
+        "D:/Kairos/runtime/runtime-incident-20261012/recovery-46b8f4e6f06841a29bbafc0b271393d2"
+    )
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r2-v1"
+    GENERATION = "r2"
+    RECEIPT_NAME = "receipt.json"
+    PARENT_RECEIPT_SHA256 = (
+        "095d8965d561851c57aff4e412ee4082422c6026f2f612841c703e4689efc855"
+    )
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": "87b9c085beb1f7666fefc8e3bc2fded72c44397992482fd6efc2a43459a046b0",
+    }
+    LEASE = ROOT / "boot.active"
 
 
 def read_json(path: Path, *, limit: int = 131_072) -> dict:
@@ -94,7 +125,7 @@ def input_paths() -> list[Path]:
         PARENT / "redis-users.acl",
         PARENT / "continuation-04/continuation-private.json",
         SERVE_WORK / "config-serve.json",
-        SERVE_WORK / "runtime-epoch-continuation-receipt.json",
+        SERVE_WORK / RECEIPT_NAME,
         SERVE_WORK / "operator.zip",
         epoch.AUX_WHEELHOUSE / epoch.AUX_NUMPY,
         epoch.ACTIVE_LEASE,
@@ -111,6 +142,7 @@ def validate_binding(value: dict) -> None:
         value.get("schema_version") != 1
         or value.get("owner") != OWNER
         or value.get("scope") != SCOPE
+        or value.get("generation", "original") != GENERATION
         or value.get("repo") != epoch.REPO.as_posix()
         or value.get("python_path") != PYTHON.as_posix()
         or value.get("entry_script") != "scripts/runtime_epoch_boot.py"
@@ -149,10 +181,7 @@ def validate_binding(value: dict) -> None:
 
 def create_binding(revision: str) -> Path:
     verify_source(revision)
-    if (
-        fresh.sha(SERVE_WORK / "runtime-epoch-continuation-receipt.json")
-        != PARENT_RECEIPT_SHA256
-    ):
+    if fresh.sha(SERVE_WORK / RECEIPT_NAME) != PARENT_RECEIPT_SHA256:
         raise epoch.Rejected("ACCEPTED_EPOCH_PARENT_RECEIPT_REQUIRED")
     epoch._private_directory(ROOT)
     path = ROOT / "binding.json"
@@ -164,6 +193,7 @@ def create_binding(revision: str) -> Path:
         "schema_version": 1,
         "owner": OWNER,
         "scope": SCOPE,
+        "generation": GENERATION,
         "revision": revision,
         "repo": epoch.REPO.as_posix(),
         "python_path": PYTHON.as_posix(),
@@ -206,6 +236,15 @@ def validate_preserved_state(before: dict, after: dict) -> None:
 
 
 class BootController(epoch.EpochController):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if GENERATION == "r2":
+            self.names["serve"] += "-r2"
+            # Original unverified restore resources remain retained and stopped.
+            # Reuse only the separate, previously verified disposable names.
+            self.names["restore_pg"] += "-incident03"
+            self.names["restore_volume"] += "-incident03"
+
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
         value = self.inspect_container(STANDBY_NAME)
@@ -545,10 +584,14 @@ def main(argv=None) -> int:
     parser.add_argument("--create-binding", action="store_true")
     parser.add_argument("--expected-revision")
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--binding", type=Path, default=ROOT / "binding.json")
+    parser.add_argument("--generation", choices=("original", "r2"), default="original")
+    parser.add_argument("--binding", type=Path)
     parser.add_argument("--binding-sha256")
     parser.add_argument("--boot-id")
     args = parser.parse_args(argv)
+    if args.generation == "r2":
+        configure_generation_r2()
+    args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None
     lease_bytes = None

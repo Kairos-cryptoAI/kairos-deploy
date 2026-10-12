@@ -1095,6 +1095,10 @@ class FailureHandlingTests(unittest.TestCase):
                 report["reason"], "operation failed; private diagnostic withheld"
             )
             self.assertNotIn("private-value", json.dumps(report))
+            self.assertEqual(
+                report["failure_locations"][0]["error_type"], "RuntimeError"
+            )
+            self.assertNotIn(str(config), json.dumps(report["failure_locations"]))
 
     def test_recovery_failure_propagates_and_closes_pool(self):
         pool = _FakePool(_FakeOutboxConnection([]))
@@ -1413,6 +1417,56 @@ class FailureHandlingTests(unittest.TestCase):
             "kairos_persistence.repository": repo_module,
             "kairos_persistence.runtime": runtime_module,
         }
+
+
+class RuntimeCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_closes_all_resources_and_keeps_primary_failure(self):
+        stop = asyncio.Event()
+        task = asyncio.create_task(asyncio.sleep(60))
+        producer = mock.Mock(
+            aclose=mock.AsyncMock(side_effect=TimeoutError("private-driver-data"))
+        )
+        consumer = mock.Mock(aclose=mock.AsyncMock())
+        supervisor = mock.Mock(aclose=mock.AsyncMock())
+        pool = mock.Mock(aclose=mock.AsyncMock())
+        with tempfile.TemporaryDirectory() as directory:
+            await worker.close_runtime_resources(
+                stop=stop,
+                task=task,
+                producer=producer,
+                consumer_probe=consumer,
+                supervisor=supervisor,
+                pool=pool,
+                output=Path(directory),
+                primary_error=RuntimeError("original-private-driver-data"),
+            )
+            text = (Path(directory) / "cleanup-failure.json").read_text()
+            report = json.loads(text)
+            self.assertTrue(report["primary_failure_preserved"])
+            self.assertNotIn("private-driver-data", text)
+            for resource in (producer, consumer, supervisor, pool):
+                resource.aclose.assert_awaited_once()
+        self.assertTrue(stop.is_set())
+        self.assertTrue(task.cancelled())
+
+    async def test_cleanup_only_failure_is_not_silently_accepted(self):
+        producer = mock.Mock(aclose=mock.AsyncMock(side_effect=TimeoutError()))
+        pool = mock.Mock(aclose=mock.AsyncMock())
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaises(TimeoutError),
+        ):
+            await worker.close_runtime_resources(
+                stop=asyncio.Event(),
+                task=None,
+                producer=producer,
+                consumer_probe=None,
+                supervisor=None,
+                pool=pool,
+                output=Path(directory),
+                primary_error=None,
+            )
+        pool.aclose.assert_awaited_once()
 
 
 if __name__ == "__main__":

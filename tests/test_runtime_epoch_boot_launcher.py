@@ -16,6 +16,25 @@ INSTALLER = REPO_ROOT / "scripts" / "Install-NonTradingEpochBootTask.ps1"
 
 
 class RuntimeEpochBootLauncherTests(unittest.TestCase):
+    def test_r2_uses_a_separate_task_and_requires_explicit_matching_generation(
+        self,
+    ) -> None:
+        for path in (LAUNCHER, INSTALLER):
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn("[ValidateSet('original', 'r2')]", source)
+                self.assertIn("$Generation = 'original'", source)
+                self.assertIn("epoch-boot-r2-20261012", source)
+                self.assertIn("kairos-nontrading-runtime-epoch-boot-r2-v1", source)
+                self.assertIn("$binding.PSObject.Properties['generation']", source)
+                self.assertIn("$Generation -cne 'original'", source)
+                self.assertIn("$generationProperty.Value -cne $Generation", source)
+        self.assertIn(
+            "Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R2", INSTALLER.read_text()
+        )
+        self.assertIn("'-Generation'", INSTALLER.read_text())
+        self.assertIn("'--generation', $Generation", LAUNCHER.read_text())
+
     def test_native_job_launches_python_with_exact_quoted_arguments(self) -> None:
         if os.name != "nt":
             self.skipTest("Native suspended Windows process/job requires Windows")
