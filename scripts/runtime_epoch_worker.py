@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from builtins import ExceptionGroup
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1475,6 +1476,24 @@ async def recover(
                             progress=lambda _item: None,
                             status=state,
                         )
+                    except asyncio.CancelledError as exc:
+                        write_status(
+                            status_path.parent / ("failure-" + symbol + ".json"),
+                            {
+                                "state": "FAILED_CLOSED",
+                                "symbol": symbol,
+                                "phase": getattr(state, "phase", "UNOBSERVED"),
+                                "error_type": type(exc).__name__,
+                                "appended_bars": getattr(
+                                    state, "total_appended_bars", None
+                                ),
+                                "publish_outcome_unknown": getattr(state, "phase", None)
+                                == "DURABLE_PUBLISH",
+                                "trading_started": False,
+                            },
+                            immutable=True,
+                        )
+                        raise
                     except Exception as exc:
                         write_status(
                             status_path.parent / ("failure-" + symbol + ".json"),
@@ -1505,12 +1524,18 @@ async def recover(
                         },
                     )
 
-                if boot_expected is None:
-                    await asyncio.gather(*(one(s) for s in SYMBOLS))
-                else:
+                try:
                     async with asyncio.TaskGroup() as group:
                         for symbol in SYMBOLS:
                             group.create_task(one(symbol))
+                except ExceptionGroup as errors:
+                    # TaskGroup cancels and awaits siblings before returning. Keep
+                    # the original operational exception as the top-level reason;
+                    # per-symbol immutable failure receipts retain sibling outcomes.
+                    original = errors
+                    while isinstance(original, ExceptionGroup):
+                        original = original.exceptions[0]
+                    raise original
             if sum(totals.values()) != required:
                 raise EpochError("EXACT_APPEND_COUNT_REQUIRED")
             if (

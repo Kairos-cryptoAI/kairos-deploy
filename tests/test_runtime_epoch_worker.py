@@ -925,6 +925,129 @@ class FailureHandlingTests(unittest.TestCase):
             )
         )
 
+    def test_recovery_failure_cancels_and_awaits_siblings_before_teardown(self):
+        sibling_started = asyncio.Event()
+        recovery_tasks = []
+        observed = {}
+        end = (int(time.time() * 1000) // worker.MINUTE - 1) * worker.MINUTE
+
+        class TrackingPool(_FakePool):
+            async def close(self):
+                observed["all_tasks_done_at_close"] = all(
+                    task.done() for task in recovery_tasks
+                )
+                observed["session_closed_at_pool_close"] = session.closed
+                await super().close()
+
+        pool = TrackingPool(_FakeOutboxConnection([]))
+        asyncpg = types.ModuleType("asyncpg")
+
+        async def create_pool(*_args, **_kwargs):
+            return pool
+
+        asyncpg.create_pool = create_pool
+
+        class Session:
+            closed = False
+
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                self.closed = True
+                return False
+
+        session = Session()
+        aiohttp = types.ModuleType("aiohttp")
+        aiohttp.ClientSession = lambda **_kwargs: session
+        aiohttp.ClientTimeout = lambda **_kwargs: object()
+        quant = types.ModuleType("kairos_quant")
+        recovery = types.ModuleType("kairos_quant.long_gap_recovery")
+
+        class RecoveryStatus:
+            def __init__(self, _emit):
+                self.phase = "REST_GET_FIRST"
+                self.total_appended_bars = 0
+
+        recovery.RecoveryStatus = RecoveryStatus
+
+        async def fake_recover(anchor, *, status, **_kwargs):
+            recovery_tasks.append(asyncio.current_task())
+            if anchor.symbol == worker.SYMBOLS[0]:
+                await sibling_started.wait()
+                status.phase = "CONFIRMATION_COMPARE"
+                raise worker.EpochError("PRIMARY_CONFIRMATION_FAILURE")
+            status.phase = "DURABLE_PUBLISH"
+            sibling_started.set()
+            await asyncio.Future()
+
+        recovery.recover_symbol = fake_recover
+        anchors = {
+            symbol: types.SimpleNamespace(
+                symbol=symbol, close_time_ms=end - worker.MINUTE - 1
+            )
+            for symbol in worker.SYMBOLS
+        }
+        config = _catchup_config(end_exclusive_ms=end, producer_password="b" * 64)
+        with (
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "asyncpg": asyncpg,
+                    "aiohttp": aiohttp,
+                    "kairos_quant": quant,
+                    "kairos_quant.long_gap_recovery": recovery,
+                    **self._writer_modules(),
+                },
+            ),
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()),
+            mock.patch.object(
+                worker, "anchors", new=mock.AsyncMock(return_value=anchors)
+            ),
+            mock.patch.object(
+                worker, "required_bars", return_value=len(worker.SYMBOLS)
+            ),
+            mock.patch.object(worker, "write_status") as status_writer,
+            self.assertRaisesRegex(worker.EpochError, "PRIMARY_CONFIRMATION_FAILURE"),
+        ):
+            asyncio.run(
+                worker.recover(
+                    config,
+                    publish=True,
+                    status_path=Path("unused-progress.json"),
+                )
+            )
+
+        self.assertTrue(pool.closed)
+        self.assertTrue(observed["all_tasks_done_at_close"])
+        self.assertTrue(observed["session_closed_at_pool_close"])
+        failure_calls = [
+            call
+            for call in status_writer.call_args_list
+            if call.kwargs.get("immutable")
+        ]
+        self.assertEqual(len(failure_calls), len(worker.SYMBOLS))
+        primary = [
+            call.args[1]
+            for call in failure_calls
+            if call.args[1]["symbol"] == worker.SYMBOLS[0]
+        ]
+        self.assertEqual(len(primary), 1)
+        self.assertEqual(primary[0]["error_type"], "EpochError")
+        self.assertEqual(primary[0]["phase"], "CONFIRMATION_COMPARE")
+        cancelled = [
+            call.args[1]
+            for call in failure_calls
+            if call.args[1]["error_type"] == "CancelledError"
+        ]
+        self.assertEqual(len(cancelled), len(worker.SYMBOLS) - 1)
+        self.assertTrue(all(item["phase"] == "DURABLE_PUBLISH" for item in cancelled))
+        self.assertTrue(all(item["publish_outcome_unknown"] for item in cancelled))
+        self.assertTrue(all(item["trading_started"] is False for item in cancelled))
+
     def _run_chunked_recovery(self, chunks, *, content_length=None):
         pool = _FakePool(_FakeOutboxConnection([]))
         fetched = []
