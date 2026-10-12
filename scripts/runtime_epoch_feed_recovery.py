@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import time
 import uuid
@@ -17,10 +18,12 @@ from pathlib import Path
 
 if __package__:
     from scripts import runtime_epoch_boot as boot
+    from scripts import runtime_epoch_clean_queue_recovery as clean
     from scripts import runtime_epoch_feed_recovery_worker as feed_worker
     from scripts import runtime_epoch_incident_recovery as incident
 else:
     import runtime_epoch_boot as boot
+    import runtime_epoch_clean_queue_recovery as clean
     import runtime_epoch_feed_recovery_worker as feed_worker
     import runtime_epoch_incident_recovery as incident
 
@@ -33,9 +36,117 @@ R6_NAME = "kairos-epoch-" + boot.OWNER[:12] + "-serve-r6"
 R6_RESTORE_SUFFIX = "-transport06"
 R6_LATCH_DIR = ROOT / "read-recovery-r6-feed-latch"
 R6_LATCH = R6_LATCH_DIR / "latch.json"
+R6_CONTINUATION_LATCH_DIR = ROOT / "read-recovery-r6-feed-continuation-latch"
+R6_CONTINUATION_LATCH = R6_CONTINUATION_LATCH_DIR / "latch.json"
 R6_WORK_PREFIX = "read-recovery-r6-feed-"
+R6_RETAINED_WORK = ROOT / "read-recovery-r6-feed-f4072c03a9c4430c9cb1a92ebe2e78a0"
+R6_RETAINED_RUN = "f4072c03a9c4430c9cb1a92ebe2e78a0"
+R6_RETAINED_FAILURE_SHA256 = (
+    "e7129b439b4b2bc3603002a7042e83831b38d9e4fb277db8ce091c8982c0f2a4"
+)
+R6_ORIGINAL_LATCH_SHA256 = (
+    "c9d06bdc6b1a94a9974767b3fbe296c94611fed8e073e2803d1e2fe0b21fb901"
+)
+R6_RETAINED_INVENTORY_SHA256 = (
+    "4117ec4b518d2102b62f9008ac18397adebf893e5c8b908b44ee97bf88f552d1"
+)
+R6_ORIGINAL_SOURCE_REVISION = "b627152cdef1e913517aeafd9bce3ff4a6a790e7"
+R6_RETAINED_FAILURE = {
+    "result": "FAILED_CLOSED",
+    "reason": "EXACT_INCIDENT_FAILURE_INVENTORY_REQUIRED",
+    "phase": "ADMISSION",
+    "automatic_retry": False,
+    "trading_started": False,
+}
+R6_RETAINED_LATCH = {
+    "state": "IN_PROGRESS",
+    "run": R6_RETAINED_RUN,
+    "owner": boot.OWNER,
+    "source_revision": R6_ORIGINAL_SOURCE_REVISION,
+    "failed_r5_status_sha256": R5_STATUS_SHA256,
+    "automatic_retry": False,
+}
+R6_RETAINED_INVENTORY_PATHS = frozenset(
+    {
+        *(
+            f"cli-{index:03d}.{stream}"
+            for index in range(1, 16)
+            for stream in ("stdout", "stderr")
+        ),
+        "docker-config/config.json",
+        "failure.json",
+    }
+)
 MAX_SECONDS = 7200
 MAX_CATCHUP_BATCHES = 1000
+
+
+def validate_reviewed_continuation(
+    *,
+    explicit_flag: bool,
+    failure: dict | None,
+    failure_sha256: str | None,
+    original_latch: dict | None,
+    original_latch_sha256: str | None,
+    inventory: dict | None,
+) -> dict:
+    """Bind one explicit continuation to the exact retained admission refusal."""
+    if not explicit_flag:
+        raise epoch.Rejected("EXPLICIT_REVIEWED_R6_CONTINUATION_REQUIRED")
+    if (
+        failure != R6_RETAINED_FAILURE
+        or failure_sha256 != R6_RETAINED_FAILURE_SHA256
+        or original_latch != R6_RETAINED_LATCH
+        or original_latch_sha256 != R6_ORIGINAL_LATCH_SHA256
+        or not isinstance(inventory, dict)
+        or set(inventory) != R6_RETAINED_INVENTORY_PATHS
+        or inventory.get("failure.json") != R6_RETAINED_FAILURE_SHA256
+        or any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in inventory.values()
+        )
+        or fresh.digest(inventory) != R6_RETAINED_INVENTORY_SHA256
+    ):
+        raise epoch.Rejected("EXACT_RETAINED_R6_ADMISSION_EVIDENCE_REQUIRED")
+    return {
+        "retained_work": R6_RETAINED_WORK.name,
+        "retained_failure_sha256": failure_sha256,
+        "original_latch_sha256": original_latch_sha256,
+        "original_inventory": dict(inventory),
+        "original_inventory_sha256": fresh.digest(inventory),
+        "reviewed_continuation": True,
+        "automatic_retry": False,
+        "trading_started": False,
+    }
+
+
+def require_continuation_latch_absent(path: Path = R6_CONTINUATION_LATCH) -> None:
+    directory = path.parent
+    if path.is_symlink() or directory.is_symlink():
+        raise epoch.Rejected("R6_CONTINUATION_LATCH_LINK_REJECTED")
+    if path.exists() or directory.exists():
+        raise epoch.Rejected("R6_CONTINUATION_LATCH_EXISTS_NO_AUTOMATIC_RETRY")
+
+
+def read_reviewed_continuation(explicit_flag: bool) -> dict:
+    """Read and hash-only inventory the single admissible failed R6 attempt."""
+    if not explicit_flag:
+        raise epoch.Rejected("EXPLICIT_REVIEWED_R6_CONTINUATION_REQUIRED")
+    failure_path = R6_RETAINED_WORK / "failure.json"
+    for path in (failure_path, R6_LATCH):
+        if path.is_symlink() or not path.is_file():
+            raise epoch.Rejected("EXACT_RETAINED_R6_ADMISSION_EVIDENCE_REQUIRED")
+    inventory = clean.inventory_files(R6_RETAINED_WORK)
+    failure_sha = fresh.sha(failure_path)
+    latch_sha = fresh.sha(R6_LATCH)
+    return validate_reviewed_continuation(
+        explicit_flag=explicit_flag,
+        failure=boot.read_json(failure_path),
+        failure_sha256=failure_sha,
+        original_latch=boot.read_json(R6_LATCH),
+        original_latch_sha256=latch_sha,
+        inventory=inventory,
+    )
 
 
 def validate_r5_failure() -> dict:
@@ -319,12 +430,15 @@ class R6FeedRecoveryController(incident.IncidentController):
             time.sleep(2)
         raise epoch.Rejected("R6_FRESH_FIVE_SYMBOL_PROGRESS_REQUIRED")
 
-    def run_recovery(self) -> dict:
+    def run_recovery(self, *, reviewed_continuation: dict | None = None) -> dict:
         failure = validate_r5_failure()
         preserved_inputs = incident.preserved_inputs()
-        preserved_failure = incident.observation.failure_snapshot(
-            boot.SERVE_WORK / "output-serve"
-        )
+        preserved_r5_inventory = clean.inventory_files(boot.SERVE_WORK / "output-serve")
+        if (
+            reviewed_continuation is not None
+            and read_reviewed_continuation(True) != reviewed_continuation
+        ):
+            raise epoch.Rejected("R6_RETAINED_ADMISSION_EVIDENCE_CHANGED")
         resources_before = self.validate_resources(allow_running=True)
         if (
             resources_before["views"]["serve"]["state"]["Status"] != "exited"
@@ -364,10 +478,10 @@ class R6FeedRecoveryController(incident.IncidentController):
             or drain.get("trading_started") is not False
         ):
             raise epoch.Rejected("R6_EXACT_FOUR_PUBLICATION_AND_DRAIN_REQUIRED")
-        clean = self.r6_state(serving, "after-drain")
-        validate_drained(clean)
+        clean_state = self.r6_state(serving, "after-drain")
+        validate_drained(clean_state)
         clean_boot = self.boot_state("r6-after-drain-boot")
-        validate_boot_bridge(clean, clean_boot)
+        validate_boot_bridge(clean_state, clean_boot)
         after_tail, catchup = self.audit_only_tail(clean_boot, serving, "initial")
         self.prepare_boot_restore_volume("bootafter")
         backup_after = self.backup_and_verify(
@@ -391,8 +505,12 @@ class R6FeedRecoveryController(incident.IncidentController):
                 for key in boot.CONTAINERS
             )
             or incident.preserved_inputs() != preserved_inputs
-            or incident.observation.failure_snapshot(boot.SERVE_WORK / "output-serve")
-            != preserved_failure
+            or clean.inventory_files(boot.SERVE_WORK / "output-serve")
+            != preserved_r5_inventory
+            or (
+                reviewed_continuation is not None
+                and read_reviewed_continuation(True) != reviewed_continuation
+            )
             or validate_r5_failure() != failure
             or self.assert_legacy_sources_stopped(legacy_redis_id=epoch.LEGACY_REDIS_ID)
             != resources_before["legacy"]
@@ -404,6 +522,7 @@ class R6FeedRecoveryController(incident.IncidentController):
             "owner": boot.OWNER,
             "source_revision": self.expected_revision,
             "r5_failure": failure,
+            "retained_r6_admission_continuation": reviewed_continuation,
             "prebackup_sha256": backup_before,
             "postcatchup_backup_sha256": backup_after,
             "exact_drain": drain,
@@ -426,6 +545,7 @@ def main(argv=None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--expected-revision")
     parser.add_argument("--failed-r5-status-sha256")
+    parser.add_argument("--reviewed-admission-continuation", action="store_true")
     args = parser.parse_args(argv)
     if not args.execute:
         print(json.dumps({"result": "PLAN_ONLY", "trading_started": False}))
@@ -438,15 +558,45 @@ def main(argv=None) -> int:
         if args.failed_r5_status_sha256 != R5_STATUS_SHA256:
             raise epoch.Rejected("EXACT_FAILED_R5_STATUS_CLAIM_REQUIRED")
         validate_r5_failure()
-        if R6_LATCH_DIR.exists() or R6_LATCH_DIR.is_symlink():
-            raise epoch.Rejected("R6_CREATE_ONLY_LATCH_EXISTS_NO_AUTOMATIC_RETRY")
+        require_continuation_latch_absent()
+        reviewed_continuation = None
+        if args.reviewed_admission_continuation:
+            reviewed_continuation = read_reviewed_continuation(True)
+            active_latch_dir = R6_CONTINUATION_LATCH_DIR
+            active_latch = R6_CONTINUATION_LATCH
+        else:
+            if R6_LATCH_DIR.exists() or R6_LATCH_DIR.is_symlink():
+                raise epoch.Rejected("R6_CREATE_ONLY_LATCH_EXISTS_NO_AUTOMATIC_RETRY")
+            active_latch_dir = R6_LATCH_DIR
+            active_latch = R6_LATCH
         run_id = uuid.uuid4().hex
-        work = ROOT / (R6_WORK_PREFIX + run_id)
-        epoch._private_directory(work)
+        work_path = ROOT / (R6_WORK_PREFIX + run_id)
+        # Acquire the separate create-only claim before any new attempt writes.
+        # The original claim and failed work remain byte-for-byte unchanged.
+        epoch._private_directory(active_latch_dir)
+        fresh.save(
+            active_latch,
+            {
+                "state": (
+                    "REVIEWED_CONTINUATION_IN_PROGRESS"
+                    if reviewed_continuation is not None
+                    else "IN_PROGRESS"
+                ),
+                "run": run_id,
+                "owner": boot.OWNER,
+                "source_revision": args.expected_revision,
+                "failed_r5_status_sha256": R5_STATUS_SHA256,
+                "reviewed_admission_continuation": reviewed_continuation,
+                "automatic_retry": False,
+                "trading_started": False,
+            },
+        )
+        epoch._private_directory(work_path)
+        work = work_path
         controller = R6FeedRecoveryController(
             boot.OWNER,
             expected_revision=args.expected_revision,
-            workdir=work,
+            workdir=work_path,
             continuation_attempt="feed-r6-" + run_id[:8],
             deadline=time.monotonic() + MAX_SECONDS,
         )
@@ -470,19 +620,12 @@ def main(argv=None) -> int:
         )
         if existing.strip():
             raise epoch.Rejected("R6_GENERATION_MUST_BE_ABSENT")
-        epoch._private_directory(R6_LATCH_DIR)
-        fresh.save(
-            R6_LATCH,
-            {
-                "state": "IN_PROGRESS",
-                "run": run_id,
-                "owner": boot.OWNER,
-                "source_revision": args.expected_revision,
-                "failed_r5_status_sha256": R5_STATUS_SHA256,
-                "automatic_retry": False,
-            },
-        )
-        receipt = controller.run_recovery()
+        if (
+            reviewed_continuation is not None
+            and read_reviewed_continuation(True) != reviewed_continuation
+        ):
+            raise epoch.Rejected("R6_RETAINED_ADMISSION_EVIDENCE_CHANGED")
+        receipt = controller.run_recovery(reviewed_continuation=reviewed_continuation)
         receipt_path = work / "receipt.json"
         fresh.save(receipt_path, receipt)
         fresh.save(
