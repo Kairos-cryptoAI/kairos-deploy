@@ -171,3 +171,23 @@ rejection, capped batches and cancellation without any trading authority.
 Source/test completion does not imply native R6 acceptance, external alert
 delivery, OS-reboot qualification or long-duration availability. Those require
 their separate receipts. All project readiness flags remain false.
+
+### Accepted R6 native evidence and its separate boot binding
+
+The distinct reviewed admission continuation was accepted at signed source
+`85cf124f9252d47d895e6a20f8fb50edcaddf303`. Its native receipt SHA-256 is
+`7b794b1f1d938fe10902315941ce4ef93df69d30a581463f84cd095ae7a9cee3`.
+Both full isolated restores passed; exactly four new publications and matching
+durable completions were added, with no old replay or queue reset. Audit-only
+catch-up added 496 plus 15 bars. All five watermarks advanced before and after a
+graceful same-container restart. Failed R5 and the earlier pre-write R6 refusal,
+including their original latches and snapshots, remain retained.
+
+Explicit boot generation `r6` accepts only that receipt and the exact new serve
+container. Its disposable restore names use `transport06`; no earlier failed
+serve can be selected. A running R6 in a validated source-wait/catch-up state
+returns `ALREADY_RUNNING_SOURCE_PAUSED_NONTRADING` without restart or claiming
+freshness. Unknown, stale-heartbeat, integrity and trading-authority states
+remain fail-closed. Startup still requires the complete backup/restore, history
+and clean-queue proofs. Boot-task dispatch, Telegram delivery and the next real
+OS-logon trigger retain their independent evidence scope.

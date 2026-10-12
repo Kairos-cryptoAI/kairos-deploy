@@ -182,6 +182,88 @@ def configure_generation_r5() -> None:
     LEASE = ROOT / "boot.active"
 
 
+def configure_generation_r6() -> None:
+    """Bind only the accepted R6 feed-recovery generation; R5 stays retained."""
+    global \
+        ROOT, \
+        SERVE_WORK, \
+        SCOPE, \
+        GENERATION, \
+        RECEIPT_NAME, \
+        PARENT_RECEIPT_SHA256, \
+        CONTAINERS, \
+        LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r6-20261012")
+    SERVE_WORK = Path(
+        "D:/Kairos/runtime/runtime-incident-20261012/read-recovery-r6-feed-cc2bbf275011499a9479b8e029433364"
+    )
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r6-v1"
+    GENERATION = "r6"
+    RECEIPT_NAME = "receipt.json"
+    PARENT_RECEIPT_SHA256 = (
+        "7b794b1f1d938fe10902315941ce4ef93df69d30a581463f84cd095ae7a9cee3"
+    )
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": "945bb0da557f6a0eb622bd937718259fc506f926077d3c86a63f71e15ad28e59",
+    }
+    LEASE = ROOT / "boot.active"
+
+
+def validate_r6_lifecycle_status(value: dict, *, now_ms: int | None = None) -> None:
+    """Recognize a known source pause without calling it fresh or restarting it."""
+    known = {
+        "RUNNING_NONTRADING",
+        "WAITING_SOURCE_NONTRADING",
+        "CATCHING_UP_NONTRADING",
+    }
+    if not isinstance(value, dict) or value.get("state") not in known:
+        raise epoch.Rejected("R6_KNOWN_NONTRADING_LIFECYCLE_REQUIRED")
+    circuit = value.get("source_transport")
+    circuit_keys = {"timeout_rounds", "recoveries", "consecutive_timeout_rounds"}
+    waiting = value["state"] == "WAITING_SOURCE_NONTRADING"
+    if (
+        value.get("trading_started") is not False
+        or value.get("source_fresh") is not (value["state"] == "RUNNING_NONTRADING")
+        or any(
+            type(value.get(key)) is not int or value[key] != 0
+            for key in (
+                "pending_outbox",
+                "unresolved_inbox",
+                "uncompleted_publications",
+            )
+        )
+        or not isinstance(circuit, dict)
+        or set(circuit) != circuit_keys
+        or any(
+            type(circuit[key]) is not int or circuit[key] < 0 for key in circuit_keys
+        )
+        or circuit["recoveries"] > circuit["timeout_rounds"]
+        or circuit["consecutive_timeout_rounds"] > circuit["timeout_rounds"]
+        or (
+            waiting
+            and (
+                value.get("source_wait_reason") != "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+                or circuit["consecutive_timeout_rounds"] < 1
+            )
+        )
+        or (
+            not waiting
+            and (
+                value.get("source_wait_reason") is not None
+                or circuit["consecutive_timeout_rounds"] != 0
+            )
+        )
+    ):
+        raise epoch.Rejected("R6_SOURCE_PAUSE_BOUNDARY_REQUIRED")
+    # Reuse only structural/fresh-heartbeat checks. The returned/reporting state
+    # remains the original pause; no freshness or trading authority is inferred.
+    epoch.validate_running_status(
+        {**value, "state": "RUNNING_NONTRADING"}, OWNER, now_ms=now_ms
+    )
+
+
 def read_json(path: Path, *, limit: int = 131_072) -> dict:
     fresh.safe(path)
     if not path.is_file() or path.stat().st_size > limit:
@@ -338,7 +420,7 @@ def validate_preserved_state(before: dict, after: dict) -> None:
 class BootController(epoch.EpochController):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if GENERATION in {"r2", "r4", "r5"}:
+        if GENERATION in {"r2", "r4", "r5", "r6"}:
             self.names["serve"] += "-" + GENERATION
         if GENERATION == "r2":
             # Original unverified restore resources remain retained and stopped.
@@ -351,6 +433,9 @@ class BootController(epoch.EpochController):
         elif GENERATION == "r5":
             self.names["restore_pg"] += "-transport05"
             self.names["restore_volume"] += "-transport05"
+        elif GENERATION == "r6":
+            self.names["restore_pg"] += "-transport06"
+            self.names["restore_volume"] += "-transport06"
 
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
@@ -543,30 +628,46 @@ class BootController(epoch.EpochController):
         previous = read_json(SERVE_WORK / "output-serve/status.json")
         state = (before_resources["views"]["serve"].get("state") or {}).get("Status")
         if state == "running":
-            epoch.validate_running_status(previous, OWNER)
+            if GENERATION == "r6":
+                validate_r6_lifecycle_status(previous)
+            else:
+                epoch.validate_running_status(previous, OWNER)
             if any(
                 v["state"]["Status"] != "running"
                 for v in before_resources["views"].values()
             ):
                 raise epoch.Rejected("BOOT_PARTIAL_RUNNING_EPOCH_REJECTED")
             return {
-                "result": "ALREADY_RUNNING_NONTRADING",
+                "result": (
+                    "ALREADY_RUNNING_SOURCE_PAUSED_NONTRADING"
+                    if previous["state"] != "RUNNING_NONTRADING"
+                    else "ALREADY_RUNNING_NONTRADING"
+                ),
                 "status": previous,
                 "legacy_unchanged": True,
                 "trading_started": False,
             }
         if (
             previous.get("state") != "RUNNING_NONTRADING"
-            or previous.get("owner") != OWNER
-        ):
+            and not (
+                GENERATION == "r6"
+                and previous.get("state")
+                in {"WAITING_SOURCE_NONTRADING", "CATCHING_UP_NONTRADING"}
+            )
+        ) or previous.get("owner") != OWNER:
             raise epoch.Rejected("FAILED_EPOCH_REQUIRES_OPERATOR_REVIEW")
         # A stale timestamp is expected after reboot; all remaining status guards apply.
         observed = datetime.fromisoformat(
             previous["observed_at_utc"].replace("Z", "+00:00")
         )
-        epoch.validate_running_status(
-            previous, OWNER, now_ms=int(observed.timestamp() * 1000)
-        )
+        if GENERATION == "r6":
+            validate_r6_lifecycle_status(
+                previous, now_ms=int(observed.timestamp() * 1000)
+            )
+        else:
+            epoch.validate_running_status(
+                previous, OWNER, now_ms=int(observed.timestamp() * 1000)
+            )
         self.validate_resources()
         quant_lock = subprocess.run(
             [
@@ -659,6 +760,13 @@ class BootController(epoch.EpochController):
             value = read_json(status_path)
             if value.get("state") == "FAILED_CLOSED":
                 raise epoch.Rejected("BOOT_SERVE_FAILED_CLOSED")
+            if GENERATION == "r6" and value.get("state") in {
+                "WAITING_SOURCE_NONTRADING",
+                "CATCHING_UP_NONTRADING",
+            }:
+                validate_r6_lifecycle_status(value)
+                time.sleep(2)
+                continue
             if value.get("observed_at_utc") != previous["observed_at_utc"]:
                 epoch.validate_running_status(value, OWNER)
                 if all(
@@ -695,7 +803,7 @@ def main(argv=None) -> int:
     parser.add_argument("--expected-revision")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
-        "--generation", choices=("original", "r2", "r4", "r5"), default="original"
+        "--generation", choices=("original", "r2", "r4", "r5", "r6"), default="original"
     )
     parser.add_argument("--binding", type=Path)
     parser.add_argument("--binding-sha256")
@@ -707,6 +815,8 @@ def main(argv=None) -> int:
         configure_generation_r4()
     elif args.generation == "r5":
         configure_generation_r5()
+    elif args.generation == "r6":
+        configure_generation_r6()
     args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None

@@ -22,7 +22,9 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         for path in (LAUNCHER, INSTALLER):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
-                self.assertIn("[ValidateSet('original', 'r2', 'r4', 'r5')]", source)
+                self.assertIn(
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6')]", source
+                )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r2-20261012", source)
                 self.assertIn("kairos-nontrading-runtime-epoch-boot-r2-v1", source)
@@ -39,7 +41,9 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         for path in (LAUNCHER, INSTALLER):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
-                self.assertIn("[ValidateSet('original', 'r2', 'r4', 'r5')]", source)
+                self.assertIn(
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6')]", source
+                )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r4-20261012", source)
                 self.assertIn("kairos-nontrading-runtime-epoch-boot-r4-v1", source)
@@ -58,7 +62,9 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         for path in (LAUNCHER, INSTALLER):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
-                self.assertIn("[ValidateSet('original', 'r2', 'r4', 'r5')]", source)
+                self.assertIn(
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6')]", source
+                )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r5-20261012", source)
                 self.assertIn("kairos-nontrading-runtime-epoch-boot-r5-v1", source)
@@ -68,6 +74,21 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         )
         self.assertIn("'-Generation'", INSTALLER.read_text())
         self.assertIn("'--generation', $Generation", LAUNCHER.read_text())
+
+    def test_r6_has_distinct_scope_and_task_with_default_and_matching_guards(self):
+        for path in (LAUNCHER, INSTALLER):
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6')]", source
+                )
+                self.assertIn("$Generation = 'original'", source)
+                self.assertIn("epoch-boot-r6-20261012", source)
+                self.assertIn("kairos-nontrading-runtime-epoch-boot-r6-v1", source)
+                self.assertIn("$generationProperty.Value -cne $Generation", source)
+        self.assertIn(
+            "Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R6", INSTALLER.read_text()
+        )
 
     def test_native_job_launches_python_with_exact_quoted_arguments(self) -> None:
         if os.name != "nt":
