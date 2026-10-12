@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import re
+import sys
 import time
 from builtins import ExceptionGroup
 from dataclasses import asdict
@@ -25,10 +27,12 @@ SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
 MINUTE = 60_000
 MAX_BARS = 150_000
 MAX_PENDING = 100
+RECOVERY_PAGE_SIZE = 200
 FINALITY_MS = 5_000
 MAX_STATUS_BYTES = 32_768
 FETCH_TIMEOUT_ATTEMPTS = 3
 FETCH_RETRY_SECONDS = (2, 4)
+MAX_UNPUBLISHED_CONFIRMATION_RETRIES = 2  # Three complete rounds including the first.
 ORIGINAL_PREFIX_ROWS = 173_164
 ORIGINAL_PREFIX_LAST_OPEN_MS = 1_789_832_580_000
 ORIGINAL_PREFIX_TABLE_SHA256 = (
@@ -79,6 +83,9 @@ MODES = (
     "catchup",
     "verify-restore",
     "boot-state",
+    "incident-state",
+    "incident-drain",
+    "incident-verify-restore",
     "boot-verify-restore",
     "boot-catchup",
     "boot-redis-state",
@@ -108,6 +115,53 @@ return id
 
 class EpochError(RuntimeError):
     """Safe error: no credentials, database payload, or driver text."""
+
+
+def safe_unpublished_confirmation(
+    observations: list[tuple[str, int, int, object]],
+    *,
+    symbol: str,
+    anchor,
+    end_exclusive: int,
+    parse_page,
+) -> bool:
+    """Allow another full confirmation only for mutable, unpublished rows."""
+    if len(observations) != 2:
+        return False
+    first_request, second_request = observations
+    if (
+        first_request[:3] != second_request[:3]
+        or first_request[0] != symbol
+        or first_request[1] != anchor.open_time_ms
+        or first_request[2]
+        != min(end_exclusive, first_request[1] + RECOVERY_PAGE_SIZE * MINUTE)
+    ):
+        return False
+    try:
+        first_page = parse_page(
+            first_request[3],
+            symbol=symbol,
+            start=first_request[1],
+            end=first_request[2],
+        )
+        second_page = parse_page(
+            second_request[3],
+            symbol=symbol,
+            start=second_request[1],
+            end=second_request[2],
+        )
+        if len(first_page) < 2 or len(first_page) != len(second_page):
+            return False
+        if (
+            first_page[0].canonical_bar_bytes() != anchor.canonical_bar_bytes()
+            or second_page[0].canonical_bar_bytes() != anchor.canonical_bar_bytes()
+        ):
+            return False
+        return tuple(event.canonical_bar_bytes() for event in first_page[1:]) != tuple(
+            event.canonical_bar_bytes() for event in second_page[1:]
+        )
+    except Exception:  # noqa: BLE001 - malformed evidence can never authorize a retry.
+        return False
 
 
 def validate_config(value: dict, mode: str) -> None:
@@ -1397,7 +1451,10 @@ async def recover(
 ) -> dict:
     import aiohttp
     import asyncpg
-    from kairos_quant.long_gap_recovery import RecoveryStatus, recover_symbol
+
+    recovery = importlib.import_module("kairos_quant.long_gap_recovery")
+    RecoveryStatus = recovery.RecoveryStatus
+    recover_symbol = recovery.recover_symbol
 
     role = "kairos_epoch_producer" if publish else "kairos_epoch_history"
     pool = await asyncpg.create_pool(
@@ -1406,6 +1463,7 @@ async def recover(
     end = config["end_exclusive_ms"]
     totals = {}
     progress_by_symbol = {}
+    deferred_confirmation_rounds = {}
     try:
         async with pool.acquire() as connection:
             await verify_schema(connection)
@@ -1466,16 +1524,77 @@ async def recover(
                     async def pause():
                         await asyncio.sleep(5)
 
+                    async def recover_with_confirmation_retries():
+                        deferred = 0
+                        while True:
+                            observations = []
+
+                            async def observed_fetch(
+                                requested_symbol,
+                                start,
+                                finish,
+                                _observations=observations,
+                            ):
+                                raw = await fetch(requested_symbol, start, finish)
+                                _observations.append(
+                                    (requested_symbol, start, finish, raw)
+                                )
+                                if len(_observations) > 2:
+                                    del _observations[0]
+                                return raw
+
+                            try:
+                                return await recover_symbol(
+                                    values[symbol],
+                                    end_exclusive=end,
+                                    fetch=observed_fetch,
+                                    publish=append,
+                                    page_size=RECOVERY_PAGE_SIZE,
+                                    pause=pause,
+                                    progress=lambda _item: None,
+                                    status=state,
+                                )
+                            except BaseException as exc:
+                                if isinstance(exc, asyncio.CancelledError):
+                                    raise
+                                if (
+                                    deferred >= MAX_UNPUBLISHED_CONFIRMATION_RETRIES
+                                    or getattr(state, "phase", None)
+                                    != "CONFIRMATION_COMPARE"
+                                    or getattr(state, "total_appended_bars", None) != 0
+                                    or not isinstance(
+                                        exc,
+                                        getattr(recovery, "RecoveryError", ()),
+                                    )
+                                    or not safe_unpublished_confirmation(
+                                        observations,
+                                        symbol=symbol,
+                                        anchor=values[symbol],
+                                        end_exclusive=end,
+                                        parse_page=recovery.parse_page,
+                                    )
+                                ):
+                                    raise
+                                deferred += 1
+                                deferred_confirmation_rounds[symbol] = deferred
+                                progress_by_symbol[symbol] = {
+                                    "deferred_confirmation_rounds": deferred,
+                                }
+                                write_status(
+                                    status_path,
+                                    {
+                                        "state": "CATCHUP_PROGRESS",
+                                        "owner": config["owner"],
+                                        "symbols": dict(progress_by_symbol),
+                                        "deadline_ms": end,
+                                        "observed_at_utc": datetime.now(
+                                            UTC
+                                        ).isoformat(),
+                                    },
+                                )
+
                     try:
-                        count = await recover_symbol(
-                            values[symbol],
-                            end_exclusive=end,
-                            fetch=fetch,
-                            publish=append,
-                            pause=pause,
-                            progress=lambda _item: None,
-                            status=state,
-                        )
+                        count = await recover_with_confirmation_retries()
                     except asyncio.CancelledError as exc:
                         write_status(
                             status_path.parent / ("failure-" + symbol + ".json"),
@@ -1486,6 +1605,9 @@ async def recover(
                                 "error_type": type(exc).__name__,
                                 "appended_bars": getattr(
                                     state, "total_appended_bars", None
+                                ),
+                                "deferred_confirmation_rounds": deferred_confirmation_rounds.get(
+                                    symbol, 0
                                 ),
                                 "publish_outcome_unknown": getattr(state, "phase", None)
                                 == "DURABLE_PUBLISH",
@@ -1505,6 +1627,9 @@ async def recover(
                                 "appended_bars": getattr(
                                     state, "total_appended_bars", None
                                 ),
+                                "deferred_confirmation_rounds": deferred_confirmation_rounds.get(
+                                    symbol, 0
+                                ),
                                 "publish_outcome_unknown": getattr(state, "phase", None)
                                 == "DURABLE_PUBLISH",
                                 "trading_started": False,
@@ -1513,12 +1638,21 @@ async def recover(
                         )
                         raise
                     totals[symbol] = count
+                    progress_by_symbol[symbol] = {
+                        "appended_bars": count,
+                        "deferred_confirmation_rounds": deferred_confirmation_rounds.get(
+                            symbol, 0
+                        ),
+                    }
                     write_status(
                         status_path,
                         {
                             "state": "CATCHUP_PROGRESS",
                             "owner": config["owner"],
                             "completed_symbols": dict(totals),
+                            "deferred_confirmation_rounds": dict(
+                                deferred_confirmation_rounds
+                            ),
                             "deadline_ms": end,
                             "observed_at_utc": datetime.now(UTC).isoformat(),
                         },
@@ -1573,6 +1707,7 @@ async def recover(
             if publish
             else "AUDIT_ONLY_CATCHUP_COMPLETE",
             "appended": totals,
+            "deferred_confirmation_rounds": dict(deferred_confirmation_rounds),
             "through_exclusive_ms": end,
             "maximum_bars": MAX_PENDING if publish else MAX_BARS,
             **(
@@ -1921,6 +2056,13 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
 
 async def dispatch(mode: str, config: dict, output: Path) -> dict:
     validate_config(config, mode)
+    if mode in {"incident-state", "incident-drain", "incident-verify-restore"}:
+        if __package__:
+            from scripts.runtime_epoch_incident_worker import dispatch_incident
+        else:
+            from runtime_epoch_incident_worker import dispatch_incident
+
+        return await dispatch_incident(mode, config, output)
     if mode == "prepare":
         return await prepare(config)
     if mode == "seed":
@@ -1988,4 +2130,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    sys.modules.setdefault("runtime_epoch_worker", sys.modules[__name__])
     raise SystemExit(main())

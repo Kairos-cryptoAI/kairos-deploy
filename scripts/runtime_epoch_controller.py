@@ -279,6 +279,31 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         "rotate-history": common | {"admin_password", "history_password"},
         "history-state": common | {"admin_password"},
         "boot-state": common | {"admin_password"},
+        "incident-state": common
+        | {
+            "admin_password",
+            "producer_password",
+            "consumer_password",
+            "redis_producer_password",
+            "redis_consumer_password",
+        },
+        "incident-drain": common
+        | {
+            "admin_password",
+            "producer_password",
+            "consumer_password",
+            "redis_producer_password",
+            "redis_consumer_password",
+            "expected_state",
+        },
+        "incident-verify-restore": common
+        | {
+            "admin_password",
+            "restore_host",
+            "restore_database",
+            "restore_admin_password",
+            "expected_seed",
+        },
         "boot-redis-state": common
         | {
             "producer_password",
@@ -355,7 +380,11 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         or not isinstance(value["seed_expectation"], dict)
     ):
         raise Rejected("PINNED_SEED_PROVENANCE_REQUIRED")
-    if mode in {"verify-restore", "boot-verify-restore"} and (
+    if mode in {
+        "verify-restore",
+        "boot-verify-restore",
+        "incident-verify-restore",
+    } and (
         value["restore_host"] != "kairos-epoch-" + value["owner"][:12] + "-restore"
         or value["restore_database"]
         != "kairos_recovery_" + value["owner"][:12] + "_epochrestore"
@@ -381,6 +410,13 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         + ("-redisclone" if mode == "boot-redis-clone" else "-redis")
     ):
         raise Rejected("EXACT_READ_ONLY_REDIS_PROOF_HOSTS_REQUIRED")
+    if mode in {"incident-state", "incident-drain", "incident-verify-restore"} and (
+        value["owner"] != CONTINUATION_OWNER
+        or value["pg_host"] != "kairos-epoch-" + CONTINUATION_OWNER[:12] + "-pg"
+        or value["redis_host"] != "kairos-epoch-" + CONTINUATION_OWNER[:12] + "-redis"
+        or (mode == "incident-drain" and not isinstance(value["expected_state"], dict))
+    ):
+        raise Rejected("EXACT_INCIDENT_TARGET_REQUIRED")
     return value
 
 
@@ -537,6 +573,8 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "verify-restore",
         "history-state",
         "boot-state",
+        "incident-state",
+        "incident-drain",
         "boot-redis-state",
         "boot-redis-clone",
         "boot-catchup",
@@ -1610,6 +1648,9 @@ class EpochController:
             "rotate-history": "HISTORY_CREDENTIAL_ROTATED",
             "history-state": "VERIFIED_AUDIT_ONLY_HISTORY_STATE",
             "boot-state": "PASS_BOOT_STATE",
+            "incident-state": "PASS_INCIDENT_STATE",
+            "incident-drain": "PASS_EXACT_INCIDENT_DRAIN",
+            "incident-verify-restore": "PASS_INCIDENT_ISOLATED_RESTORE",
             "boot-redis-state": "PASS_BOOT_REDIS_STATE",
             "boot-redis-clone": "PASS_BOOT_REDIS_STATE",
             "boot-catchup": "AUDIT_ONLY_CATCHUP_COMPLETE",
@@ -1738,6 +1779,7 @@ class EpochController:
             self.expected_revision,
             (
                 "scripts/runtime_epoch_worker.py",
+                "scripts/runtime_epoch_incident_worker.py",
                 "scripts/runtime_epoch_history_seed.py",
                 "scripts/controlled_runtime_worker.py",
             ),
@@ -1746,6 +1788,7 @@ class EpochController:
         )
         required = {
             "runtime_epoch_worker.py",
+            "runtime_epoch_incident_worker.py",
             "runtime_epoch_history_seed.py",
             "controlled_runtime_worker.py",
         }
@@ -2442,7 +2485,11 @@ class EpochController:
         verification_mode: str = "verify-restore",
     ) -> str:
         """Backup only the owned target and compare a disposable exact restore."""
-        if verification_mode not in {"verify-restore", "boot-verify-restore"}:
+        if verification_mode not in {
+            "verify-restore",
+            "boot-verify-restore",
+            "incident-verify-restore",
+        }:
             raise Rejected("EXACT_BACKUP_VERIFICATION_MODE_REQUIRED")
         backup = self.work / ("epoch-history-" + tag + ".dump")
         operation = self.stream_private_pg_dump(

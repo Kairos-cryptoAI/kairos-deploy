@@ -829,6 +829,245 @@ class PublicationTests(unittest.TestCase):
 
 
 class FailureHandlingTests(unittest.TestCase):
+    def _run_confirmation_retry_case(self, case):
+        pool = _FakePool(_FakeOutboxConnection([]))
+        asyncpg = types.ModuleType("asyncpg")
+
+        async def create_pool(*_args, **_kwargs):
+            return pool
+
+        asyncpg.create_pool = create_pool
+        aiohttp = types.ModuleType("aiohttp")
+        aiohttp.ClientTimeout = lambda **_kwargs: object()
+
+        class Session:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        aiohttp.ClientSession = Session
+        quant = types.ModuleType("kairos_quant")
+        recovery = types.ModuleType("kairos_quant.long_gap_recovery")
+        attempts = {symbol: 0 for symbol in worker.SYMBOLS}
+        publishes = []
+        written = []
+        response_queue = []
+
+        class TestRecoveryError(Exception):
+            pass
+
+        class Event:
+            def __init__(self, symbol, value):
+                self.symbol = symbol
+                self.value = value
+                self.open_time_ms = 0
+                self.close_time_ms = worker.MINUTE - 1
+
+            def canonical_bar_bytes(self):
+                return self.value.encode()
+
+        class RecoveryStatus:
+            def __init__(self, _emit):
+                self.phase = "REST_GET_FIRST"
+                self.total_appended_bars = 0
+
+            def enter(self, phase, **_kwargs):
+                self.phase = phase
+
+        recovery.RecoveryError = TestRecoveryError
+        recovery.RecoveryStatus = RecoveryStatus
+        recovery.parse_page = lambda raw, **_kwargs: tuple(raw)
+
+        async def fake_recover(anchor, *, fetch, publish, status, **_kwargs):
+            symbol = anchor.symbol
+            if symbol != worker.SYMBOLS[0]:
+                return 0
+            attempts[symbol] += 1
+            attempt = attempts[symbol]
+            stable_anchor = Event(symbol, "persisted-anchor")
+            if case == "eventual" and attempt == 1:
+                pages = (
+                    [stable_anchor, Event(symbol, "unpublished-a")],
+                    [stable_anchor, Event(symbol, "unpublished-b")],
+                )
+                for page in pages:
+                    response_queue.append(page)
+                    await fetch(symbol, 0, 2 * worker.MINUTE)
+                status.phase = "CONFIRMATION_COMPARE"
+                raise TestRecoveryError("confirmation differs")
+            if case == "eventual" and attempt > 1:
+                stable_page = [stable_anchor, Event(symbol, "stable-bar")]
+                for page in (stable_page, stable_page):
+                    response_queue.append(page)
+                    await fetch(symbol, 0, 2 * worker.MINUTE)
+                status.phase = "DURABLE_PUBLISH"
+                status.total_appended_bars = 1
+                await publish(stable_page[1])
+                return 1
+            if case == "exhausted":
+                suffix = f"round-{attempt}"
+                pages = (
+                    [stable_anchor, Event(symbol, suffix + "-a")],
+                    [stable_anchor, Event(symbol, suffix + "-b")],
+                )
+                for page in pages:
+                    response_queue.append(page)
+                    await fetch(symbol, 0, 2 * worker.MINUTE)
+                status.phase = "CONFIRMATION_COMPARE"
+                raise TestRecoveryError("confirmation differs")
+            if case == "anchor-mismatch":
+                pages = (
+                    [Event(symbol, "wrong-anchor"), Event(symbol, "a")],
+                    [Event(symbol, "wrong-anchor"), Event(symbol, "b")],
+                )
+                for page in pages:
+                    response_queue.append(page)
+                    await fetch(symbol, 0, 2 * worker.MINUTE)
+                status.phase = "CONFIRMATION_COMPARE"
+                raise TestRecoveryError("anchor mismatch")
+            if case == "publish-failure":
+                status.phase = "DURABLE_PUBLISH"
+                await publish(Event(symbol, "outcome-unknown"))
+                raise AssertionError("publish failure was expected")
+            if case == "previously-appended":
+                status.total_appended_bars = 1
+                status.phase = "CONFIRMATION_COMPARE"
+                raise TestRecoveryError("later page confirmation failed")
+            raise AssertionError(case)
+
+        async def fetch_response(*_args):
+            return response_queue.pop(0)
+
+        recovery.recover_symbol = fake_recover
+
+        class FakeWriter:
+            def __init__(self, _pool):
+                pass
+
+            async def append(self, event, *, publish):
+                publishes.append((event, publish))
+                if case == "publish-failure":
+                    raise worker.EpochError("DURABLE_PUBLISH_UNKNOWN")
+
+        anchor_map = {
+            symbol: Event(symbol, "persisted-anchor") for symbol in worker.SYMBOLS
+        }
+        config = _catchup_config(
+            end_exclusive_ms=2 * worker.MINUTE, producer_password="b" * 64
+        )
+        failure = None
+        result = None
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "asyncpg": asyncpg,
+                    "aiohttp": aiohttp,
+                    "kairos_quant": quant,
+                    "kairos_quant.long_gap_recovery": recovery,
+                    **self._writer_modules(),
+                },
+            ),
+            mock.patch.object(worker, "EpochWriter", FakeWriter),
+            mock.patch.object(worker, "verify_schema", new=mock.AsyncMock()),
+            mock.patch.object(
+                worker, "anchors", new=mock.AsyncMock(return_value=anchor_map)
+            ),
+            mock.patch.object(worker, "required_bars", return_value=1),
+            mock.patch.object(
+                worker,
+                "write_status",
+                side_effect=lambda *a, **k: written.append((a, k)),
+            ),
+            mock.patch.object(
+                worker,
+                "fetch_closed_bar_page",
+                new=mock.AsyncMock(side_effect=fetch_response),
+            ),
+        ):
+            try:
+                result = asyncio.run(
+                    worker.recover(
+                        config,
+                        publish=True,
+                        status_path=Path(directory) / "progress.json",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - test captures the terminal exception.
+                failure = exc
+        return attempts, publishes, written, result, failure
+
+    def test_unpublished_confirmation_retries_then_appends_once(self):
+        attempts, publishes, written, result, failure = (
+            self._run_confirmation_retry_case("eventual")
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(attempts[worker.SYMBOLS[0]], 2)
+        self.assertEqual(len(publishes), 1)
+        self.assertEqual(result["deferred_confirmation_rounds"][worker.SYMBOLS[0]], 1)
+        self.assertTrue(
+            any(
+                args[1]
+                .get("symbols", {})
+                .get(worker.SYMBOLS[0], {})
+                .get("deferred_confirmation_rounds")
+                == 1
+                for args, _kwargs in written
+            )
+        )
+
+    def test_unpublished_confirmation_retry_cap_fails_without_publish(self):
+        attempts, publishes, written, _result, failure = (
+            self._run_confirmation_retry_case("exhausted")
+        )
+        self.assertIsInstance(failure, Exception)
+        self.assertEqual(
+            attempts[worker.SYMBOLS[0]],
+            1 + worker.MAX_UNPUBLISHED_CONFIRMATION_RETRIES,
+        )
+        self.assertEqual(publishes, [])
+        terminal = [
+            args[1]
+            for args, kwargs in written
+            if kwargs.get("immutable")
+            and args[0].name == "failure-" + worker.SYMBOLS[0] + ".json"
+        ]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(
+            terminal[0]["deferred_confirmation_rounds"],
+            worker.MAX_UNPUBLISHED_CONFIRMATION_RETRIES,
+        )
+
+    def test_anchor_mismatch_is_never_retried(self):
+        attempts, publishes, _written, _result, failure = (
+            self._run_confirmation_retry_case("anchor-mismatch")
+        )
+        self.assertIsInstance(failure, Exception)
+        self.assertEqual(attempts[worker.SYMBOLS[0]], 1)
+        self.assertEqual(publishes, [])
+
+    def test_durable_publish_failure_is_never_retried(self):
+        attempts, publishes, _written, _result, failure = (
+            self._run_confirmation_retry_case("publish-failure")
+        )
+        self.assertIsInstance(failure, worker.EpochError)
+        self.assertEqual(attempts[worker.SYMBOLS[0]], 1)
+        self.assertEqual(len(publishes), 1)
+
+    def test_confirmation_failure_after_append_is_never_retried(self):
+        attempts, publishes, _written, _result, failure = (
+            self._run_confirmation_retry_case("previously-appended")
+        )
+        self.assertIsInstance(failure, Exception)
+        self.assertEqual(attempts[worker.SYMBOLS[0]], 1)
+        self.assertEqual(publishes, [])
+
     def test_unknown_driver_error_is_not_leaked_to_status_file(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.json"
