@@ -28,6 +28,14 @@ epoch = boot.epoch
 fresh = epoch.fresh
 ROOT = Path("D:/Kairos/runtime/runtime-incident-20261012")
 LEASE = ROOT / "recovery.active"
+PREBACKUP_WORK = ROOT / "recovery-d97a2bf75ace41ed8ba498de2b1919f8"
+PREBACKUP_FAILURE_SHA256 = (
+    "e01819d87959162e97dc34d4c29b491f42ae003fee64cd58ca466111709ac0c6"
+)
+PREBACKUP_STATE_SHA256 = (
+    "1c9a1b1473f77cfa26c91127595cd753263d9203e69337669032dbc14fa41b9d"
+)
+REVIEWED_LEASE = ROOT / "reviewed-prebackup-02.active"
 OBSERVATION = ROOT / "observation-eca4d844945b493daf669366945d266e/receipt.json"
 OBSERVATION_SHA256 = "f47dff8bfc56cb5c387188cd5b7fb465809321c55c9d0580c3d172b97059b312"
 GENERATION_NAME = "kairos-epoch-" + boot.OWNER[:12] + "-serve-r2"
@@ -64,6 +72,67 @@ def load_observation() -> dict:
     ):
         raise epoch.Rejected("INCIDENT_RECONCILIATION_PRECONDITIONS_REQUIRED")
     return value
+
+
+def validate_reviewed_prebackup_failure(
+    claim: str, *, accepted_work: Path | None = None
+) -> dict:
+    """One exact operator-reviewed refusal, before dump or publication, not an automatic retry."""
+    failure_path = PREBACKUP_WORK / "failure.json"
+    state_path = PREBACKUP_WORK / "output-incident-state-before/incident-state.json"
+    if (
+        claim != PREBACKUP_FAILURE_SHA256
+        or fresh.sha(failure_path) != claim
+        or fresh.sha(state_path) != PREBACKUP_STATE_SHA256
+        or boot.read_json(failure_path)
+        != {
+            "automatic_retry": False,
+            "phase": "incident-state-before",
+            "reason": "PRIVATE_CREATE_ONLY_EPOCH_DUMP_REQUIRED",
+            "result": "FAILED_CLOSED",
+            "trading_started": False,
+        }
+        or boot.read_json(LEASE)
+        != {
+            "owner": boot.OWNER,
+            "run": "d97a2bf75ace41ed8ba498de2b1919f8",
+            "source_revision": "72c781c1aa15e97ac990bfede4c2ddf74ae85418",
+        }
+        or any(PREBACKUP_WORK.glob("epoch-history-*.dump"))
+        or (PREBACKUP_WORK / "config-incident-drain.json").exists()
+        or (PREBACKUP_WORK / "output-incident-drain").exists()
+    ):
+        raise epoch.Rejected("EXACT_REVIEWED_PREBACKUP_REFUSAL_REQUIRED")
+    if accepted_work is not None:
+        active = boot.read_json(REVIEWED_LEASE)
+        if (
+            active.get("owner") != boot.OWNER
+            or re.fullmatch(r"[0-9a-f]{32}", str(active.get("run"))) is None
+            or fresh.safe(accepted_work) != ROOT / ("recovery-" + active["run"])
+        ):
+            raise epoch.Rejected("EXACT_CURRENT_ACCEPTED_RECOVERY_WORK_REQUIRED")
+    for candidate in ROOT.glob("recovery-*"):
+        if candidate == accepted_work or not candidate.is_dir():
+            continue
+        if (
+            (candidate / "config-incident-drain.json").exists()
+            or (candidate / "output-incident-drain").exists()
+            or any(candidate.rglob("one-publication-intent.json"))
+        ):
+            raise epoch.Rejected("PRIOR_PUBLICATION_INTENT_REQUIRES_SEPARATE_REVIEW")
+    inventory = {
+        path.relative_to(PREBACKUP_WORK).as_posix(): fresh.sha(fresh.safe(path))
+        for path in sorted(PREBACKUP_WORK.rglob("*"))
+        if path.is_file()
+    }
+    return {
+        "failure_sha256": claim,
+        "state_sha256": PREBACKUP_STATE_SHA256,
+        "inventory_sha256": fresh.digest(inventory),
+        "lease_sha256": fresh.sha(LEASE),
+        "state": boot.read_json(state_path),
+        "old_attempt_retained": True,
+    }
 
 
 class IncidentController(boot.BootController):
@@ -194,11 +263,18 @@ class IncidentController(boot.BootController):
         self.prepare_reviewed_snapshots()
         incident_config = {**serving, "admin_password": self._admin_password}
         before = self.phase("incident-state", incident_config, suffix="before")
+        reviewed = getattr(self, "reviewed_prebackup", None)
+        if reviewed is not None:
+            if before != reviewed["state"]:
+                raise epoch.Rejected("REVIEWED_PREBACKUP_NATIVE_STATE_CHANGED")
+            # Preserve the original initialized-but-unused volume, too. A wholly
+            # new disposable restore volume is used by the reviewed continuation.
+            self.names["restore_volume"] += "-incident02"
         self.prepare_boot_restore_volume("bootbefore")
         backup_before = self.backup_and_verify(
             seed=before,
             restore_password=secrets.token_hex(32),
-            tag="incident-before",
+            tag="bootbefore",
             verification_mode="incident-verify-restore",
         )
         # Re-read the entire state after restore; a stale observation cannot authorize dispatch.
@@ -214,7 +290,7 @@ class IncidentController(boot.BootController):
         backup_after = self.backup_and_verify(
             seed=after,
             restore_password=secrets.token_hex(32),
-            tag="incident-after",
+            tag="bootafter",
             verification_mode="boot-verify-restore",
         )
         final_state, final_catchup = self.audit_only_tail(clean, "incident-postrestore")
@@ -241,6 +317,11 @@ class IncidentController(boot.BootController):
             != observation.failure_snapshot(boot.SERVE_WORK / "output-serve")
         ):
             raise epoch.Rejected("INCIDENT_PRESERVED_EVIDENCE_OR_LEGACY_CHANGED")
+        if reviewed is not None and reviewed != validate_reviewed_prebackup_failure(
+            PREBACKUP_FAILURE_SHA256,
+            accepted_work=self.work,
+        ):
+            raise epoch.Rejected("REVIEWED_PREBACKUP_EVIDENCE_CHANGED")
         return {
             "result": "PASS_NEW_NONTRADING_GENERATION",
             "owner": boot.OWNER,
@@ -256,6 +337,11 @@ class IncidentController(boot.BootController):
             "generation": generation,
             "original_inputs_sha256": fresh.digest(input_before),
             "original_failure_sha256": fresh.digest(failure_before),
+            "reviewed_prebackup_failure": (
+                {k: v for k, v in reviewed.items() if k != "state"}
+                if reviewed is not None
+                else None
+            ),
             "legacy_preservation": legacy,
             "worker_wheel_manifest_sha256": epoch.WHEEL_MANIFEST_SHA256,
             "trading_started": False,
@@ -271,6 +357,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--expected-revision")
+    parser.add_argument("--reviewed-prebackup-failure-sha256")
     args = parser.parse_args(argv)
     if not args.execute:
         print(
@@ -285,16 +372,23 @@ def main(argv=None) -> int:
         return 0
     controller = None
     work = None
+    active_lease = LEASE
     try:
         boot.verify_source(args.expected_revision or "")
         load_observation()
-        if LEASE.exists():
+        reviewed = None
+        if args.reviewed_prebackup_failure_sha256:
+            reviewed = validate_reviewed_prebackup_failure(
+                args.reviewed_prebackup_failure_sha256
+            )
+            active_lease = REVIEWED_LEASE
+        if active_lease.exists():
             raise epoch.Rejected("FAILED_OR_ACTIVE_INCIDENT_RECOVERY_REQUIRES_REVIEW")
         run = uuid.uuid4().hex
         work = ROOT / ("recovery-" + run)
         epoch._private_directory(work)
         fresh.save(
-            LEASE,
+            active_lease,
             {
                 "run": run,
                 "owner": boot.OWNER,
@@ -308,12 +402,13 @@ def main(argv=None) -> int:
             continuation_attempt="r2-" + run[:8],
             deadline=time.monotonic() + MAX_SECONDS,
         )
+        controller.reviewed_prebackup = reviewed
         result = controller.run_incident_recovery()
         path = work / "receipt.json"
         fresh.save(path, result)
-        if boot.read_json(LEASE).get("run") != run:
+        if boot.read_json(active_lease).get("run") != run:
             raise epoch.Rejected("INCIDENT_RECOVERY_LEASE_CHANGED")
-        LEASE.unlink()
+        active_lease.unlink()
         print(
             json.dumps(
                 {

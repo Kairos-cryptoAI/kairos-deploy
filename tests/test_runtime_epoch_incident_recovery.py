@@ -185,6 +185,62 @@ class IncidentRecoveryTests(unittest.TestCase):
         self.assertLess(calls.index("boot-redis-state"), calls.index("new-generation"))
         before_args = controller.backup_and_verify.call_args_list[0].kwargs
         self.assertEqual(before_args["seed"]["state"], "PASS_INCIDENT_STATE")
+        self.assertEqual(before_args["tag"], "bootbefore")
+        self.assertEqual(
+            controller.backup_and_verify.call_args_list[1].kwargs["tag"], "bootafter"
+        )
+
+    def test_no_unreviewed_or_arbitrary_failure_can_authorize_continuation(self):
+        with (
+            mock.patch.object(boot, "read_json") as read,
+            mock.patch.object(recovery.fresh, "sha") as sha,
+            self.assertRaisesRegex(epoch.Rejected, "EXACT_REVIEWED_PREBACKUP"),
+        ):
+            recovery.validate_reviewed_prebackup_failure("f" * 64)
+        read.assert_not_called()
+        sha.assert_not_called()
+
+    def test_any_prior_dispatch_attempt_blocks_the_reviewed_prebackup_path(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            prior = root / "recovery-original"
+            prior.mkdir()
+            unknown = root / "recovery-unknown"
+            unknown.mkdir()
+            (unknown / "output-incident-drain").mkdir()
+
+            def read(path):
+                if path.name == "failure.json":
+                    return {
+                        "automatic_retry": False,
+                        "phase": "incident-state-before",
+                        "reason": "PRIVATE_CREATE_ONLY_EPOCH_DUMP_REQUIRED",
+                        "result": "FAILED_CLOSED",
+                        "trading_started": False,
+                    }
+                return {
+                    "owner": boot.OWNER,
+                    "run": "d97a2bf75ace41ed8ba498de2b1919f8",
+                    "source_revision": "72c781c1aa15e97ac990bfede4c2ddf74ae85418",
+                }
+
+            def sha(path):
+                return (
+                    recovery.PREBACKUP_FAILURE_SHA256
+                    if path.name == "failure.json"
+                    else recovery.PREBACKUP_STATE_SHA256
+                )
+
+            with (
+                mock.patch.object(recovery, "ROOT", root),
+                mock.patch.object(recovery, "PREBACKUP_WORK", prior),
+                mock.patch.object(boot, "read_json", side_effect=read),
+                mock.patch.object(recovery.fresh, "sha", side_effect=sha),
+                self.assertRaisesRegex(epoch.Rejected, "PRIOR_PUBLICATION_INTENT"),
+            ):
+                recovery.validate_reviewed_prebackup_failure(
+                    recovery.PREBACKUP_FAILURE_SHA256
+                )
 
     def test_clone_failure_or_prestate_change_never_dispatches(self):
         for failure in ("clone", "changed"):
