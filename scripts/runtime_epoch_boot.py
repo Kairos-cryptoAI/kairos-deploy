@@ -153,6 +153,35 @@ def configure_generation_r4() -> None:
     LEASE = ROOT / "boot.active"
 
 
+def configure_generation_r5() -> None:
+    """Bind only the accepted R5 generation and its transport05 restore clone."""
+    global \
+        ROOT, \
+        SERVE_WORK, \
+        SCOPE, \
+        GENERATION, \
+        RECEIPT_NAME, \
+        PARENT_RECEIPT_SHA256, \
+        CONTAINERS, \
+        LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r5-20261012")
+    SERVE_WORK = Path(
+        "D:/Kairos/runtime/runtime-incident-20261012/read-recovery-r5-a3badf943e944cc6b53be1a4f7fd1792"
+    )
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r5-v1"
+    GENERATION = "r5"
+    RECEIPT_NAME = "receipt.json"
+    PARENT_RECEIPT_SHA256 = (
+        "a0b16bfc3953b39f63767df228fcae43a0afdc1a70a5ba45973ab4dc4a1c06fd"
+    )
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": "837783acb187510d04f7e33295a6c18e9c31129f4145f434b288c0a88f565d99",
+    }
+    LEASE = ROOT / "boot.active"
+
+
 def read_json(path: Path, *, limit: int = 131_072) -> dict:
     fresh.safe(path)
     if not path.is_file() or path.stat().st_size > limit:
@@ -309,7 +338,7 @@ def validate_preserved_state(before: dict, after: dict) -> None:
 class BootController(epoch.EpochController):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if GENERATION in {"r2", "r4"}:
+        if GENERATION in {"r2", "r4", "r5"}:
             self.names["serve"] += "-" + GENERATION
         if GENERATION == "r2":
             # Original unverified restore resources remain retained and stopped.
@@ -319,6 +348,9 @@ class BootController(epoch.EpochController):
         elif GENERATION == "r4":
             self.names["restore_pg"] += "-transport04"
             self.names["restore_volume"] += "-transport04"
+        elif GENERATION == "r5":
+            self.names["restore_pg"] += "-transport05"
+            self.names["restore_volume"] += "-transport05"
 
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
@@ -663,7 +695,7 @@ def main(argv=None) -> int:
     parser.add_argument("--expected-revision")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
-        "--generation", choices=("original", "r2", "r4"), default="original"
+        "--generation", choices=("original", "r2", "r4", "r5"), default="original"
     )
     parser.add_argument("--binding", type=Path)
     parser.add_argument("--binding-sha256")
@@ -673,6 +705,8 @@ def main(argv=None) -> int:
         configure_generation_r2()
     elif args.generation == "r4":
         configure_generation_r4()
+    elif args.generation == "r5":
+        configure_generation_r5()
     args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None

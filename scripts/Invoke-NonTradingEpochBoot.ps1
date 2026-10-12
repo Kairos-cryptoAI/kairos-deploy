@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PythonPath,
 
-    [ValidateSet('original', 'r2', 'r4')]
+    [ValidateSet('original', 'r2', 'r4', 'r5')]
     [string]$Generation = 'original'
 )
 
@@ -29,6 +29,10 @@ if ($Generation -ceq 'r2') {
 elseif ($Generation -ceq 'r4') {
     $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r4-v1'
     $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r4-20261012'
+}
+elseif ($Generation -ceq 'r5') {
+    $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r5-v1'
+    $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r5-20261012'
 }
 $MaximumDockerWait = [TimeSpan]::FromMinutes(10)
 $DockerProbeTimeoutMilliseconds = 10000

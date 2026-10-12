@@ -137,6 +137,68 @@ class BootAdmissionTests(unittest.TestCase):
             "kairos-epoch-69893dc7b7c6-restore-data-transport04",
         )
 
+    def test_r5_boot_scope_pins_exact_accepted_receipt_and_container(self):
+        keys = (
+            "ROOT",
+            "SERVE_WORK",
+            "SCOPE",
+            "GENERATION",
+            "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256",
+            "CONTAINERS",
+            "LEASE",
+        )
+        patches = [mock.patch.object(boot, key, getattr(boot, key)) for key in keys]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        original = boot.CONTAINERS.copy()
+
+        boot.configure_generation_r5()
+
+        self.assertEqual(
+            boot.ROOT.as_posix(), "D:/Kairos/runtime/epoch-boot-r5-20261012"
+        )
+        self.assertEqual(
+            boot.SERVE_WORK.as_posix(),
+            "D:/Kairos/runtime/runtime-incident-20261012/read-recovery-r5-a3badf943e944cc6b53be1a4f7fd1792",
+        )
+        self.assertEqual(boot.SCOPE, "kairos-nontrading-runtime-epoch-boot-r5-v1")
+        self.assertEqual(boot.GENERATION, "r5")
+        self.assertEqual(boot.RECEIPT_NAME, "receipt.json")
+        self.assertEqual(
+            boot.PARENT_RECEIPT_SHA256,
+            "a0b16bfc3953b39f63767df228fcae43a0afdc1a70a5ba45973ab4dc4a1c06fd",
+        )
+        self.assertEqual(boot.CONTAINERS["pg"], original["pg"])
+        self.assertEqual(boot.CONTAINERS["redis"], original["redis"])
+        self.assertEqual(
+            boot.CONTAINERS["serve"],
+            "837783acb187510d04f7e33295a6c18e9c31129f4145f434b288c0a88f565d99",
+        )
+        self.assertEqual(boot.LEASE, boot.ROOT / "boot.active")
+
+    def test_r5_constructor_uses_transport05_and_r5_serve_name(self):
+        def initialize(controller, *_args, **_kwargs):
+            controller.names = epoch.resource_names(boot.OWNER)
+
+        with (
+            mock.patch.object(boot, "GENERATION", "r5"),
+            mock.patch.object(epoch.EpochController, "__init__", new=initialize),
+        ):
+            controller = boot.BootController(boot.OWNER, expected_revision="a" * 40)
+        self.assertEqual(
+            controller.names["serve"], "kairos-epoch-69893dc7b7c6-serve-r5"
+        )
+        self.assertEqual(
+            controller.names["restore_pg"],
+            "kairos-epoch-69893dc7b7c6-restore-transport05",
+        )
+        self.assertEqual(
+            controller.names["restore_volume"],
+            "kairos-epoch-69893dc7b7c6-restore-data-transport05",
+        )
+
     def test_r4_binding_rejects_other_generation_receipt_or_serve_identity(self):
         keys = (
             "ROOT",
@@ -189,13 +251,18 @@ class BootAdmissionTests(unittest.TestCase):
             contextlib.redirect_stdout(output),
             mock.patch.object(boot, "configure_generation_r2") as r2,
             mock.patch.object(boot, "configure_generation_r4") as r4,
+            mock.patch.object(boot, "configure_generation_r5") as r5,
         ):
             self.assertEqual(boot.main([]), 0)
             r2.assert_not_called()
             r4.assert_not_called()
+            r5.assert_not_called()
             self.assertEqual(boot.main(["--generation", "r4"]), 0)
             r4.assert_called_once_with()
             r2.assert_not_called()
+            r5.assert_not_called()
+            self.assertEqual(boot.main(["--generation", "r5"]), 0)
+            r5.assert_called_once_with()
             with self.assertRaises(SystemExit):
                 boot.main(["--generation", "r3"])
 
