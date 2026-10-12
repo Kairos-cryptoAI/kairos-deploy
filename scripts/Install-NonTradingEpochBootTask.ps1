@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PythonPath,
 
-    [ValidateSet('original', 'r2')]
+    [ValidateSet('original', 'r2', 'r4')]
     [string]$Generation = 'original'
 )
 
@@ -27,6 +27,11 @@ if ($Generation -ceq 'r2') {
     $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r2-v1'
     $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r2-20261012'
     $TaskName = 'Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R2'
+}
+elseif ($Generation -ceq 'r4') {
+    $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r4-v1'
+    $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r4-20261012'
+    $TaskName = 'Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R4'
 }
 
 function Get-Sha256Hex {

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import time
 import unittest
@@ -72,6 +74,130 @@ class BootAdmissionTests(unittest.TestCase):
         self.assertTrue(
             controller.names["restore_volume"].endswith("-restore-data-incident03")
         )
+
+    def test_r4_boot_scope_is_exact_accepted_receipt_and_new_serve(self):
+        keys = (
+            "ROOT",
+            "SERVE_WORK",
+            "SCOPE",
+            "GENERATION",
+            "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256",
+            "CONTAINERS",
+            "LEASE",
+        )
+        patches = [mock.patch.object(boot, key, getattr(boot, key)) for key in keys]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        original = boot.CONTAINERS.copy()
+
+        boot.configure_generation_r4()
+
+        self.assertEqual(
+            boot.ROOT.as_posix(), "D:/Kairos/runtime/epoch-boot-r4-20261012"
+        )
+        self.assertEqual(
+            boot.SERVE_WORK.as_posix(),
+            "D:/Kairos/runtime/runtime-incident-20261012/clean-recovery-r4-97469e3b772b4d00b0b531282ba01b55",
+        )
+        self.assertEqual(boot.SCOPE, "kairos-nontrading-runtime-epoch-boot-r4-v1")
+        self.assertEqual(boot.GENERATION, "r4")
+        self.assertEqual(boot.RECEIPT_NAME, "receipt.json")
+        self.assertEqual(
+            boot.PARENT_RECEIPT_SHA256,
+            "0a7a621991a328d9fedb8c203cc0da53a835e0a3c02f6549bacf4ef650dba03f",
+        )
+        self.assertEqual(boot.CONTAINERS["pg"], original["pg"])
+        self.assertEqual(boot.CONTAINERS["redis"], original["redis"])
+        self.assertEqual(
+            boot.CONTAINERS["serve"],
+            "1f9da09121bd509c5aa1d1a698c98334bc1e5378ee4978b65d98885cff19e199",
+        )
+        self.assertEqual(boot.LEASE, boot.ROOT / "boot.active")
+
+    def test_r4_constructor_uses_only_r4_and_transport04_restore_names(self):
+        def initialize(controller, *_args, **_kwargs):
+            controller.names = epoch.resource_names(boot.OWNER)
+
+        with (
+            mock.patch.object(boot, "GENERATION", "r4"),
+            mock.patch.object(epoch.EpochController, "__init__", new=initialize),
+        ):
+            controller = boot.BootController(boot.OWNER, expected_revision="a" * 40)
+        self.assertEqual(
+            controller.names["serve"], "kairos-epoch-69893dc7b7c6-serve-r4"
+        )
+        self.assertEqual(
+            controller.names["restore_pg"],
+            "kairos-epoch-69893dc7b7c6-restore-transport04",
+        )
+        self.assertEqual(
+            controller.names["restore_volume"],
+            "kairos-epoch-69893dc7b7c6-restore-data-transport04",
+        )
+
+    def test_r4_binding_rejects_other_generation_receipt_or_serve_identity(self):
+        keys = (
+            "ROOT",
+            "SERVE_WORK",
+            "SCOPE",
+            "GENERATION",
+            "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256",
+            "CONTAINERS",
+            "LEASE",
+        )
+        patches = [mock.patch.object(boot, key, getattr(boot, key)) for key in keys]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        boot.configure_generation_r4()
+        valid = {
+            "schema_version": 1,
+            "owner": boot.OWNER,
+            "scope": boot.SCOPE,
+            "generation": boot.GENERATION,
+            "repo": epoch.REPO.as_posix(),
+            "python_path": boot.PYTHON.as_posix(),
+            "entry_script": "scripts/runtime_epoch_boot.py",
+            "launcher_script": "scripts/Invoke-NonTradingEpochBoot.ps1",
+            "containers": boot.CONTAINERS.copy(),
+            "parent_receipt_sha256": boot.PARENT_RECEIPT_SHA256,
+            "revision": "a" * 40,
+        }
+        for field, wrong in (
+            ("generation", "r2"),
+            ("scope", "kairos-nontrading-runtime-epoch-boot-r2-v1"),
+            ("parent_receipt_sha256", "b" * 64),
+            (
+                "containers",
+                {**boot.CONTAINERS, "serve": "c" * 64},
+            ),
+        ):
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(
+                    epoch.Rejected, "EXACT_SINGLE_NONTRADING_BOOT_BINDING_REQUIRED"
+                ),
+            ):
+                boot.validate_binding({**valid, field: wrong})
+
+    def test_cli_generation_is_explicit_and_original_remains_default(self):
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            mock.patch.object(boot, "configure_generation_r2") as r2,
+            mock.patch.object(boot, "configure_generation_r4") as r4,
+        ):
+            self.assertEqual(boot.main([]), 0)
+            r2.assert_not_called()
+            r4.assert_not_called()
+            self.assertEqual(boot.main(["--generation", "r4"]), 0)
+            r4.assert_called_once_with()
+            r2.assert_not_called()
+            with self.assertRaises(SystemExit):
+                boot.main(["--generation", "r3"])
 
     def test_stopped_epoch_full_path_requires_two_restores_and_readonly_redis_before_serve(
         self,

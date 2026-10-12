@@ -138,6 +138,109 @@ class CleanQueueRecoveryTests(unittest.TestCase):
         )
         boot.configure_generation_r2()
 
+    def _attempt_reviewed_r3_admission(
+        self,
+        *,
+        claim=recovery.R3_FAILURE_SHA256,
+        source=None,
+        failure_sha=None,
+        failed_status_sha=None,
+        operator_sha=None,
+        r2_status=None,
+        receipt=None,
+        latch_changes=None,
+    ):
+        """Exercise admission with exact synthetic evidence, never host files."""
+        controller = recovery.ReviewedR3SupplementController.__new__(
+            recovery.ReviewedR3SupplementController
+        )
+        controller.reviewed_r3_standby_views = mock.Mock(return_value={"proof": 1})
+        latch = {
+            "state": "IN_PROGRESS",
+            "run": recovery.R3_FAILED_RUN,
+            "owner": boot.OWNER,
+            "source_revision": recovery.R3_SOURCE_REVISION,
+            "failed_status_sha256": recovery.FAILED_STATUS_SHA256,
+            "accepted_r2_receipt_sha256": recovery.ACCEPTED_RECEIPT_SHA256,
+            "automatic_retry": False,
+        }
+        if source is not None:
+            latch["source_revision"] = source
+        if latch_changes:
+            latch.update(latch_changes)
+
+        latch_path = recovery.LEASE_DIR / "latch.json"
+        hashes = {
+            recovery.R3_FAILED_WORK / "failure.json": (
+                recovery.R3_FAILURE_SHA256 if failure_sha is None else failure_sha
+            ),
+            recovery.R3_FAILED_WORK / "output-serve/status.json": (
+                recovery.R3_FAILED_STATUS_SHA256
+                if failed_status_sha is None
+                else failed_status_sha
+            ),
+            recovery.R3_FAILED_WORK / "operator.zip": (
+                recovery.R3_OPERATOR_ZIP_SHA256
+                if operator_sha is None
+                else operator_sha
+            ),
+            boot.SERVE_WORK / "output-serve/status.json": (
+                recovery.FAILED_STATUS_SHA256 if r2_status is None else r2_status
+            ),
+            boot.SERVE_WORK / boot.RECEIPT_NAME: (
+                recovery.ACCEPTED_RECEIPT_SHA256 if receipt is None else receipt
+            ),
+        }
+
+        def require_latch_path(path):
+            if Path(path) != latch_path:
+                raise AssertionError("unexpected admission file check")
+
+        def latch_is_symlink(path):
+            require_latch_path(path)
+            return False
+
+        def latch_is_file(path):
+            require_latch_path(path)
+            return True
+
+        def hash_for(path):
+            normalized = Path(path)
+            if normalized not in hashes:
+                raise AssertionError("unexpected admission hash path")
+            return hashes[normalized]
+
+        def read_active_lease(path, *args, **kwargs):
+            if Path(path) != epoch.ACTIVE_LEASE:
+                raise AssertionError("unexpected active-lease path")
+            return boot.OWNER + "\n"
+
+        with (
+            mock.patch.object(
+                Path,
+                "is_symlink",
+                new=latch_is_symlink,
+            ),
+            mock.patch.object(
+                Path,
+                "is_file",
+                new=latch_is_file,
+            ),
+            mock.patch.object(
+                recovery.boot, "read_json", return_value=latch
+            ) as read_json,
+            mock.patch.object(recovery.fresh, "sha", side_effect=hash_for),
+            mock.patch.object(
+                type(epoch.ACTIVE_LEASE), "read_text", new=read_active_lease
+            ),
+            mock.patch.object(recovery.boot.subprocess, "run") as subprocess_run,
+        ):
+            try:
+                return controller.admission_evidence(claim)
+            finally:
+                read_json.assert_called_once_with(latch_path)
+                subprocess_run.assert_not_called()
+
     def test_restore_transport03_is_exact_owner_only(self):
         self._assert_restore_suffix_allowed("transport03")
 
@@ -262,47 +365,24 @@ class CleanQueueRecoveryTests(unittest.TestCase):
             boot.stable_standby_metadata(malformed)
 
     def test_reviewed_r3_failure_requires_exact_claim_status_and_operator_hashes(self):
-        controller = recovery.ReviewedR3SupplementController.__new__(
-            recovery.ReviewedR3SupplementController
-        )
-        with self.assertRaisesRegex(epoch.Rejected, "EXACT_REVIEWED_R3_FAILURE"):
-            controller.admission_evidence("0" * 64)
+        for kwargs in (
+            {"claim": "0" * 64},
+            {"failed_status_sha": "0" * 64},
+            {"operator_sha": "0" * 64},
+        ):
+            with (
+                self.subTest(kwargs=kwargs),
+                self.assertRaisesRegex(
+                    epoch.Rejected, "EXACT_REVIEWED_R3_FAILURE_EVIDENCE_REQUIRED"
+                ),
+            ):
+                self._attempt_reviewed_r3_admission(**kwargs)
 
     def test_reviewed_r3_failure_rejects_a_mismatched_failure_sha(self):
-        controller = recovery.ReviewedR3SupplementController.__new__(
-            recovery.ReviewedR3SupplementController
-        )
-        controller.reviewed_r3_standby_views = mock.Mock(return_value={"proof": 1})
-        latch = {
-            "state": "IN_PROGRESS",
-            "run": recovery.R3_FAILED_RUN,
-            "owner": boot.OWNER,
-            "source_revision": recovery.R3_SOURCE_REVISION,
-            "failed_status_sha256": recovery.FAILED_STATUS_SHA256,
-            "accepted_r2_receipt_sha256": recovery.ACCEPTED_RECEIPT_SHA256,
-            "automatic_retry": False,
-        }
-        with (
-            mock.patch.object(recovery.boot, "read_json", return_value=latch),
-            mock.patch.object(
-                type(epoch.ACTIVE_LEASE), "read_text", return_value=boot.OWNER + "\n"
-            ),
-            mock.patch.object(
-                recovery.fresh,
-                "sha",
-                side_effect=lambda path: (
-                    "0" * 64
-                    if Path(path).name == "failure.json"
-                    else recovery.R3_FAILED_STATUS_SHA256
-                    if Path(path).name == "status.json"
-                    else recovery.R3_OPERATOR_ZIP_SHA256
-                    if Path(path).name == "operator.zip"
-                    else recovery.ACCEPTED_RECEIPT_SHA256
-                ),
-            ),
-            self.assertRaisesRegex(epoch.Rejected, "EXACT_REVIEWED_R3_FAILURE"),
+        with self.assertRaisesRegex(
+            epoch.Rejected, "EXACT_REVIEWED_R3_FAILURE_EVIDENCE_REQUIRED"
         ):
-            controller.admission_evidence(recovery.R3_FAILURE_SHA256)
+            self._attempt_reviewed_r3_admission(failure_sha="0" * 64)
 
     def test_reviewed_r3_standby_views_prove_only_health_timestamp_churn(self):
         def view(minute: str, *, output: str = "ready"):
@@ -402,63 +482,23 @@ class CleanQueueRecoveryTests(unittest.TestCase):
                 recovery.ReviewedR3SupplementController.reviewed_r3_standby_views()
 
     def test_reviewed_r3_admission_rechecks_exact_source_and_r2_hashes(self):
-        latch = {
-            "state": "IN_PROGRESS",
-            "run": recovery.R3_FAILED_RUN,
-            "owner": boot.OWNER,
-            "source_revision": recovery.R3_SOURCE_REVISION,
-            "failed_status_sha256": recovery.FAILED_STATUS_SHA256,
-            "accepted_r2_receipt_sha256": recovery.ACCEPTED_RECEIPT_SHA256,
-            "automatic_retry": False,
-        }
-
-        def attempt(*, source=None, r2_status=None, receipt=None):
-            controller = recovery.ReviewedR3SupplementController.__new__(
-                recovery.ReviewedR3SupplementController
-            )
-            current_latch = dict(latch)
-            if source is not None:
-                current_latch["source_revision"] = source
-            controller.reviewed_r3_standby_views = mock.Mock(return_value={"proof": 1})
-            hashes = {
-                recovery.R3_FAILED_WORK / "failure.json": recovery.R3_FAILURE_SHA256,
-                recovery.R3_FAILED_WORK
-                / "output-serve/status.json": recovery.R3_FAILED_STATUS_SHA256,
-                recovery.R3_FAILED_WORK
-                / "operator.zip": recovery.R3_OPERATOR_ZIP_SHA256,
-                boot.SERVE_WORK / "output-serve/status.json": r2_status
-                or recovery.FAILED_STATUS_SHA256,
-                boot.SERVE_WORK / boot.RECEIPT_NAME: receipt
-                or recovery.ACCEPTED_RECEIPT_SHA256,
-            }
-            with (
-                mock.patch.object(Path, "is_symlink", return_value=False),
-                mock.patch.object(Path, "is_file", return_value=True),
-                mock.patch.object(
-                    recovery.boot, "read_json", return_value=current_latch
-                ),
-                mock.patch.object(
-                    recovery.fresh,
-                    "sha",
-                    side_effect=lambda path: hashes.get(Path(path), "0" * 64),
-                ),
-                mock.patch.object(
-                    type(epoch.ACTIVE_LEASE),
-                    "read_text",
-                    return_value=boot.OWNER + "\n",
-                ),
-            ):
-                return controller.admission_evidence(recovery.R3_FAILURE_SHA256)
-
-        accepted = attempt()
+        accepted = self._attempt_reviewed_r3_admission()
         self.assertEqual(
             accepted["failure_cause"],
             "VERIFIED_PASSIVE_HEALTH_TIMESTAMP_GUARD_REFUSAL",
+        )
+        self.assertEqual(accepted["failure_json_sha256"], recovery.R3_FAILURE_SHA256)
+        self.assertEqual(
+            accepted["failed_status_sha256"], recovery.R3_FAILED_STATUS_SHA256
+        )
+        self.assertEqual(
+            accepted["operator_zip_sha256"], recovery.R3_OPERATOR_ZIP_SHA256
         )
         for kwargs in (
             {"source": "a" * 40},
             {"r2_status": "0" * 64},
             {"receipt": "0" * 64},
+            {"latch_changes": {"run": "wrong-run"}},
         ):
             with (
                 self.subTest(kwargs=kwargs),
@@ -466,7 +506,7 @@ class CleanQueueRecoveryTests(unittest.TestCase):
                     epoch.Rejected, "EXACT_REVIEWED_R3_FAILURE_EVIDENCE_REQUIRED"
                 ),
             ):
-                attempt(**kwargs)
+                self._attempt_reviewed_r3_admission(**kwargs)
 
     def test_reviewed_r3_failure_requires_exact_stopped_container_id(self):
         controller = recovery.ReviewedR3SupplementController.__new__(

@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PythonPath,
 
-    [ValidateSet('original', 'r2')]
+    [ValidateSet('original', 'r2', 'r4')]
     [string]$Generation = 'original'
 )
 
@@ -25,6 +25,10 @@ $ExpectedLauncherScript = 'scripts/Invoke-NonTradingEpochBoot.ps1'
 if ($Generation -ceq 'r2') {
     $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r2-v1'
     $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r2-20261012'
+}
+elseif ($Generation -ceq 'r4') {
+    $ExpectedScope = 'kairos-nontrading-runtime-epoch-boot-r4-v1'
+    $ExpectedRuntimeRoot = 'D:\Kairos\runtime\epoch-boot-r4-20261012'
 }
 $MaximumDockerWait = [TimeSpan]::FromMinutes(10)
 $DockerProbeTimeoutMilliseconds = 10000

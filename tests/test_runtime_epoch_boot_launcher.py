@@ -22,7 +22,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         for path in (LAUNCHER, INSTALLER):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
-                self.assertIn("[ValidateSet('original', 'r2')]", source)
+                self.assertIn("[ValidateSet('original', 'r2', 'r4')]", source)
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r2-20261012", source)
                 self.assertIn("kairos-nontrading-runtime-epoch-boot-r2-v1", source)
@@ -34,6 +34,25 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         )
         self.assertIn("'-Generation'", INSTALLER.read_text())
         self.assertIn("'--generation', $Generation", LAUNCHER.read_text())
+
+    def test_r4_uses_its_own_root_scope_and_task_without_changing_default(self):
+        for path in (LAUNCHER, INSTALLER):
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn("[ValidateSet('original', 'r2', 'r4')]", source)
+                self.assertIn("$Generation = 'original'", source)
+                self.assertIn("epoch-boot-r4-20261012", source)
+                self.assertIn("kairos-nontrading-runtime-epoch-boot-r4-v1", source)
+                self.assertIn("$binding.PSObject.Properties['generation']", source)
+                self.assertIn("$generationProperty.Value -cne $Generation", source)
+        installer = INSTALLER.read_text(encoding="utf-8")
+        launcher = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn("Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R4", installer)
+        self.assertIn("'-Generation'", installer)
+        self.assertIn("'--generation', $Generation", launcher)
+        self.assertIsNone(
+            re.search(r"Register-ScheduledTask[^\r\n]*-Force", installer, re.IGNORECASE)
+        )
 
     def test_native_job_launches_python_with_exact_quoted_arguments(self) -> None:
         if os.name != "nt":
