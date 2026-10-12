@@ -94,3 +94,44 @@ An accepted receipt means **working non-trading bar delivery only**.
 `PAPER_QUALIFIED=false`, `ALPHA_READY=false`, `LIVE_READY=false`, and
 `STRATEGY_POLICY=REJECT_ALL` remain in force. Failures retain owned evidence for
 inspection; they do not authorize retries against the historical runtime.
+
+## Exact R4 read-timeout recovery (R5)
+
+`scripts/runtime_epoch_read_recovery.py` is plan-only by default. Its single
+create-only attempt admits the exact stopped R4 container, failed status,
+signed source, accepted recovery receipt and original latches. It does not
+restart R4 or change an earlier attempt's evidence. The infrastructure cause
+of R4's Redis read timeout is unconfirmed; the verified defect is fatal
+handling of a transient consumer transport failure.
+
+The admitted new epoch contains 336,429 audit rows, 5,336 published outbox
+rows, and 5,331 completed inbox rows. Only the five fixed, already published
+messages at open time 1791791760000 may be completed. Any other gap, partial
+completion, hash conflict, lease, trading row or resource identity fails closed.
+Before that write a fresh dump must pass full 32-table/sequence/history equality
+and physical/index checks on a separately owned `transport05` restore clone.
+Completion uses the existing durable consumer and its least-privilege identity:
+no publication, history rewrite, group reset, lease reset or cursor reset.
+The post-completion proof preserves every prior audit/outbox row, sequence,
+completed inbox prefix, stream payload and known publication receipt.
+
+Only after that proof does the path catch up audit-only history, take and
+independently restore another fresh dump, then create one new R5 bar supervisor.
+It must demonstrate fresh progress for all five symbols and a graceful,
+same-container stop/start with another five-symbol advance. Existing queue
+qualification already contains its one exact duplicate stream entry; this path
+does not append another artificial duplicate to the working queue.
+
+The worker-local Redis transport disables hidden client retries and uses a
+one-second stream block, a six-second command bound, and at most three transport
+failures per bounded recovery episode. An ambiguous new-message read first
+drains that same consumer's pending entries before reading new messages again.
+Completed inbox deduplication remains authoritative. Authentication, permission,
+protocol, payload, database and integrity errors are not retried. Cancellation
+propagates. Frozen Core, research sources and trading contracts are unchanged.
+SIGTERM requests a fully drained cycle and creates a new immutable clean-stop
+receipt; it does not interrupt an inbox transaction or overwrite a prior receipt.
+
+Implementation and finite acceptance are not a claim of month-long uptime.
+Boot and technical notifications must be separately bound to the accepted R5
+receipt and exact signed sources. Trading and all readiness flags remain off.

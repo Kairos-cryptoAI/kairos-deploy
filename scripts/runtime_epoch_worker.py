@@ -14,6 +14,7 @@ import importlib
 import json
 import os
 import re
+import signal
 import sys
 import time
 from builtins import ExceptionGroup
@@ -33,6 +34,11 @@ MAX_STATUS_BYTES = 32_768
 FETCH_TIMEOUT_ATTEMPTS = 3
 FETCH_RETRY_SECONDS = (2, 4)
 MAX_UNPUBLISHED_CONFIRMATION_RETRIES = 2  # Three complete rounds including the first.
+RUNTIME_REDIS_BLOCK_MS = 1_000
+RUNTIME_REDIS_COMMAND_SECONDS = 6.0
+RUNTIME_REDIS_RECOVERY_SECONDS = 22.0
+RUNTIME_REDIS_ATTEMPTS = 3
+RUNTIME_REDIS_BACKOFF_SECONDS = (0.25, 0.5)
 ORIGINAL_PREFIX_ROWS = 173_164
 ORIGINAL_PREFIX_LAST_OPEN_MS = 1_789_832_580_000
 ORIGINAL_PREFIX_TABLE_SHA256 = (
@@ -86,6 +92,9 @@ MODES = (
     "incident-state",
     "incident-drain",
     "incident-verify-restore",
+    "r5-state",
+    "r5-verify-restore",
+    "r5-drain",
     "boot-verify-restore",
     "boot-catchup",
     "boot-redis-state",
@@ -165,6 +174,17 @@ def safe_unpublished_confirmation(
 
 
 def validate_config(value: dict, mode: str) -> None:
+    if mode in {"r5-state", "r5-verify-restore", "r5-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_read_recovery_worker import (
+                validate_config as validate_r5,
+            )
+        else:
+            from runtime_epoch_read_recovery_worker import (
+                validate_config as validate_r5,
+            )
+        validate_r5(mode, value)
+        return
     if mode not in MODES or not isinstance(value, dict):
         raise EpochError("EPOCH_MODE_CONFIG_REQUIRED")
     owner = value.get("owner", "")
@@ -267,6 +287,11 @@ def validate_config(value: dict, mode: str) -> None:
                 ),
                 *(
                     {"kairos-epoch-69893dc7b7c6-restore-transport04"}
+                    if owner == "69893dc7b7c647f49967387e7efca9fb"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-69893dc7b7c6-restore-transport05"}
                     if owner == "69893dc7b7c647f49967387e7efca9fb"
                     else set()
                 ),
@@ -1798,15 +1823,221 @@ async def flush(config: dict, pool, redis) -> int:
     return count
 
 
-async def consume(config: dict, stop: asyncio.Event) -> None:
+def redis_transport_failure(error: BaseException) -> bool:
+    """Only connectivity failures are recoverable; auth/protocol errors are not."""
+    from redis.exceptions import AuthenticationError, ConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    return not isinstance(error, AuthenticationError) and isinstance(
+        error, (ConnectionError, RedisTimeoutError, TimeoutError)
+    )
+
+
+async def redis_retry_pause(stop: asyncio.Event, seconds: float) -> None:
+    if stop.is_set():
+        raise asyncio.CancelledError
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except TimeoutError:
+        return
+    raise asyncio.CancelledError
+
+
+async def runtime_redis_call(operation, stop: asyncio.Event, telemetry: dict):
+    """Bounded replay for idempotent operations only (never a new stream read)."""
+    for attempt in range(RUNTIME_REDIS_ATTEMPTS):
+        if stop.is_set():
+            raise asyncio.CancelledError
+        try:
+            async with asyncio.timeout(RUNTIME_REDIS_COMMAND_SECONDS):
+                result = await operation()
+            if attempt:
+                telemetry["recoveries"] += 1
+            return result
+        except Exception as error:
+            if not redis_transport_failure(error):
+                raise
+            telemetry["transport_failures"] += 1
+            if attempt == RUNTIME_REDIS_ATTEMPTS - 1:
+                raise EpochError("REDIS_TRANSPORT_RETRY_EXHAUSTED") from error
+            await redis_retry_pause(stop, RUNTIME_REDIS_BACKOFF_SECONDS[attempt])
+    raise AssertionError("unreachable bounded Redis retry")
+
+
+def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
+    """Epoch-only recovery: keep identity, drain own PEL before another `>`.
+
+    Frozen Core and other runtimes are unchanged. A timed-out XREADGROUP may
+    already have assigned entries to this consumer. Hidden redis-py retries
+    are disabled; replay goes through the durable inbox, not a cursor reset.
+    """
+    from kairos_core.bus.base import BusEnvelope
     from kairos_core.bus.redis_streams import RedisStreamsBus
+    from redis import asyncio as aioredis
+    from redis.asyncio.retry import Retry
+    from redis.backoff import NoBackoff
+
+    for key in ("transport_failures", "recoveries", "pending_replays"):
+        telemetry.setdefault(key, 0)
+
+    class EpochRedisTransport(RedisStreamsBus):
+        def __init__(self):
+            # Do not create the Core default client (with implicit retries).
+            self._redis = aioredis.from_url(
+                url,
+                decode_responses=True,
+                socket_connect_timeout=3.0,
+                socket_timeout=RUNTIME_REDIS_COMMAND_SECONDS,
+                retry=Retry(NoBackoff(), 0),
+                retry_on_error=[],
+            )
+            self._maxlen = 10_000
+            self._groups_ready = set()
+            self._reclaim_cursors = {}
+            import socket
+
+            self._instance_id = f"{socket.gethostname()}-{os.getpid()}"
+
+        async def subscribe(
+            self,
+            topic,
+            *,
+            group=None,
+            consumer=None,
+            block_ms=RUNTIME_REDIS_BLOCK_MS,
+            reclaim_idle_ms=180_000,
+            reclaim_every_s=30.0,
+        ):
+            if (
+                topic != TOPIC
+                or group not in {None, "bars"}
+                or block_ms != RUNTIME_REDIS_BLOCK_MS
+            ):
+                raise EpochError("FIXED_NONTRADING_REDIS_SUBSCRIPTION_REQUIRED")
+            group = group or "bars"
+            consumer = f"{consumer or 'consumer'}-{self._instance_id}"
+            await runtime_redis_call(
+                lambda: self._ensure_group(topic, group), stop, telemetry
+            )
+            last_reclaim = 0.0
+            replay_pending = False
+            failures = 0
+            recovery_deadline = None
+            while not stop.is_set():
+                try:
+                    remaining = RUNTIME_REDIS_COMMAND_SECONDS
+                    if recovery_deadline is not None:
+                        remaining = min(remaining, recovery_deadline - time.monotonic())
+                        if remaining <= 0:
+                            raise EpochError("REDIS_RECOVERY_DEADLINE_EXCEEDED")
+                    async with asyncio.timeout(remaining):
+                        if replay_pending:
+                            response = await self._redis.xreadgroup(
+                                group, consumer, {topic: "0"}, count=16
+                            )
+                            replay_rows = [
+                                row for _stream, rows in response or [] for row in rows
+                            ]
+                        else:
+                            replay_rows = []
+                            now = time.monotonic()
+                            if now - last_reclaim >= reclaim_every_s:
+                                reclaimed = await self._reclaim_stale(
+                                    topic, group, consumer, min_idle_ms=reclaim_idle_ms
+                                )
+                                last_reclaim = now
+                            else:
+                                reclaimed = []
+                            # Preserve stale-owner claim semantics from frozen Core.
+                            response = None
+                    if replay_pending:
+                        if not replay_rows:
+                            replay_pending = False
+                            continue
+                        for message_id, fields in replay_rows:
+                            if not fields or set(fields) != {"data"}:
+                                raise EpochError("RUNTIME_PENDING_PAYLOAD_MISSING")
+                            telemetry["pending_replays"] += 1
+                            yield BusEnvelope(
+                                id=message_id,
+                                topic=topic,
+                                payload=json.loads(fields["data"]),
+                                attempt=2,
+                                meta={"group": group, "reclaimed": True},
+                            )
+                        continue
+                    for message_id, fields, attempt in reclaimed:
+                        if not fields or set(fields) != {"data"}:
+                            raise EpochError("RUNTIME_PENDING_PAYLOAD_MISSING")
+                        yield BusEnvelope(
+                            id=message_id,
+                            topic=topic,
+                            payload=json.loads(fields["data"]),
+                            attempt=attempt,
+                            meta={"group": group, "reclaimed": True},
+                        )
+                    remaining = RUNTIME_REDIS_COMMAND_SECONDS
+                    if recovery_deadline is not None:
+                        remaining = min(remaining, recovery_deadline - time.monotonic())
+                        if remaining <= 0:
+                            raise EpochError("REDIS_RECOVERY_DEADLINE_EXCEEDED")
+                    async with asyncio.timeout(remaining):
+                        response = await self._redis.xreadgroup(
+                            group, consumer, {topic: ">"}, count=16, block=block_ms
+                        )
+                    if failures:
+                        telemetry["recoveries"] += 1
+                    failures, recovery_deadline = 0, None
+                    for _stream, rows in response or []:
+                        for message_id, fields in rows:
+                            if not fields or set(fields) != {"data"}:
+                                raise EpochError("RUNTIME_STREAM_PAYLOAD_MISSING")
+                            yield BusEnvelope(
+                                id=message_id,
+                                topic=topic,
+                                payload=json.loads(fields["data"]),
+                                meta={"group": group},
+                            )
+                except Exception as error:
+                    if not redis_transport_failure(error):
+                        raise
+                    failures += 1
+                    telemetry["transport_failures"] += 1
+                    if failures >= RUNTIME_REDIS_ATTEMPTS:
+                        raise EpochError("REDIS_TRANSPORT_RETRY_EXHAUSTED") from error
+                    if recovery_deadline is None:
+                        recovery_deadline = (
+                            time.monotonic()
+                            + RUNTIME_REDIS_RECOVERY_SECONDS
+                            - RUNTIME_REDIS_COMMAND_SECONDS
+                        )
+                    replay_pending = True
+                    await redis_retry_pause(
+                        stop, RUNTIME_REDIS_BACKOFF_SECONDS[failures - 1]
+                    )
+
+        async def ack(self, topic, envelope, *, group=None):
+            if topic != TOPIC or (group or envelope.meta.get("group")) != "bars":
+                raise EpochError("FIXED_NONTRADING_REDIS_ACK_REQUIRED")
+            await runtime_redis_call(
+                lambda: self._redis.xack(topic, "bars", envelope.id), stop, telemetry
+            )
+
+    return EpochRedisTransport()
+
+
+async def consume(
+    config: dict, stop: asyncio.Event, telemetry: dict | None = None
+) -> None:
     from kairos_core.contracts import ClosedBarEventV1
     from kairos_persistence.config import PersistenceSettings
     from kairos_persistence.database import Database, MigrationProfile
     from kairos_persistence.runtime import DurableMessageBus
 
     url = f"redis://kairos_epoch_consumer:{config['redis_consumer_password']}@{config['redis_host']}:6379/0"
-    transport = RedisStreamsBus(url)
+    transport = create_runtime_transport(
+        url, stop, telemetry if telemetry is not None else {}
+    )
     settings = PersistenceSettings(
         database_url=dsn(config, "kairos_epoch_consumer"),
         pool_min_size=1,
@@ -1976,6 +2207,23 @@ async def close_runtime_resources(
             raise failures[0]
 
 
+def install_runtime_shutdown(loop, requested: asyncio.Event) -> tuple:
+    """SIGTERM requests a fully drained cycle; it does not cancel an inbox commit."""
+    installed = []
+    if os.name != "nt":
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signum, requested.set)
+            installed.append(signum)
+    return tuple(installed)
+
+
+async def runtime_idle(requested: asyncio.Event) -> None:
+    try:
+        await asyncio.wait_for(requested.wait(), timeout=10)
+    except TimeoutError:
+        pass
+
+
 async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
     import asyncpg
     import redis.asyncio as aioredis
@@ -2002,6 +2250,12 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
     task = None
     supervisor = None
     qualification_proofs = {}
+    redis_telemetry = {"transport_failures": 0, "recoveries": 0, "pending_replays": 0}
+    shutdown_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    signals = (
+        install_runtime_shutdown(loop, shutdown_requested) if not qualification else ()
+    )
     try:
         supervisor = await connect(config, "kairos_epoch_producer")
         if not await supervisor.fetchval("SELECT pg_try_advisory_lock(7716101100002)"):
@@ -2027,7 +2281,7 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                 raise EpochError("CONSUMER_OUTBOX_PERMISSION_REJECTED")
         finally:
             await consumer_sql.close()
-        task = asyncio.create_task(consume(config, stop))
+        task = asyncio.create_task(consume(config, stop, redis_telemetry))
         cycles = 0
         while True:
             if task.done():
@@ -2094,13 +2348,22 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
                 "LIVE_READY": False,
                 "STRATEGY_POLICY": "REJECT_ALL",
                 "qualification_proofs": qualification_proofs,
+                "redis_transport": dict(redis_telemetry),
             }
             write_status(output / "status.json", report)
             cycles += 1
             if qualification and completed > 0 and cycles >= 2:
                 return {**report, "state": "NONTRADING_RUNTIME_QUALIFIED"}
-            await asyncio.sleep(10)
+            if shutdown_requested.is_set():
+                return {
+                    **report,
+                    "state": "STOPPED_NONTRADING",
+                    "graceful_shutdown": True,
+                }
+            await runtime_idle(shutdown_requested)
     finally:
+        for signum in signals:
+            loop.remove_signal_handler(signum)
         await close_runtime_resources(
             stop=stop,
             task=task,
@@ -2115,6 +2378,12 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
 
 async def dispatch(mode: str, config: dict, output: Path) -> dict:
     validate_config(config, mode)
+    if mode in {"r5-state", "r5-verify-restore", "r5-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_read_recovery_worker import dispatch_r5
+        else:
+            from runtime_epoch_read_recovery_worker import dispatch_r5
+        return await dispatch_r5(mode, config, output)
     if mode in {"incident-state", "incident-drain", "incident-verify-restore"}:
         if __package__:
             from scripts.runtime_epoch_incident_worker import dispatch_incident
@@ -2169,6 +2438,8 @@ def failure_locations(error: BaseException) -> list[dict]:
                         "__main__",
                         "runtime_epoch_worker",
                         "scripts.runtime_epoch_worker",
+                        "runtime_epoch_read_recovery_worker",
+                        "scripts.runtime_epoch_read_recovery_worker",
                     }
                     or module.startswith(("asyncio.", "asyncpg.", "aiohttp.", "redis."))
                 )
@@ -2204,7 +2475,12 @@ def main(argv=None) -> int:
             "mode": args.mode,
             "new_epoch_database": config["database"],
         }
-        write_status(args.output / (args.mode + ".json"), result, immutable=True)
+        filename = (
+            "serve-stop-" + str(time.time_ns()) + "-" + str(os.getpid()) + ".json"
+            if args.mode == "serve" and result.get("graceful_shutdown") is True
+            else args.mode + ".json"
+        )
+        write_status(args.output / filename, result, immutable=True)
         return 0
     except Exception as exc:  # noqa: BLE001 - fail closed, no driver data disclosure
         reason = (

@@ -253,6 +253,20 @@ def continuation_worker_name(owner: str, attempt: str) -> str:
 
 def validate_worker_config(value: object, *, mode: str) -> dict:
     """Validate narrow, mode-specific worker JSON before private-file creation."""
+    if mode in {"r5-state", "r5-verify-restore", "r5-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_read_recovery_worker import (
+                validate_config as validate_r5,
+            )
+        else:
+            from runtime_epoch_read_recovery_worker import (
+                validate_config as validate_r5,
+            )
+        try:
+            validate_r5(mode, value)
+        except RuntimeError:
+            raise Rejected("EXACT_R5_WORKER_CONFIG_REQUIRED") from None
+        return value
     common = {"owner", "database", "pg_host", "redis_host"}
     fields = {
         "prepare": common
@@ -400,6 +414,11 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
             ),
             *(
                 {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport04"}
+                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                else set()
+            ),
+            *(
+                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport05"}
                 if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
                 else set()
             ),
@@ -594,6 +613,9 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "incident-state",
         "incident-drain",
         "incident-verify-restore",
+        "r5-state",
+        "r5-verify-restore",
+        "r5-drain",
         "boot-redis-state",
         "boot-redis-clone",
         "boot-catchup",
@@ -1670,6 +1692,9 @@ class EpochController:
             "incident-state": "PASS_INCIDENT_STATE",
             "incident-drain": "PASS_EXACT_INCIDENT_DRAIN",
             "incident-verify-restore": "PASS_INCIDENT_ISOLATED_RESTORE",
+            "r5-state": "PASS_R5_STATE",
+            "r5-verify-restore": "PASS_R5_ISOLATED_RESTORE",
+            "r5-drain": "PASS_EXACT_R5_INBOX_RECOVERY",
             "boot-redis-state": "PASS_BOOT_REDIS_STATE",
             "boot-redis-clone": "PASS_BOOT_REDIS_STATE",
             "boot-catchup": "AUDIT_ONLY_CATCHUP_COMPLETE",
@@ -1799,6 +1824,7 @@ class EpochController:
             (
                 "scripts/runtime_epoch_worker.py",
                 "scripts/runtime_epoch_incident_worker.py",
+                "scripts/runtime_epoch_read_recovery_worker.py",
                 "scripts/runtime_epoch_history_seed.py",
                 "scripts/controlled_runtime_worker.py",
             ),
@@ -1808,6 +1834,7 @@ class EpochController:
         required = {
             "runtime_epoch_worker.py",
             "runtime_epoch_incident_worker.py",
+            "runtime_epoch_read_recovery_worker.py",
             "runtime_epoch_history_seed.py",
             "controlled_runtime_worker.py",
         }
@@ -2508,6 +2535,7 @@ class EpochController:
             "verify-restore",
             "boot-verify-restore",
             "incident-verify-restore",
+            "r5-verify-restore",
         }:
             raise Rejected("EXACT_BACKUP_VERIFICATION_MODE_REQUIRED")
         backup = self.work / ("epoch-history-" + tag + ".dump")
