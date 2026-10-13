@@ -455,6 +455,7 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
             ),
             *(
                 {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport07"}
+                | {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport08"}
                 if value["owner"] == CONTINUATION_OWNER
                 and mode == "boot-verify-restore"
                 else set()
@@ -980,6 +981,34 @@ class EpochController:
                 arguments, self.deadline, seconds=seconds, allow_failure=allow_failure
             )[1]
         except Exception as exc:  # noqa: BLE001 - map arbitrary CLI failures to a sanitized code.
+            # Do not persist driver text, command arguments, stdout or secrets.
+            category = str(exc)
+            if category not in {
+                "NATIVE_OPERATION_OR_CLI_CLEANUP_UNKNOWN",
+                "NATIVE_DOCKER_OPERATION_FAILED",
+            }:
+                category = "PRIVATE_CLI_DIAGNOSTIC_WITHHELD"
+            operations = getattr(self.native, "operations", [])
+            last = operations[-1] if operations else {}
+            projection = {
+                key: last.get(key)
+                for key in (
+                    "sequence",
+                    "exit_code",
+                    "timed_out",
+                    "overflow",
+                    "elapsed_seconds",
+                )
+            }
+            projection["cli_tree_proven"] = bool(last.get("cli_tree"))
+            try:
+                diagnostic = self.work / "first-cli-failure.json"
+                if not diagnostic.exists():
+                    fresh.save(
+                        diagnostic, {"category": category, "operation": projection}
+                    )
+            except Exception:  # noqa: BLE001,S110 - diagnostics cannot replace or bypass the original refusal.
+                pass
             raise Rejected(
                 "BOUNDED_DOCKER_OPERATION_FAILED_" + type(exc).__name__.upper()
             ) from None
@@ -1767,6 +1796,8 @@ class EpochController:
                 raise Rejected("QUALIFICATION_IDEMPOTENCY_PROOFS_REQUIRED")
         self.proofs[mode] = receipt
         self.docker(["rm", name])
+        if name in self.created:
+            self.created.remove(name)
         return receipt
 
     def phase(self, mode: str, config: dict, *, suffix: str = "") -> dict:
@@ -1804,6 +1835,8 @@ class EpochController:
         ):
             raise Rejected("OWNED_DISPOSABLE_CLONE_REQUIRED_FOR_CLEANUP")
         self.docker(["rm", "-f", container])
+        while container in self.created:
+            self.created.remove(container)
         volume_view = json.loads(
             self.docker(["volume", "inspect", "--format", "{{json .}}", volume])
         )

@@ -157,7 +157,7 @@ class R7RecoveryTests(unittest.TestCase):
         with mock.patch.object(worker, "validate_boot_seed") as seed:
             worker.validate_config(value, "boot-verify-restore")
             seed.assert_called_once()
-        for bad_host in (value["restore_host"].replace("07", "08"), "foreign-restore"):
+        for bad_host in (value["restore_host"].replace("07", "09"), "foreign-restore"):
             bad = {**value, "restore_host": bad_host}
             with self.assertRaises(recovery.epoch.Rejected):
                 recovery.epoch.validate_worker_config(bad, mode="boot-verify-restore")

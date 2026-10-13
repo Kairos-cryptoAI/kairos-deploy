@@ -330,6 +330,7 @@ def validate_config(value: dict, mode: str) -> None:
                 ),
                 *(
                     {"kairos-epoch-69893dc7b7c6-restore-transport07"}
+                    | {"kairos-epoch-69893dc7b7c6-restore-transport08"}
                     if owner == "69893dc7b7c647f49967387e7efca9fb"
                     else set()
                 ),
