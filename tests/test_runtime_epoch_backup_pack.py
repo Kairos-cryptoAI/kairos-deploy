@@ -236,22 +236,33 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
                 runtime_root=self.tmp_path,
             )
 
-    def test_fake_restic_adapter_claims_once_checks_and_restores_exact_bytes(self) -> None:
+    def test_fake_restic_adapter_claims_once_checks_and_restores_exact_bytes(
+        self,
+    ) -> None:
         work, receipt_sha, payloads = make_accepted_workdir(self.tmp_path)
+        old_attempt = work / "restic-verified-tool"
+        old_attempt.mkdir()
+        old_marker = old_attempt / "failed-tool-evidence.txt"
+        old_marker.write_text("retained prior failure", encoding="utf-8")
         bundle = self.tmp_path / "restic-signed-bundle"
         bundle.mkdir()
         executable = self.tmp_path / "restic-verified.exe"
         executable.write_bytes(b"synthetic fake-restic executable")
         invocations: list[list[str]] = []
 
-        def verify_tool(_bundle: Path, destination: Path, *, ops_root: Path) -> dict[str, Any]:
+        def verify_tool(
+            _bundle: Path, destination: Path, *, ops_root: Path
+        ) -> dict[str, Any]:
             self.assertEqual(_bundle, bundle)
             self.assertEqual(ops_root, self.tmp_path)
+            self.assertEqual(destination, work / pack.VERIFIED_TOOL_DIR_NAME)
             destination.mkdir()
             digest = hashlib.sha256(executable.read_bytes()).hexdigest()
             return {"executable": str(executable), "executable_sha256": digest}
 
-        def fake_restic(command: list[str], *, cwd: Path, data=None, expect_failure=False) -> bytes:
+        def fake_restic(
+            command: list[str], *, cwd: Path, data=None, expect_failure=False
+        ) -> bytes:
             # Hosted Windows runners may expose TEMP through an 8.3 alias.
             # The adapter correctly canonicalizes it before native execution.
             self.assertEqual(cwd.resolve(), work.resolve())
@@ -276,7 +287,12 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
             if subcommand == "backup":
                 self.assertEqual(
                     args[:4],
-                    ["--host", "kairos-r7-accepted-runtime", "--tag", "kairos-r7-accepted-v1"],
+                    [
+                        "--host",
+                        "kairos-r7-accepted-runtime",
+                        "--tag",
+                        "kairos-r7-accepted-v1",
+                    ],
                 )
                 sources = [Path(path) for path in args[4:]]
                 self.assertEqual(
@@ -298,7 +314,9 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
                 target.mkdir()
                 for name, content in payloads.items():
                     (target / name).write_bytes(content)
-                (target / pack.RECEIPT_NAME).write_bytes((work / pack.RECEIPT_NAME).read_bytes())
+                (target / pack.RECEIPT_NAME).write_bytes(
+                    (work / pack.RECEIPT_NAME).read_bytes()
+                )
                 return b"{}"
             self.fail(f"unexpected fake Restic command: {subcommand}")
             return b""
@@ -326,8 +344,23 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
         self.assertEqual(result["network_requests"], 0)
         self.assertTrue((work / pack.CLAIM_NAME).is_file())
         self.assertTrue((work / pack.RESULT_NAME).is_file())
-        self.assertTrue(all("--repo" in command and "--password-file" in command for command in invocations))
-        self.assertTrue(all(not any(value.startswith("https://") for value in command) for command in invocations))
+        self.assertTrue(
+            all(
+                "--repo" in command and "--password-file" in command
+                for command in invocations
+            )
+        )
+        self.assertTrue(
+            all(
+                not any(value.startswith("https://") for value in command)
+                for command in invocations
+            )
+        )
+        self.assertTrue(old_marker.is_file())
+        self.assertEqual(
+            old_marker.read_text(encoding="utf-8"), "retained prior failure"
+        )
+        self.assertTrue((work / pack.VERIFIED_TOOL_DIR_NAME).is_dir())
         self.assert_pack_rejected(
             "R7_RESTIC_CLAIM_ALREADY_EXISTS_NO_RETRY",
             lambda: pack.create_local_pack(
@@ -342,3 +375,53 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
                 runtime_root=self.tmp_path,
             ),
         )
+
+    def test_reused_tool_v2_target_refuses_before_claim_and_preserves_old_attempt(
+        self,
+    ) -> None:
+        work, receipt_sha, _payloads = make_accepted_workdir(self.tmp_path)
+        old_attempt = work / "restic-verified-tool"
+        old_attempt.mkdir()
+        marker = old_attempt / "failure-evidence.txt"
+        marker.write_text("retained prior failure", encoding="utf-8")
+        v2_target = work / pack.VERIFIED_TOOL_DIR_NAME
+        v2_target.mkdir()
+        (v2_target / "preexisting-evidence.txt").write_text(
+            "do not overwrite", encoding="utf-8"
+        )
+        bundle = self.tmp_path / "restic-signed-bundle"
+        bundle.mkdir()
+
+        def create_only_verifier(_bundle: Path, destination: Path, *, ops_root: Path):
+            self.assertEqual(destination, v2_target)
+            return pack.preparation._new_directory(destination, ops_root=ops_root)
+
+        with (
+            patch.object(pack, "_private_acl", lambda _path: None),
+            patch.object(pack.preparation, "_private_acl", lambda _path: None),
+        ):
+            self.assert_pack_rejected(
+                "EXCLUSIVELY_NEW_TARGET_REQUIRED",
+                lambda: pack.create_local_pack(
+                    work,
+                    work / pack.REPOSITORY_NAME,
+                    bundle,
+                    accepted_receipt_sha256=receipt_sha,
+                    source_revision=SOURCE_REVISION,
+                    verify_signature=verifier_for(),
+                    tool_verifier=create_only_verifier,
+                    run_process=lambda *_args, **_kwargs: self.fail(
+                        "native tool must not run"
+                    ),
+                    runtime_root=self.tmp_path,
+                ),
+            )
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "retained prior failure")
+        self.assertEqual(
+            (v2_target / "preexisting-evidence.txt").read_text(encoding="utf-8"),
+            "do not overwrite",
+        )
+        self.assertFalse((work / pack.CLAIM_NAME).exists())
+        self.assertFalse((work / pack.REPOSITORY_NAME).exists())
+        self.assertFalse((work / pack.PASSWORD_NAME).exists())

@@ -50,6 +50,7 @@ WRONG_PASSWORD_NAME = "restic-negative-test-password"
 CLAIM_NAME = "restic-r7-create-only-claim.json"
 RESULT_NAME = "restic-r7-pack-receipt.json"
 RESTORE_NAME = "restic-r7-verified-restore"
+VERIFIED_TOOL_DIR_NAME = "restic-verified-tool-v2"
 MAX_DUMP_BYTES = contract.MAX_DUMP_BYTES
 SHA = contract.SHA
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -317,12 +318,16 @@ def create_local_pack(
     if (work / CLAIM_NAME).exists() or (work / CLAIM_NAME).is_symlink():
         raise contract.PreparationError("R7_RESTIC_CLAIM_ALREADY_EXISTS_NO_RETRY")
     repo = _local_repository(repository, work)
-    tool = tool_verifier(tool_bundle, work / "restic-verified-tool", ops_root=runtime_root)
+    # The first reviewed native attempt may have left a failed, create-only
+    # tool workspace before any repository claim or secret was written. Keep it
+    # immutable and use a distinct fixed v2 path for this follow-up attempt.
+    tool = tool_verifier(
+        tool_bundle, work / VERIFIED_TOOL_DIR_NAME, ops_root=runtime_root
+    )
     executable = Path(str(tool.get("executable", "")))
-    if (
-        not executable.is_absolute()
-        or _safe_file(executable, maximum=32 * 1024 * 1024) != tool.get("executable_sha256")
-    ):
+    if not executable.is_absolute() or _safe_file(
+        executable, maximum=32 * 1024 * 1024
+    ) != tool.get("executable_sha256"):
         raise contract.PreparationError("VERIFIED_RESTIC_EXECUTABLE_REJECTED")
     # The claim is durable and create-only before repository/password writes.
     claim = {
@@ -460,9 +465,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--restic-tool-bundle", type=Path)
         parser.add_argument("--execute-create-only", action="store_true")
         args = parser.parse_args(argv)
-        verifier = lambda path, signature, signer: preparation._signature(
-            path, signature, signer=signer, homedir=args.verification_homedir
-        )
+
+        def verifier(path: Path, signature: Path, signer: str) -> None:
+            preparation._signature(
+                path, signature, signer=signer, homedir=args.verification_homedir
+            )
+
         if not args.execute_create_only:
             result = plan_pack(
                 args.workdir,

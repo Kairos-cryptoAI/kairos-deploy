@@ -162,47 +162,134 @@ class NativeToolContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"):
                     preparation._signature(root / "payload", root / "signature", signer=contract.SIGNER, homedir=home)
                 run.assert_not_called()
-                preparation._signature(root / "payload", root / "signature", signer=contract.SIGNER, homedir=home, verification_root=incident)
+                preparation._signature(
+                    root / "payload",
+                    root / "signature",
+                    signer=contract.SIGNER,
+                    homedir=home,
+                    verification_root=incident,
+                )
                 self.assertEqual(run.call_count, 1)
-                with self.assertRaisesRegex(contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"):
+                with self.assertRaisesRegex(
+                    contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"
+                ):
                     preparation._public_verification_home(previous, ops_root=incident)
                 private = home / "private-keys-v1.d"
                 private.mkdir()
                 (private / "synthetic.key").write_bytes(b"not opened")
-                with patch.object(Path, "read_bytes", side_effect=AssertionError("private value must not be opened")), self.assertRaisesRegex(contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"):
+                with (
+                    patch.object(
+                        Path,
+                        "read_bytes",
+                        side_effect=AssertionError("private value must not be opened"),
+                    ),
+                    self.assertRaisesRegex(
+                        contract.PreparationError,
+                        "PRIVATE_MATERIAL_IN_VERIFICATION_HOME",
+                    ),
+                ):
                     preparation._public_verification_home(home, ops_root=incident)
 
     def test_public_gpg_verification_cannot_start_agent_dirmngr_or_retrieve_keys(self):
-        expected = ("--batch", "--no-options", "--no-autostart", "--disable-dirmngr", "--no-auto-key-retrieve", "--no-auto-check-trustdb")
+        expected = (
+            "--batch",
+            "--no-options",
+            "--no-autostart",
+            "--disable-dirmngr",
+            "--no-auto-key-retrieve",
+            "--no-auto-check-trustdb",
+        )
         self.assertEqual(preparation.PUBLIC_GPG_OPTIONS, expected)
-        valid = ("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER).encode()
-        with patch.object(preparation, "_public_verification_home"), patch.object(preparation, "_run", return_value=valid) as run:
-            preparation._signature(Path("payload").resolve(), Path("signature").resolve(), signer=contract.SIGNER, homedir=Path("public-home").resolve())
+        valid = (
+            "[GNUPG:] VALIDSIG "
+            + "A" * 40
+            + " 2026-07-05 1 0 4 0 1 10 00 "
+            + contract.SIGNER
+        ).encode()
+        with (
+            patch.object(preparation, "_public_verification_home"),
+            patch.object(preparation, "_run", return_value=valid) as run,
+        ):
+            preparation._signature(
+                Path("payload").resolve(),
+                Path("signature").resolve(),
+                signer=contract.SIGNER,
+                homedir=Path("public-home").resolve(),
+            )
         self.assertEqual(run.call_args.args[0][1:7], list(expected))
         self.assertIn("--status-fd", run.call_args.args[0])
         self.assertIn("--verify", run.call_args.args[0])
 
     def test_gpg_signature_operands_use_absolute_msys_paths_and_keep_spaces(self):
-        fields = "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER
-        with tempfile.TemporaryDirectory(prefix="kairos gpg ") as temporary, patch.object(preparation, "_private_acl"):
+        fields = (
+            "[GNUPG:] VALIDSIG "
+            + "A" * 40
+            + " 2026-07-05 1 0 4 0 1 10 00 "
+            + contract.SIGNER
+        )
+        with (
+            tempfile.TemporaryDirectory(
+                dir=Path.cwd().anchor if os.name == "nt" else None, prefix="g-"
+            ) as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
             root = Path(temporary).resolve()
             home = root / "public home"
             home.mkdir()
-            (home / "private-keys-v1.d").mkdir()  # empty public-import side effect allowed
-            signature, payload = root / "receipt file.json.asc", root / "receipt file.json"
-            with patch.object(preparation, "OPS_ROOT", root), patch.object(preparation, "_run", return_value=fields.encode()) as run:
-                preparation._signature(payload, signature, signer=contract.SIGNER, homedir=home)
+            (
+                home / "private-keys-v1.d"
+            ).mkdir()  # empty public-import side effect allowed
+            signature, payload = (
+                root / "receipt file.json.asc",
+                root / "receipt file.json",
+            )
+            with (
+                patch.object(preparation, "OPS_ROOT", root),
+                patch.object(preparation, "_run", return_value=fields.encode()) as run,
+            ):
+                preparation._signature(
+                    payload, signature, signer=contract.SIGNER, homedir=home
+                )
             arguments = run.call_args.args[0]
-            self.assertEqual(arguments[arguments.index("--homedir") + 1], preparation._gpg_path(home))
-            self.assertEqual(arguments[-2:], [preparation._gpg_path(signature), preparation._gpg_path(payload)])
-            self.assertTrue(all("\\" not in argument for argument in arguments[arguments.index("--homedir") + 1:]))
+            self.assertEqual(
+                arguments[arguments.index("--homedir") + 1], preparation._gpg_path(home)
+            )
+            self.assertEqual(
+                arguments[-2:],
+                [preparation._gpg_path(signature), preparation._gpg_path(payload)],
+            )
+            self.assertTrue(
+                all(
+                    "\\" not in argument
+                    for argument in arguments[arguments.index("--homedir") + 1 :]
+                )
+            )
 
     @unittest.skipUnless(os.name == "nt", "fixed Git/MSYS path mapping is Windows-only")
     def test_gpg_drive_paths_are_msys_absolute_before_native_execution(self):
-        self.assertEqual(preparation._gpg_path(Path("D:/Kairos/public home/file.asc")), "/d/Kairos/public home/file.asc")
-        self.assertEqual(preparation._gpg_path(Path("C:/Kairos/public home/file.asc")), "/c/Kairos/public home/file.asc")
-        for operand in ("\\\\server\\share\\file.asc", "//server/share/file.asc", "\\\\?\\D:\\Kairos\\file.asc", "D:relative.asc", "relative.asc", "\\rooted.asc"):
-            with self.subTest(operand=operand), patch.object(preparation, "_run") as run, self.assertRaisesRegex(contract.PreparationError, "MSYS_LOCAL_DRIVE_PATH_REQUIRED"):
+        self.assertEqual(
+            preparation._gpg_path(Path("D:/Kairos/public home/file.asc")),
+            "/d/Kairos/public home/file.asc",
+        )
+        self.assertEqual(
+            preparation._gpg_path(Path("C:/Kairos/public home/file.asc")),
+            "/c/Kairos/public home/file.asc",
+        )
+        for operand in (
+            "\\\\server\\share\\file.asc",
+            "//server/share/file.asc",
+            "\\\\?\\D:\\Kairos\\file.asc",
+            "D:relative.asc",
+            "relative.asc",
+            "\\rooted.asc",
+        ):
+            with (
+                self.subTest(operand=operand),
+                patch.object(preparation, "_run") as run,
+                self.assertRaisesRegex(
+                    contract.PreparationError, "MSYS_LOCAL_DRIVE_PATH_REQUIRED"
+                ),
+            ):
                 preparation._gpg_path(Path(operand))
             run.assert_not_called()
 
@@ -213,63 +300,252 @@ class NativeToolContractTests(unittest.TestCase):
             self.assertEqual(preparation._gpg_path(operand), expected)
 
     def test_existing_private_material_is_rejected_by_metadata_without_opening_it(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(preparation, "_private_acl"):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
             root = Path(temporary).resolve()
             home = root / "home"
             private = home / "private-keys-v1.d"
             private.mkdir(parents=True)
-            (private / "synthetic.key").write_bytes(b"synthetic test material, never opened")
-            with patch.object(preparation, "OPS_ROOT", root), patch.object(preparation, "_run") as run, patch.object(Path, "read_bytes", side_effect=AssertionError("private value must not be opened")), self.assertRaisesRegex(contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"):
-                preparation._signature(Path("fixture"), Path("signature"), signer=contract.SIGNER, homedir=home)
+            (private / "synthetic.key").write_bytes(
+                b"synthetic test material, never opened"
+            )
+            with (
+                patch.object(preparation, "OPS_ROOT", root),
+                patch.object(preparation, "_run") as run,
+                patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("private value must not be opened"),
+                ),
+                self.assertRaisesRegex(
+                    contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"
+                ),
+            ):
+                preparation._signature(
+                    Path("fixture"),
+                    Path("signature"),
+                    signer=contract.SIGNER,
+                    homedir=home,
+                )
             run.assert_not_called()
-            with patch.object(preparation, "OPS_ROOT", root), self.assertRaisesRegex(contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"):
+            with (
+                patch.object(preparation, "OPS_ROOT", root),
+                self.assertRaisesRegex(
+                    contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"
+                ),
+            ):
                 preparation._public_verification_home(root.parent)
 
     def test_legacy_private_keyring_is_rejected_without_opening_values(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(preparation, "_private_acl"):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
             root = Path(temporary).resolve()
             home = root / "home"
             home.mkdir()
-            (home / "secring.gpg").write_bytes(b"synthetic legacy private material, never opened")
-            with patch.object(preparation, "OPS_ROOT", root), patch.object(Path, "read_bytes", side_effect=AssertionError("private value must not be opened")), self.assertRaisesRegex(contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"):
+            (home / "secring.gpg").write_bytes(
+                b"synthetic legacy private material, never opened"
+            )
+            with (
+                patch.object(preparation, "OPS_ROOT", root),
+                patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("private value must not be opened"),
+                ),
+                self.assertRaisesRegex(
+                    contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"
+                ),
+            ):
                 preparation._public_verification_home(home)
 
     def test_gpg_bundle_import_is_isolated_msys_absolute_and_hash_bound(self):
-        with tempfile.TemporaryDirectory(prefix="kairos gpg ") as temporary, patch.object(preparation, "_private_acl"):
+        with (
+            tempfile.TemporaryDirectory(
+                dir=Path.cwd().anchor if os.name == "nt" else None, prefix="g-"
+            ) as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
             root = Path(temporary).resolve()
             bundle = root / "public bundle"
             bundle.mkdir()
             tool = contract.lock()
             archive = bundle / tool["archive_name"]
             with zipfile.ZipFile(archive, "w") as fixture:
-                fixture.writestr(tool["executable_name"], b"synthetic binary; native execution mocked")
-            tool = {**tool, "archive_bytes": archive.stat().st_size, "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest()}
+                fixture.writestr(
+                    tool["executable_name"],
+                    b"synthetic binary; native execution mocked",
+                )
+            tool = {
+                **tool,
+                "archive_bytes": archive.stat().st_size,
+                "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            }
             checksums = bundle / "SHA256SUMS"
-            checksums.write_text(tool["archive_sha256"] + "  " + tool["archive_name"] + "\n", encoding="ascii")
+            checksums.write_text(
+                tool["archive_sha256"] + "  " + tool["archive_name"] + "\n",
+                encoding="ascii",
+            )
             (bundle / "SHA256SUMS.asc").write_bytes(b"synthetic signature")
             (bundle / "maintainer.asc").write_bytes(b"synthetic public key")
-            tool.update(checksums_sha256=hashlib.sha256(checksums.read_bytes()).hexdigest(), signature_sha256=hashlib.sha256((bundle / "SHA256SUMS.asc").read_bytes()).hexdigest())
-            valid = ("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + tool["maintainer_fingerprint"]).encode()
+            tool.update(
+                checksums_sha256=hashlib.sha256(checksums.read_bytes()).hexdigest(),
+                signature_sha256=hashlib.sha256(
+                    (bundle / "SHA256SUMS.asc").read_bytes()
+                ).hexdigest(),
+            )
+            valid = (
+                "[GNUPG:] VALIDSIG "
+                + "A" * 40
+                + " 2026-07-05 1 0 4 0 1 10 00 "
+                + tool["maintainer_fingerprint"]
+            ).encode()
+
             def run(arguments, **kwargs):
                 if "version" in arguments:
                     return b"restic 0.19.1 compiled with go1.25.0 on windows/amd64\n"
                 return valid if "--verify" in arguments else b""
+
             work = root / "new verification"
-            with patch.object(contract, "lock", return_value=tool), patch.object(preparation, "OPS_ROOT", root), patch.object(preparation, "_run", side_effect=run) as commands:
+            with (
+                patch.object(contract, "lock", return_value=tool),
+                patch.object(preparation, "OPS_ROOT", root),
+                patch.object(preparation, "_run", side_effect=run) as commands,
+            ):
                 receipt = preparation.verify_tool_bundle(bundle, work, ops_root=root)
             imported = commands.call_args_list[0].args[0]
             self.assertEqual(imported[1:7], list(preparation.PUBLIC_GPG_OPTIONS))
-            self.assertEqual(imported[imported.index("--homedir") + 1], preparation._gpg_path(work / "verification-keyring"))
-            self.assertEqual(imported[-1], preparation._gpg_path(work / "signed-inputs/maintainer.asc"))
+            home_argument = imported[imported.index("--homedir") + 1]
+            self.assertRegex(Path(home_argument).name, r"gpg-[0-9a-f]{32}")
+            home = root / Path(home_argument).name
+            self.assertEqual(home.parent, root)
+            self.assertNotEqual(home.parent, work)
+            self.assertLessEqual(
+                len((preparation._gpg_path(home) + "/S.gpg-agent").encode("ascii")),
+                preparation.MAX_GPG_SOCKET_PATH_BYTES,
+            )
+            self.assertEqual(
+                imported[-1],
+                preparation._gpg_path(work / "signed-inputs/maintainer.asc"),
+            )
             self.assertTrue(receipt["maintainer_signature_verified"])
 
+    def test_gpg_home_is_short_create_only_and_inside_admitted_root(self):
+        with (
+            tempfile.TemporaryDirectory(
+                dir=Path.cwd().anchor if os.name == "nt" else None, prefix="k-"
+            ) as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
+            root = Path(temporary).resolve()
+            home = preparation._create_public_verification_home(root)
+            self.assertEqual(home.parent, root)
+            self.assertRegex(home.name, r"gpg-[0-9a-f]{32}")
+            self.assertLessEqual(
+                len((preparation._gpg_path(home) + "/S.gpg-agent").encode("ascii")),
+                preparation.MAX_GPG_SOCKET_PATH_BYTES,
+            )
+            self.assertTrue(home.is_dir())
+            with self.assertRaisesRegex(
+                contract.PreparationError, "EXCLUSIVELY_NEW_TARGET_REQUIRED"
+            ):
+                preparation._new_directory(home, ops_root=root)
+
+    def test_too_long_new_import_home_is_rejected_before_creation(self):
+        with (
+            tempfile.TemporaryDirectory(
+                dir=Path.cwd().anchor if os.name == "nt" else None, prefix="k-"
+            ) as temporary,
+            patch.object(preparation.secrets, "token_hex", return_value="a" * 32),
+        ):
+            root = Path(temporary).resolve()
+            ops_root = root / ("o" * 80)
+            ops_root.mkdir()
+            expected_home = ops_root / ("gpg-" + "a" * 32)
+            with (
+                patch.object(preparation, "_new_directory") as create,
+                self.assertRaisesRegex(
+                    contract.PreparationError, "PUBLIC_VERIFICATION_HOME_PATH_TOO_LONG"
+                ),
+            ):
+                preparation._create_public_verification_home(ops_root)
+            create.assert_not_called()
+            self.assertFalse(expected_home.exists())
+
+    def test_existing_long_public_home_remains_valid_for_read_only_signature_check(
+        self,
+    ):
+        with (
+            tempfile.TemporaryDirectory(
+                dir=Path.cwd().anchor if os.name == "nt" else None, prefix="k-"
+            ) as temporary,
+            patch.object(preparation, "_private_acl"),
+        ):
+            root = Path(temporary).resolve()
+            home = root / ("public-only-" + "x" * 80)
+            home.mkdir()
+            valid = (
+                "[GNUPG:] VALIDSIG "
+                + "A" * 40
+                + " 2026-07-05 1 0 4 0 1 10 00 "
+                + contract.SIGNER
+            ).encode()
+            self.assertGreater(
+                len((preparation._gpg_path(home) + "/S.gpg-agent").encode("ascii")),
+                preparation.MAX_GPG_SOCKET_PATH_BYTES,
+            )
+            with patch.object(preparation, "_run", return_value=valid) as run:
+                preparation._signature(
+                    root / "receipt.json",
+                    root / "receipt.json.asc",
+                    signer=contract.SIGNER,
+                    homedir=home,
+                    verification_root=root,
+                )
+            run.assert_called_once()
+
+    def test_gpg_subprocess_does_not_inherit_ambient_home_or_agent_settings(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=b"ok", stderr=b"")
+        blocked = {"GNUPGHOME", "GPG_AGENT_INFO", "SSH_AUTH_SOCK", "RESTIC_REPOSITORY"}
+        with (
+            patch.dict(os.environ, {key: "ambient-value" for key in blocked}),
+            patch.object(preparation.subprocess, "run", return_value=completed) as run,
+        ):
+            preparation._run(
+                [str(preparation.GPG), *preparation.PUBLIC_GPG_OPTIONS, "--import"],
+                cwd=Path.cwd(),
+            )
+        self.assertFalse(blocked & run.call_args.kwargs["env"].keys())
+        self.assertIn("--no-autostart", run.call_args.args[0])
+
     def test_tool_error_is_sanitized_bounded_no_proxy_or_ambient_provider_env(self):
-        failure = subprocess.CompletedProcess([], 1, stdout=b"PRIVATE_DATA", stderr=b"SECRET_URL")
-        with patch.dict(os.environ, {"RESTIC_REPOSITORY": "s3:secret", "HTTPS_PROXY": "https://secret", "AWS_SECRET_ACCESS_KEY": "secret"}), patch.object(preparation.subprocess, "run", return_value=failure) as run, self.assertRaisesRegex(contract.PreparationError, "BOUNDED_TOOL_OPERATION_FAILED") as raised:
+        failure = subprocess.CompletedProcess(
+            [], 1, stdout=b"PRIVATE_DATA", stderr=b"SECRET_URL"
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RESTIC_REPOSITORY": "s3:secret",
+                    "HTTPS_PROXY": "https://secret",
+                    "AWS_SECRET_ACCESS_KEY": "secret",
+                },
+            ),
+            patch.object(preparation.subprocess, "run", return_value=failure) as run,
+            self.assertRaisesRegex(
+                contract.PreparationError, "BOUNDED_TOOL_OPERATION_FAILED"
+            ) as raised,
+        ):
             preparation._run(["verified-fixture", "check"], cwd=Path.cwd())
         self.assertNotIn("PRIVATE", str(raised.exception))
         self.assertNotIn("SECRET", str(raised.exception))
-        self.assertFalse({"RESTIC_REPOSITORY", "HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY"} & run.call_args.kwargs["env"].keys())
+        self.assertFalse(
+            {"RESTIC_REPOSITORY", "HTTPS_PROXY", "AWS_SECRET_ACCESS_KEY"}
+            & run.call_args.kwargs["env"].keys()
+        )
         self.assertEqual(run.call_args.kwargs["timeout"], 120)
         self.assertFalse(run.call_args.kwargs["shell"])
 

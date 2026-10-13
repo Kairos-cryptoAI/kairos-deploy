@@ -36,6 +36,7 @@ PUBLIC_GPG_OPTIONS = (
     "--batch", "--no-options", "--no-autostart", "--disable-dirmngr",
     "--no-auto-key-retrieve", "--no-auto-check-trustdb",
 )
+MAX_GPG_SOCKET_PATH_BYTES = 100
 
 
 def _run(command: list[str], *, cwd: Path, data: bytes | None = None, expect_failure: bool = False) -> bytes:
@@ -86,18 +87,45 @@ def _public_verification_home(path: Path, *, ops_root: Path | None = None) -> No
     root = OPS_ROOT if ops_root is None else ops_root
     _no_reparse(path)
     _no_reparse(root)
-    if not root.is_absolute() or not path.is_absolute() or not path.is_dir() or path.resolve() == root.resolve() or not path.resolve().is_relative_to(root.resolve(strict=True)):
+    if (
+        not root.is_absolute()
+        or not path.is_absolute()
+        or not path.is_dir()
+        or path.resolve() == root.resolve()
+        or not path.resolve().is_relative_to(root.resolve(strict=True))
+    ):
         raise contract.PreparationError("OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED")
     _private_acl(path)
     private = path / "private-keys-v1.d"
     _no_reparse(private)
     # Metadata only: never open private material. GPG may create an empty dir.
-    if private.exists() and (not private.is_dir() or next(private.iterdir(), None) is not None):
+    if private.exists() and (
+        not private.is_dir() or next(private.iterdir(), None) is not None
+    ):
         raise contract.PreparationError("PRIVATE_MATERIAL_IN_VERIFICATION_HOME")
     legacy_private = path / "secring.gpg"
     _no_reparse(legacy_private)
     if legacy_private.exists():
         raise contract.PreparationError("PRIVATE_MATERIAL_IN_VERIFICATION_HOME")
+
+
+def _create_public_verification_home(ops_root: Path) -> Path:
+    """Create one short, direct-child, public-only GPG home; retain it on failure."""
+    if not ops_root.is_absolute():
+        raise contract.PreparationError("OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED")
+    path = ops_root / f"gpg-{secrets.token_hex(16)}"
+    if re.fullmatch(r"gpg-[0-9a-f]{32}", path.name) is None:
+        raise contract.PreparationError("OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED")
+    # Bound only newly-created import homes. Existing public-only homes remain
+    # valid for read-only signature checks, which do not start an agent.
+    if (
+        len((_gpg_path(path) + "/S.gpg-agent").encode("ascii"))
+        > MAX_GPG_SOCKET_PATH_BYTES
+    ):
+        raise contract.PreparationError("PUBLIC_VERIFICATION_HOME_PATH_TOO_LONG")
+    _new_directory(path, ops_root=ops_root)
+    _public_verification_home(path, ops_root=ops_root)
+    return path
 
 
 def prepare_inventory(manifest_path: Path, receipt_path: Path, signature_path: Path, policy: dict[str, Any], *, backups: Path = contract.BACKUPS, verification_homedir: Path | None = None) -> dict[str, Any]:
@@ -189,8 +217,7 @@ def verify_tool_bundle(bundle: Path, new_directory: Path, *, ops_root: Path = OP
         snapshot = verified_inputs / path.name
         _exclusive(snapshot, content)
         paths[key] = snapshot
-    keyring = new_directory / "verification-keyring"
-    keyring.mkdir(mode=0o777 if os.name == "nt" else 0o700)
+    keyring = _create_public_verification_home(ops_root)
     _run([str(GPG), *PUBLIC_GPG_OPTIONS, "--homedir", _gpg_path(keyring), "--import", _gpg_path(paths["key"])], cwd=new_directory)
     _signature(paths["checksums"], paths["signature"], signer=tool["maintainer_fingerprint"], homedir=keyring, verification_root=ops_root)
     lines = paths["checksums"].read_text(encoding="ascii").splitlines()
