@@ -211,6 +211,50 @@ def configure_generation_r6() -> None:
     LEASE = ROOT / "boot.active"
 
 
+def configure_generation_r7() -> None:
+    """Bind only the accepted R7 non-trading generation; R6 stays retained."""
+    global \
+        ROOT, \
+        SERVE_WORK, \
+        SCOPE, \
+        GENERATION, \
+        RECEIPT_NAME, \
+        PARENT_RECEIPT_SHA256, \
+        CONTAINERS, \
+        LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r7-20261013")
+    SERVE_WORK = Path(
+        "D:/Kairos/runtime/runtime-incident-20261013/read-recovery-r7-cb1bc3984d8440aa965af5b928d2b4fa"
+    )
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r7-v1"
+    GENERATION = "r7"
+    RECEIPT_NAME = "receipt.json"
+    PARENT_RECEIPT_SHA256 = (
+        "03b10208edd5d5d7957ceaf2d38a6d73b7acbef03bfd4f2a87e1fa8ef88cacb0"
+    )
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": "c08f5b667a84febb2dc1639857b44a52208ea29f9836e14c11685d89ccd55ae0",
+    }
+    LEASE = ROOT / "boot.active"
+
+
+def validate_r7_lifecycle_status(value: object, *, now_ms: int | None = None) -> dict:
+    """Validate R7 status, including only the bounded shared source-pause states."""
+    if not isinstance(value, dict) or value.get("trading_started") is not False:
+        raise epoch.Rejected("R7_ACCEPTED_NONTRADING_LIFECYCLE_REQUIRED")
+    if value.get("state") in {
+        "WAITING_SOURCE_NONTRADING",
+        "CATCHING_UP_NONTRADING",
+    }:
+        validate_r6_lifecycle_status(value, now_ms=now_ms)
+        return value
+    if value.get("source_fresh") is not True:
+        raise epoch.Rejected("R7_ACCEPTED_NONTRADING_LIFECYCLE_REQUIRED")
+    return epoch.validate_running_status(value, OWNER, now_ms=now_ms)
+
+
 def validate_r6_lifecycle_status(value: dict, *, now_ms: int | None = None) -> None:
     """Recognize a known source pause without calling it fresh or restarting it."""
     known = {
@@ -420,7 +464,7 @@ def validate_preserved_state(before: dict, after: dict) -> None:
 class BootController(epoch.EpochController):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if GENERATION in {"r2", "r4", "r5", "r6"}:
+        if GENERATION in {"r2", "r4", "r5", "r6", "r7"}:
             self.names["serve"] += "-" + GENERATION
         if GENERATION == "r2":
             # Original unverified restore resources remain retained and stopped.
@@ -436,6 +480,10 @@ class BootController(epoch.EpochController):
         elif GENERATION == "r6":
             self.names["restore_pg"] += "-transport06"
             self.names["restore_volume"] += "-transport06"
+        elif GENERATION == "r7":
+            # R7's accepted verification used transport08; transport07 remains retained.
+            self.names["restore_pg"] += "-transport08"
+            self.names["restore_volume"] += "-transport08"
 
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
@@ -630,6 +678,8 @@ class BootController(epoch.EpochController):
         if state == "running":
             if GENERATION == "r6":
                 validate_r6_lifecycle_status(previous)
+            elif GENERATION == "r7":
+                validate_r7_lifecycle_status(previous)
             else:
                 epoch.validate_running_status(previous, OWNER)
             if any(
@@ -650,7 +700,7 @@ class BootController(epoch.EpochController):
         if (
             previous.get("state") != "RUNNING_NONTRADING"
             and not (
-                GENERATION == "r6"
+                GENERATION in {"r6", "r7"}
                 and previous.get("state")
                 in {"WAITING_SOURCE_NONTRADING", "CATCHING_UP_NONTRADING"}
             )
@@ -662,6 +712,10 @@ class BootController(epoch.EpochController):
         )
         if GENERATION == "r6":
             validate_r6_lifecycle_status(
+                previous, now_ms=int(observed.timestamp() * 1000)
+            )
+        elif GENERATION == "r7":
+            validate_r7_lifecycle_status(
                 previous, now_ms=int(observed.timestamp() * 1000)
             )
         else:
@@ -803,7 +857,9 @@ def main(argv=None) -> int:
     parser.add_argument("--expected-revision")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
-        "--generation", choices=("original", "r2", "r4", "r5", "r6"), default="original"
+        "--generation",
+        choices=("original", "r2", "r4", "r5", "r6", "r7"),
+        default="original",
     )
     parser.add_argument("--binding", type=Path)
     parser.add_argument("--binding-sha256")
@@ -817,6 +873,8 @@ def main(argv=None) -> int:
         configure_generation_r5()
     elif args.generation == "r6":
         configure_generation_r6()
+    elif args.generation == "r7":
+        configure_generation_r7()
     args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None
