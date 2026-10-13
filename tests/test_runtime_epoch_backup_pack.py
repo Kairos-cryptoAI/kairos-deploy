@@ -252,7 +252,9 @@ class RuntimeEpochBackupPackTests(unittest.TestCase):
             return {"executable": str(executable), "executable_sha256": digest}
 
         def fake_restic(command: list[str], *, cwd: Path, data=None, expect_failure=False) -> bytes:
-            self.assertEqual(cwd, work)
+            # Hosted Windows runners may expose TEMP through an 8.3 alias.
+            # The adapter correctly canonicalizes it before native execution.
+            self.assertEqual(cwd.resolve(), work.resolve())
             self.assertIsNone(data)
             invocations.append(command)
             repo = Path(command[2])
