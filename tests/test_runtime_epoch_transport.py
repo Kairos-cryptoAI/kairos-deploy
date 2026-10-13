@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import ssl
 import sys
 import types
 import unittest
@@ -92,6 +93,7 @@ class FakeRedis:
         self.pending = {}
         self.failures = []
         self.lost_reply = False
+        self.lost_reply_after_replay = False
         self.ack_lost = False
         self.acks = []
         self.closed = False
@@ -106,6 +108,9 @@ class FakeRedis:
             raise self.failures.pop(0)
         if cursor == "0":
             return [(worker.TOPIC, list(self.pending.items()))]
+        if self.lost_reply_after_replay and not self.lost_reply:
+            self.lost_reply_after_replay = False
+            raise RedisTimeoutError("private-driver-data")
         if self.lost_reply:
             self.lost_reply = False
             self.pending["1-0"] = {"data": json.dumps({"message_id": "one"})}
@@ -168,6 +173,81 @@ class EpochTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(fake.pending)
         self.assertEqual(fake.acks, ["1-0"])
 
+    async def test_successful_pending_replay_outlives_original_outage_deadline(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.lost_reply = True
+        transport = self.make_transport(fake, stop, telemetry)
+        stream = transport.subscribe(worker.TOPIC, group="bars")
+        monotonic = {"now": 0.0}
+        with (
+            mock.patch.object(
+                worker,
+                "time",
+                types.SimpleNamespace(monotonic=lambda: monotonic["now"]),
+            ),
+            mock.patch.object(worker, "RUNTIME_REDIS_BACKOFF_SECONDS", (0, 0)),
+        ):
+            envelope = await anext(stream)
+            self.assertEqual(envelope.id, "1-0")
+            # The handler can take longer than the Redis outage window after
+            # Redis has already answered the same-consumer PEL read.
+            monotonic["now"] = worker.RUNTIME_REDIS_RECOVERY_SECONDS
+            await transport.ack(worker.TOPIC, envelope, group="bars")
+            next_read = asyncio.create_task(anext(stream))
+            try:
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                    if next_read.done() or telemetry.get("recoveries"):
+                        break
+                self.assertFalse(next_read.done())
+                self.assertEqual(
+                    [row[2] for row in fake.reads[:4]], [">", "0", "0", ">"]
+                )
+                self.assertEqual(len({row[:2] for row in fake.reads}), 1)
+                self.assertEqual(telemetry["transport_failures"], 1)
+                self.assertEqual(telemetry["pending_replays"], 1)
+                self.assertEqual(telemetry["recoveries"], 1)
+            finally:
+                stop.set()
+                with self.assertRaises(StopAsyncIteration):
+                    await next_read
+        await stream.aclose()
+        await transport.close()
+        self.assertFalse(fake.pending)
+        self.assertEqual(fake.acks, ["1-0"])
+
+    async def test_repeated_outage_during_pending_drain_gets_fresh_bounded_retry(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.lost_reply = True
+        fake.lost_reply_after_replay = True
+        transport = self.make_transport(fake, stop, telemetry)
+        stream = transport.subscribe(worker.TOPIC, group="bars")
+        with mock.patch.object(worker, "RUNTIME_REDIS_BACKOFF_SECONDS", (0, 0)):
+            envelope = await anext(stream)
+            await transport.ack(worker.TOPIC, envelope, group="bars")
+            next_read = asyncio.create_task(anext(stream))
+            try:
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                    if next_read.done() or telemetry.get("recoveries"):
+                        break
+                self.assertFalse(next_read.done())
+                self.assertEqual(
+                    [row[2] for row in fake.reads[:6]],
+                    [">", "0", "0", ">", "0", ">"],
+                )
+                self.assertEqual(telemetry["transport_failures"], 2)
+                self.assertEqual(telemetry["pending_replays"], 1)
+                self.assertEqual(telemetry["recoveries"], 1)
+            finally:
+                stop.set()
+                with self.assertRaises(StopAsyncIteration):
+                    await next_read
+        await stream.aclose()
+        await transport.close()
+        self.assertEqual(fake.acks, ["1-0"])
+        self.assertFalse(fake.pending)
+
     async def test_transport_exhaustion_is_bounded_and_never_acknowledges(self):
         fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
         fake.failures = [ConnectionError("private") for _ in range(3)]
@@ -188,6 +268,7 @@ class EpochTransportTests(unittest.IsolatedAsyncioTestCase):
             AuthenticationError(),
             NoPermissionError(),
             ResponseError("NOGROUP"),
+            ssl.SSLError("private TLS detail"),
         ):
             with self.subTest(kind=type(error).__name__):
                 fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
@@ -197,6 +278,7 @@ class EpochTransportTests(unittest.IsolatedAsyncioTestCase):
                     await anext(transport.subscribe(worker.TOPIC, group="bars"))
                 self.assertEqual(len(fake.reads), 1)
                 self.assertEqual(telemetry["transport_failures"], 0)
+                self.assertEqual(fake.acks, [])
 
     async def test_lost_ack_reply_is_idempotently_retried(self):
         fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
@@ -242,6 +324,17 @@ class EpochTransportTests(unittest.IsolatedAsyncioTestCase):
         ):
             await anext(transport.subscribe(worker.TOPIC, group="bars"))
         self.assertFalse(fake.acks)
+
+    async def test_malformed_pending_json_fails_closed_without_ack(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.failures = [RedisTimeoutError()]
+        fake.pending["1-0"] = {"data": "{"}
+        transport = self.make_transport(fake, stop, telemetry)
+        with mock.patch.object(worker, "RUNTIME_REDIS_BACKOFF_SECONDS", (0, 0)):
+            with self.assertRaises(json.JSONDecodeError):
+                await anext(transport.subscribe(worker.TOPIC, group="bars"))
+        self.assertEqual(telemetry["pending_replays"], 1)
+        self.assertEqual(fake.acks, [])
 
     def test_bounded_attempts_fit_existing_completion_deadline(self):
         self.assertLess(

@@ -2041,6 +2041,7 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
             replay_pending = False
             failures = 0
             recovery_deadline = None
+            recovery_pending = False
             while not stop.is_set():
                 try:
                     remaining = RUNTIME_REDIS_COMMAND_SECONDS
@@ -2053,6 +2054,11 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                             response = await self._redis.xreadgroup(
                                 group, consumer, {topic: "0"}, count=16
                             )
+                            # A successful PEL read ends the Redis-I/O outage,
+                            # but drain completion still waits for an empty PEL
+                            # and a successful new-message read below.
+                            failures, recovery_deadline = 0, None
+                            recovery_pending = True
                             replay_rows = [
                                 row for _stream, rows in response or [] for row in rows
                             ]
@@ -2103,8 +2109,9 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                         response = await self._redis.xreadgroup(
                             group, consumer, {topic: ">"}, count=16, block=block_ms
                         )
-                    if failures:
+                    if recovery_pending:
                         telemetry["recoveries"] += 1
+                    recovery_pending = False
                     failures, recovery_deadline = 0, None
                     for _stream, rows in response or []:
                         for message_id, fields in rows:
