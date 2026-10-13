@@ -149,6 +149,29 @@ class NativeToolContractTests(unittest.TestCase):
             preparation._signature(Path("fixture"), Path("signature"), signer=contract.SIGNER)
         run.assert_not_called()
 
+    def test_epoch_tool_keyring_requires_its_explicit_admitted_root(self):
+        fields = "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-07-05 1 0 4 0 1 10 00 " + contract.SIGNER
+        with tempfile.TemporaryDirectory() as temporary, patch.object(preparation, "_private_acl"):
+            root = Path(temporary).resolve()
+            previous = root / "offhost"
+            previous.mkdir()
+            incident = root / "incident"
+            home = incident / "tool" / "public-only-keyring"
+            home.mkdir(parents=True)
+            with patch.object(preparation, "OPS_ROOT", previous), patch.object(preparation, "_run", return_value=fields.encode()) as run:
+                with self.assertRaisesRegex(contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"):
+                    preparation._signature(root / "payload", root / "signature", signer=contract.SIGNER, homedir=home)
+                run.assert_not_called()
+                preparation._signature(root / "payload", root / "signature", signer=contract.SIGNER, homedir=home, verification_root=incident)
+                self.assertEqual(run.call_count, 1)
+                with self.assertRaisesRegex(contract.PreparationError, "OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED"):
+                    preparation._public_verification_home(previous, ops_root=incident)
+                private = home / "private-keys-v1.d"
+                private.mkdir()
+                (private / "synthetic.key").write_bytes(b"not opened")
+                with patch.object(Path, "read_bytes", side_effect=AssertionError("private value must not be opened")), self.assertRaisesRegex(contract.PreparationError, "PRIVATE_MATERIAL_IN_VERIFICATION_HOME"):
+                    preparation._public_verification_home(home, ops_root=incident)
+
     def test_public_gpg_verification_cannot_start_agent_dirmngr_or_retrieve_keys(self):
         expected = ("--batch", "--no-options", "--no-autostart", "--disable-dirmngr", "--no-auto-key-retrieve", "--no-auto-check-trustdb")
         self.assertEqual(preparation.PUBLIC_GPG_OPTIONS, expected)

@@ -57,10 +57,10 @@ def _run(command: list[str], *, cwd: Path, data: bytes | None = None, expect_fai
     return result.stdout
 
 
-def _signature(path: Path, signature: Path, *, signer: str, homedir: Path | None = None) -> None:
+def _signature(path: Path, signature: Path, *, signer: str, homedir: Path | None = None, verification_root: Path | None = None) -> None:
     if homedir is None:
         raise contract.PreparationError("EXPLICIT_PUBLIC_VERIFICATION_HOME_REQUIRED")
-    _public_verification_home(homedir)
+    _public_verification_home(homedir, ops_root=verification_root)
     options = [str(GPG), *PUBLIC_GPG_OPTIONS]
     options += ["--homedir", _gpg_path(homedir)]
     result = _run(options + ["--status-fd", "1", "--verify", _gpg_path(signature), _gpg_path(path)], cwd=signature.parent)
@@ -80,10 +80,13 @@ def _gpg_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
-def _public_verification_home(path: Path) -> None:
+def _public_verification_home(path: Path, *, ops_root: Path | None = None) -> None:
+    # An admitted tool bundle may belong to a separate create-only epoch root.
+    # The default for all existing receipt checks remains the offhost root.
+    root = OPS_ROOT if ops_root is None else ops_root
     _no_reparse(path)
-    _no_reparse(OPS_ROOT)
-    if not path.is_absolute() or not path.is_dir() or path.resolve() == OPS_ROOT.resolve() or not path.resolve().is_relative_to(OPS_ROOT.resolve(strict=True)):
+    _no_reparse(root)
+    if not root.is_absolute() or not path.is_absolute() or not path.is_dir() or path.resolve() == root.resolve() or not path.resolve().is_relative_to(root.resolve(strict=True)):
         raise contract.PreparationError("OWNED_PUBLIC_VERIFICATION_HOME_REQUIRED")
     _private_acl(path)
     private = path / "private-keys-v1.d"
@@ -189,7 +192,7 @@ def verify_tool_bundle(bundle: Path, new_directory: Path, *, ops_root: Path = OP
     keyring = new_directory / "verification-keyring"
     keyring.mkdir(mode=0o777 if os.name == "nt" else 0o700)
     _run([str(GPG), *PUBLIC_GPG_OPTIONS, "--homedir", _gpg_path(keyring), "--import", _gpg_path(paths["key"])], cwd=new_directory)
-    _signature(paths["checksums"], paths["signature"], signer=tool["maintainer_fingerprint"], homedir=keyring)
+    _signature(paths["checksums"], paths["signature"], signer=tool["maintainer_fingerprint"], homedir=keyring, verification_root=ops_root)
     lines = paths["checksums"].read_text(encoding="ascii").splitlines()
     expected_line = tool["archive_sha256"] + "  " + tool["archive_name"]
     if lines.count(expected_line) != 1:
