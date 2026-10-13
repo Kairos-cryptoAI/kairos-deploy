@@ -253,6 +253,18 @@ def continuation_worker_name(owner: str, attempt: str) -> str:
 
 def validate_worker_config(value: object, *, mode: str) -> dict:
     """Validate narrow, mode-specific worker JSON before private-file creation."""
+    if mode in {"r7-state", "r7-verify-restore", "r7-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_r7_read_profile import (
+                validate_config as validate_r7,
+            )
+        else:
+            from runtime_epoch_r7_read_profile import validate_config as validate_r7
+        try:
+            validate_r7(mode, value)
+        except (RuntimeError, ValueError, TypeError):
+            raise Rejected("EXACT_R7_WORKER_CONFIG_REQUIRED") from None
+        return value
     if mode in {"r6-state", "r6-verify-restore", "r6-drain"}:
         if __package__:
             from scripts.runtime_epoch_feed_recovery_worker import (
@@ -644,6 +656,9 @@ def build_worker_argv(mode: str, config_path: str, output_path: str) -> list[str
         "r6-state",
         "r6-verify-restore",
         "r6-drain",
+        "r7-state",
+        "r7-verify-restore",
+        "r7-drain",
         "boot-redis-state",
         "boot-redis-clone",
         "boot-catchup",
@@ -1730,6 +1745,9 @@ class EpochController:
             "r6-state": "PASS_R6_STATE",
             "r6-verify-restore": "PASS_R6_ISOLATED_RESTORE",
             "r6-drain": "PASS_EXACT_R6_PUBLICATION_AND_DRAIN",
+            "r7-state": "PASS_R7_STATE",
+            "r7-verify-restore": "PASS_R7_ISOLATED_RESTORE",
+            "r7-drain": "PASS_EXACT_R7_INBOX_RECOVERY",
         }
         if (
             not isinstance(receipt, dict)
@@ -2570,6 +2588,7 @@ class EpochController:
             "incident-verify-restore",
             "r5-verify-restore",
             "r6-verify-restore",
+            "r7-verify-restore",
         }:
             raise Rejected("EXACT_BACKUP_VERIFICATION_MODE_REQUIRED")
         backup = self.work / ("epoch-history-" + tag + ".dump")

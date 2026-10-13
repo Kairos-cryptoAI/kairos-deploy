@@ -100,6 +100,9 @@ MODES = (
     "r6-state",
     "r6-verify-restore",
     "r6-drain",
+    "r7-state",
+    "r7-verify-restore",
+    "r7-drain",
     "boot-verify-restore",
     "boot-catchup",
     "boot-redis-state",
@@ -179,6 +182,15 @@ def safe_unpublished_confirmation(
 
 
 def validate_config(value: dict, mode: str) -> None:
+    if mode in {"r7-state", "r7-verify-restore", "r7-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_r7_read_profile import (
+                validate_config as validate_r7,
+            )
+        else:
+            from runtime_epoch_r7_read_profile import validate_config as validate_r7
+        validate_r7(mode, value)
+        return
     if mode in {"r6-state", "r6-verify-restore", "r6-drain"}:
         if __package__:
             from scripts.runtime_epoch_feed_recovery_worker import (
@@ -2564,6 +2576,12 @@ async def runtime(config: dict, output: Path, *, qualification: bool) -> dict:
 
 async def dispatch(mode: str, config: dict, output: Path) -> dict:
     validate_config(config, mode)
+    if mode in {"r7-state", "r7-verify-restore", "r7-drain"}:
+        if __package__:
+            from scripts.runtime_epoch_r7_read_profile import dispatch_r7
+        else:
+            from runtime_epoch_r7_read_profile import dispatch_r7
+        return await dispatch_r7(mode, config, output)
     if mode in {"r6-state", "r6-verify-restore", "r6-drain"}:
         if __package__:
             from scripts.runtime_epoch_feed_recovery_worker import dispatch_r6
