@@ -316,6 +316,11 @@ def validate_config(value: dict, mode: str) -> None:
                     if owner == "69893dc7b7c647f49967387e7efca9fb"
                     else set()
                 ),
+                *(
+                    {"kairos-epoch-69893dc7b7c6-restore-transport07"}
+                    if owner == "69893dc7b7c647f49967387e7efca9fb"
+                    else set()
+                ),
             }
             or value.get("restore_database")
             != "kairos_recovery_" + owner[:12] + "_epochrestore"
