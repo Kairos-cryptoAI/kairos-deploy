@@ -170,11 +170,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#4294c97c8800ec1f78ae6e71cf58812f616d9f68
+        service: https://github.com/Kairos-cryptoAI/kairos-text-scouts.git#c3804a9e50f341cf35322fabb6967ccc4d8a95a5
       args:
         PACKAGE_DIR: kairos_text
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-text-scouts
-        SOURCE_REVISION: 4294c97c8800ec1f78ae6e71cf58812f616d9f68
+        SOURCE_REVISION: c3804a9e50f341cf35322fabb6967ccc4d8a95a5
     command: ["kairos-text-scouts"]
     environment:
       <<: *common-environment
@@ -217,11 +217,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#42f785461ffeeee4b9aeda2fa7dc43134e8bf118
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#c45e3104c07503e46b26ea6d0a341d8ba7153a44
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: 42f785461ffeeee4b9aeda2fa7dc43134e8bf118
+        SOURCE_REVISION: c45e3104c07503e46b26ea6d0a341d8ba7153a44
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment

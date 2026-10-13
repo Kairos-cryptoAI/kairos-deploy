@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "4294c97c8800ec1f78ae6e71cf58812f616d9f68",
+      "revision": "c3804a9e50f341cf35322fabb6967ccc4d8a95a5",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
@@ -43,7 +43,7 @@
     },
     "aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "42f785461ffeeee4b9aeda2fa7dc43134e8bf118",
+      "revision": "c45e3104c07503e46b26ea6d0a341d8ba7153a44",
       "package_dir": "kairos_aggregator",
       "command": "kairos-aggregator"
     },
