@@ -25,7 +25,7 @@ REPOSITORY_ID = "e" * 64
 
 
 def make_accepted_workdir(root: Path) -> tuple[Path, str, dict[str, bytes]]:
-    work = root / (pack.WORK_PREFIX + uuid.uuid4().hex)
+    work = root.resolve(strict=True) / (pack.WORK_PREFIX + uuid.uuid4().hex)
     work.mkdir()
     payloads = {
         pack.BEFORE_NAME: b"full epoch history before\n" * 4,
