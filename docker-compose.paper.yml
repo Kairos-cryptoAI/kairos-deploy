@@ -51,7 +51,7 @@ x-paper-python-service: &paper-python-service
 
 services:
   redis:
-    image: redis:8.2.8-alpine3.22@sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103
+    image: redis:8.4.7-alpine3.22@sha256:0514fa59e3d84e2f3be66731c5401fc2a85b8ea71b49c0116c850f6a558076f4
     user: redis:redis
     pull_policy: always
     command:
@@ -88,7 +88,7 @@ services:
     logging: *paper-logging
 
   timescaledb:
-    image: timescale/timescaledb:2.29.1-pg16@sha256:252a443e2936039b83dd8da1373d01e59e932d1054fa6adf1bc061f1d56ae60a
+    image: timescale/timescaledb:2.30.2-pg16@sha256:6f139d56042989bd35f50ba5986e492cd32e35cc6778c50be2659add298dc09f
     user: postgres:postgres
     pull_policy: always
     environment:
@@ -302,7 +302,7 @@ services:
       start_period: 15s
 
   prometheus:
-    image: prom/prometheus:v3.13.2@sha256:508729e0e2d18e11fd742a5a5ca70e557b940a93948c3c95fd0123a6fd538b69
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     pull_policy: always
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -337,7 +337,7 @@ services:
     logging: *paper-logging
 
   grafana:
-    image: grafana/grafana:12.4.8@sha256:7753ad493720e33560077e8bc5e05fbce4ade777f1387b19ab5050b6777111dd
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     pull_policy: always
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-kairos-paper-admin}
