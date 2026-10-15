@@ -1,16 +1,37 @@
 # Full-path simulator gate
 
-`docker-compose.sim-full-path.yml` is a disposable proof of one causal path:
+`docker-compose.sim-full-path.yml` is a disposable existing-component integration gate.
+The active course-correction case verifies this one causal path:
 
 ```text
-sealed closed bars -> strategy -> router -> deterministic local review
-  -> SIM-only risk -> durable simulator controller
+sealed closed bars -> unchanged adaptive observation adapter -> candidate Router
+  -> current NEWS/Macro-bound CandidateReviewService with local response double
+  -> existing hypothetical stop-sizing arithmetic -> SIM-only risk
+  -> durable simulator controller / restart / duplicate replay
 ```
 
 It uses only fixed fixtures, an internal temporary PostgreSQL database, and
 installed immutable source revisions. The review gateway is a zero-cost local
 test double; it does not create a client, reserve a budget, or contact a
 provider.
+
+The adaptive candidate stays research-only: this case does not enroll it in the
+PAPER registry or construct an approved PAPER decision. It checks loss-at-stop
+arithmetic from the existing `PaperRiskPipeline` against a synthetic account,
+including fees, the 0.25% per-trade cap and remaining 1% portfolio capacity after
+reservations. This is test-only sizing, not reconciled production-account risk.
+SIM risk itself only admits/caps the requested quantity. The current-context
+case checks required NEWS/Macro provenance, missing/stale-context refusal,
+explicit VETO, simulated stop execution and independently calculated fees/result.
+The fixture transport persists the published context/review with the existing
+audit repository; its exact context/hash is reloaded after reconnect. A prepared
+stop command is recovered after restart, then duplicate delivery preserves one
+terminal result. This verifies fixture composition, not deployed transport.
+None of this establishes live data, model quality or profitability.
+
+The older legacy and independent-source cases below are retained as regression
+evidence, not additional active research directions. No new strategy family,
+campaign/evaluator, notifier generation or trading policy is introduced here.
 
 The gate also persists one typed LLM proposal into the simulator-only
 append-only proposal ledger, verifies exact replay idempotency, and proves that
@@ -93,7 +114,7 @@ The `20261008-r8` project identity is this current-source snapshot;
 artifacts from earlier `r1`, `r2`, `r4`, `20261006-r5`, `20261006-r6`, and `20261006-r7` identities remain historical evidence
 and are not rewritten.
 
-The ordinary review fixture explicitly calls `review_legacy_engineering`. It
+The older ordinary review fixture explicitly calls `review_legacy_engineering`. It
 still proves the sealed legacy engineering path; it does not substitute an
 absent current decision context, qualify a new strategy, or attest a new
 runtime evaluation receipt. All current readiness flags remain false and the

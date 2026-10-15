@@ -18,7 +18,7 @@
   "services": {
     "quant-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-quant-scouts",
-      "revision": "d53a87a9261335548513ff8763e958bd28704414",
+      "revision": "7db2712dc9995e7adbb0947104572b88f45368a0",
       "package_dir": "kairos_quant",
       "command": "kairos-quant-scouts"
     },
@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "f33d0fde09797d3745bb2bdeada7db8419972ab0",
+      "revision": "cdc6197880b7260f30430b7b30b5be644cf08db4",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },

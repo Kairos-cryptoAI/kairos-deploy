@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -18,28 +19,49 @@ from urllib.parse import urlsplit
 
 import pytest
 from kairos_aggregator.candidate_review import CandidateReviewBrain
+from kairos_aggregator.candidate_service import CandidateReviewService
+from kairos_aggregator.config import AggregatorSettings
 from kairos_core import RESEARCH_ARMS, Topics, canonical_sha256
 from kairos_core.bus.base import BusEnvelope, MessageBus, Publishable
 from kairos_core.contracts import (
     AdaptiveCandidateProtocolV1,
+    DecisionContextV1,
+    DerivativesMetrics,
     EvidenceReferenceV1,
     LLMProposalAdaptiveCandidateArmV1,
     LLMProposalCompletionReceiptV1,
     LLMProposalModelProvenanceV1,
     LLMTradeProposalV1,
+    MarketSnapshot,
+    OrderBookSummary,
     RecordedBookLevelV1,
     RecordedTopNBookFrameV2,
     ResearchDecisionSampleV1,
     ResearchObservationScheduleV1,
     ResearchObservationWindowV1,
+    SentimentSignal,
     SimulationAdmissionV2,
     SimulationAssumptionsV1,
+    SimulationResultV1,
     SimulationSessionV1,
     SimulationStrategyRefV1,
+    StrategicAllocation,
     StrategyOnlyAdaptiveCandidateArmV1,
     StrategyReviewAdaptiveCandidateArmV1,
+    TechnicalIndicators,
+    VenueQualityV1,
 )
-from kairos_core.enums import LLMProposalAction, ReasoningEffort, ReviewDecision, Side
+from kairos_core.contracts.base import datetime_from_unix_ms
+from kairos_core.enums import (
+    EvedexProfile,
+    ImpactDirection,
+    LLMProposalAction,
+    MarketRegime,
+    ReasoningEffort,
+    ReviewDecision,
+    Side,
+    StrategicTrigger,
+)
 from kairos_core.research_pairing import (
     ScheduledResearchSampleV1,
     StrategyEvaluationEvidenceV1,
@@ -58,6 +80,7 @@ from kairos_llm.research import (
 )
 from kairos_llm.schemas import LLMResult, TokenUsage
 from kairos_persistence import (
+    AuditRepository,
     Database,
     MessageIdentityConflict,
     MigrationProfile,
@@ -73,9 +96,14 @@ from kairos_persistence import (
     consume_simulator_proposals,
 )
 from kairos_persistence.database_target import connect_verified_database, require_database_target_url
-from kairos_risk import SimulationRiskPolicy
-from kairos_router.aggregation import TextAggregate
+from kairos_risk import PaperReservations, PaperRiskPipeline, RiskSettings, SimulationRiskPolicy
+from kairos_risk.paper import _AccountMetrics, _AllocationMetrics
+from kairos_router.aggregation import SignalWindow, TextAggregate
 from kairos_router.candidate import CandidateRouterPolicy
+from kairos_strategy.adaptive import DEFAULT_CONFIG as ADAPTIVE_DEFAULT_CONFIG
+from kairos_strategy.adaptive import STRATEGY_ID as ADAPTIVE_STRATEGY_ID
+from kairos_strategy.adaptive import evaluate_adaptive_closed_bars
+from kairos_strategy.adaptive.config import STRATEGY_REVISION as ADAPTIVE_STRATEGY_REVISION
 from kairos_strategy.candles import Candle
 from kairos_strategy.provenance import installed_source_tree_sha256
 from kairos_strategy.registry import get_strategy
@@ -949,6 +977,705 @@ async def _review(intent, decision: ReviewDecision):
     assert review.model_provenance.provider == "simulator-gate-local"
     assert review.model_provenance.cost_usd == 0.0
     return review
+
+
+def _adaptive_range_closed_bars():
+    """Copy one fixed native adaptive range-reclaim fixture; not a parameter grid."""
+
+    geometries = [(100.0, 100.5, 99.5, 100.0) for _ in range(648)]
+    for index in (600, 624):
+        geometries[index] = (100.0, 100.5, 98.0, 100.0)
+    for index in (612, 636):
+        geometries[index] = (100.0, 102.0, 99.5, 100.0)
+    geometries.append((100.0, 100.5, 97.9, 98.4))
+    candles: list[Candle] = []
+    for index, (opened, high, low, closed) in enumerate(geometries):
+        for minute in range(5):
+            left = opened + (closed - opened) * minute / 5
+            right = opened + (closed - opened) * (minute + 1) / 5
+            timestamp = (index * 5 + minute) * 60_000
+            candles.append(
+                Candle(
+                    symbol="BTCUSDT",
+                    timeframe="1m",
+                    open_time_ms=timestamp,
+                    close_time_ms=timestamp + 59_999,
+                    open=left,
+                    high=max(left, right, high if minute == 2 else right),
+                    low=min(left, right, low if minute == 2 else right),
+                    close=right,
+                    volume=1.0,
+                )
+            )
+    assert len(candles) == 3_245
+    assert ADAPTIVE_DEFAULT_CONFIG.history_bars == 3_240
+    return tuple(candle_to_closed_bar(candle) for candle in candles)
+
+
+class _CandidateCaptureBus:
+    def __init__(self, audit: AuditRepository | None = None) -> None:
+        self.audit = audit
+        self.published: list[tuple[str, object]] = []
+
+    async def publish(self, topic: str, message) -> str:
+        if self.audit is not None:
+            payload = message.model_dump(mode="json")
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            async with self.audit.pool.acquire() as connection, connection.transaction():
+                await self.audit.append_payload_strict(
+                    topic,
+                    payload,
+                    canonical,
+                    hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    connection=connection,
+                )
+        self.published.append((topic, message))
+        return message.message_id
+
+    async def close(self) -> None:
+        return None
+
+
+class _ContextFirstReviewGateway(_LocalReviewGateway):
+    def __init__(self, decision: ReviewDecision, bus: _CandidateCaptureBus) -> None:
+        super().__init__(decision)
+        self.bus = bus
+
+    async def complete(self, **kwargs):
+        assert any(topic == Topics.DECISION_CONTEXT for topic, _ in self.bus.published)
+        return await super().complete(**kwargs)
+
+
+async def _adaptive_candidate_review(
+    bars, intent, *, macro_state: str, decision: ReviewDecision, audit: AuditRepository | None = None
+):
+    """Exercise the real receive-time CandidateReviewService with local inputs only."""
+
+    from kairos_core.topics import Topics as CandidateTopics
+
+    routed_at = intent.decision_ts_ms
+    sentiment = SentimentSignal(
+        source="sim-full-path-adaptive:text",
+        message_id=f"adaptive-text-{macro_state}-{decision.value.lower()}",
+        produced_at=datetime_from_unix_ms(routed_at - 1_000),
+        topic=intent.symbol,
+        sentiment=0.0,
+        impact=ImpactDirection.NEUTRAL,
+        confidence=0.9,
+        sources=["synthetic://sim-full-path-adaptive"],
+        summary="Deterministic, neutral local context fixture.",
+    )
+    market = MarketSnapshot(
+        source="sim-full-path-adaptive:market",
+        message_id=f"adaptive-market-{macro_state}-{decision.value.lower()}",
+        produced_at=datetime_from_unix_ms(routed_at - 2_000),
+        symbol=intent.symbol,
+        mid_price=intent.reference_price,
+        volume_usd=1_000_000.0,
+        order_book=OrderBookSummary(
+            best_bid=intent.reference_price - 0.01,
+            best_ask=intent.reference_price + 0.01,
+            spread_bps=0.02 / intent.reference_price * 10_000,
+            imbalance=0.0,
+            depth_usd=100_000.0,
+        ),
+        derivatives=DerivativesMetrics(funding_rate=0.0, open_interest=1_000_000.0),
+        indicators=TechnicalIndicators(rsi_14=50.0, macd=0.0, macd_signal=0.0, macd_hist=0.0, atr_pct=0.01),
+        quant_bias=Side.FLAT,
+    )
+    macro = None
+    if macro_state != "missing":
+        macro_at = routed_at - (27 * 60 * 60 * 1_000 if macro_state == "stale" else 3_000)
+        macro = StrategicAllocation(
+            source="sim-full-path-adaptive:macro",
+            message_id=f"adaptive-macro-{macro_state}-{decision.value.lower()}",
+            produced_at=datetime_from_unix_ms(macro_at),
+            regime=MarketRegime.CHOP,
+            stable_reserve_pct=0.2,
+            strategy_weights={intent.strategy_id: 0.5},
+            max_gross_leverage=2.0,
+            triggered_by=StrategicTrigger.SCHEDULE,
+            rationale="Synthetic allocation context only.",
+        )
+
+    window = SignalWindow()
+    window.add_sentiment(
+        intent.symbol,
+        message_id=sentiment.message_id,
+        produced_at=sentiment.produced_at,
+        sentiment=sentiment.sentiment,
+        impact=sentiment.impact,
+        confidence=sentiment.confidence,
+    )
+    text = window.aggregate(intent.symbol, as_of=datetime_from_unix_ms(routed_at))
+    route = CandidateRouterPolicy(source="sim-full-path-adaptive-router").build(intent, text)
+    capture = _CandidateCaptureBus(audit)
+    gateway = _ContextFirstReviewGateway(decision, capture)
+    settings = AggregatorSettings(
+        _env_file=None,
+        bus_backend="memory",
+        service_name="sim-full-path-adaptive-review",
+        candidate_require_text_context=True,
+        candidate_require_macro_context=True,
+    )
+    # The final closed bar exists at the cutoff, never before it. All fixture
+    # deliveries share that millisecond; route handling happens afterwards.
+    clock_value = routed_at
+
+    def clock_ms() -> int:
+        return clock_value
+
+    service = CandidateReviewService(settings, gateway=gateway, bus=capture, clock_ms=clock_ms)
+    for kind, message, topic in (
+        ("market", market, CandidateTopics.MARKET_SNAPSHOT),
+        ("bars", None, CandidateTopics.CLOSED_BAR),
+        ("text", sentiment, CandidateTopics.SENTIMENT_SIGNAL),
+        ("macro", macro, CandidateTopics.STRATEGIC_ALLOCATION),
+    ):
+        if kind == "bars":
+            for bar in bars[-settings.candidate_context_max_bars :]:
+                await service._handle_closed_bar(
+                    BusEnvelope(
+                        id=f"adaptive-context:{bar.message_id}", topic=topic, payload=bar.to_payload()
+                    )
+                )
+        elif message is not None:
+            handler = {
+                "market": service._handle_market,
+                "text": service._handle_sentiment,
+                "macro": service._handle_macro,
+            }[kind]
+            envelope = BusEnvelope(
+                id=f"adaptive-context:{message.message_id}", topic=topic, payload=message.to_payload()
+            )
+            await handler(envelope)
+
+    # All four evidence streams were received at the immutable route cutoff.
+    clock_value = routed_at + 1
+    envelope = BusEnvelope(
+        id=f"adaptive-route:{route.route_id}",
+        topic=CandidateTopics.STRATEGY_ROUTE,
+        payload=route.to_payload(),
+    )
+    await service._handle_route(envelope)
+    reviews = [message for topic, message in capture.published if topic == CandidateTopics.CANDIDATE_REVIEW]
+    contexts = [message for topic, message in capture.published if topic == CandidateTopics.DECISION_CONTEXT]
+    assert len(reviews) == len(contexts) == 1
+    await service._handle_route(envelope)
+    assert len(gateway.calls) == int(macro_state == "valid")
+    assert (
+        len([message for topic, message in capture.published if topic == CandidateTopics.CANDIDATE_REVIEW])
+        == 1
+    )
+    return reviews[0], contexts[0], gateway, route
+
+
+def _adaptive_hypothetical_quantity(
+    intent,
+    frame,
+    assumptions,
+    *,
+    open_risk_usd: float,
+    reserved_risk_usd: float,
+    available_balance_usd: float = 10_000.0,
+):
+    """Reuse pure PAPER sizing math only; no funding/gap or account qualification."""
+
+    settings = RiskSettings(_env_file=None)
+    pipeline = PaperRiskPipeline(settings)
+    best_bid, best_ask = frame.bids[0].price, frame.asks[0].price
+    mid = (best_bid + best_ask) / 2
+    spread_bps = (best_ask - best_bid) / mid * 10_000
+    observed = frame.persisted_at_ms
+    venue = VenueQualityV1(
+        source="sim-full-path-adaptive:synthetic-venue",
+        profile=EvedexProfile.DEV,
+        symbol=intent.symbol,
+        observed_at_ms=observed,
+        expires_at_ms=observed + 5_000,
+        reference_timestamp_ms=frame.exchange_at_ms,
+        book_timestamp_ms=frame.exchange_at_ms,
+        reference_mid_price=mid,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        venue_mid_price=mid,
+        basis_bps=0.0,
+        spread_bps=spread_bps,
+        assessed_notional_usd=10_000.0,
+        depth_usd=10_000.0,
+        buy_slippage_bps=0.0,
+        sell_slippage_bps=0.0,
+        taker_fee_bps=assumptions.taker_fee_bps,
+        reference_age_ms=observed - frame.exchange_at_ms,
+        book_age_ms=observed - frame.exchange_at_ms,
+        latency_ms=frame.persisted_at_ms - frame.exchange_at_ms,
+        timestamp_skew_ms=0,
+        entry_allowed=True,
+    )
+    account = _AccountMetrics(10_000.0, available_balance_usd, open_risk_usd, 0.0, 0.0)
+    allocation = _AllocationMetrics(intent.strategy_id, 0.2, 0.5, 2.0)
+    reservations = PaperReservations(open_risk_usd=reserved_risk_usd)
+    loss_budget = min(
+        account.equity_usd * settings.paper_per_trade_risk_fraction,
+        max(
+            0.0,
+            account.equity_usd * settings.paper_max_total_open_risk_fraction
+            - account.total_open_risk_usd
+            - reservations.open_risk_usd,
+        ),
+    )
+    remaining_portfolio_budget = max(
+        0.0,
+        account.equity_usd * settings.paper_max_total_open_risk_fraction
+        - account.total_open_risk_usd
+        - reservations.open_risk_usd,
+    )
+    assert loss_budget <= account.equity_usd * settings.paper_per_trade_risk_fraction
+    assert loss_budget <= remaining_portfolio_budget
+    leverage = min(settings.paper_max_leverage, allocation.max_gross_leverage)
+    assert leverage == min(settings.paper_max_leverage, allocation.max_gross_leverage)
+    original_stop = intent.exit_plan.stop_price
+    stop = _tick(
+        intent.exit_plan.stop_price,
+        rounding=ROUND_FLOOR if intent.side is Side.LONG else ROUND_CEILING,
+    )
+    assert intent.exit_plan.stop_price == original_stop
+    assert stop <= original_stop if intent.side is Side.LONG else stop >= original_stop
+    slip = assumptions.adverse_slippage_bps / 10_000
+    sim_cap = (
+        _tick(best_ask * (1 + slip), rounding=ROUND_CEILING)
+        if intent.side is Side.LONG
+        else _tick(best_bid * (1 - slip), rounding=ROUND_FLOOR)
+    )
+    worst_entry = (
+        max(sim_cap, intent.reference_price)
+        if intent.side is Side.LONG
+        else min(sim_cap, intent.reference_price)
+    )
+    raw_quantity = pipeline._size_quantity(
+        intent_side=intent.side,
+        stop_price=stop,
+        worst_entry=worst_entry,
+        venue=venue,
+        loss_budget=loss_budget,
+        leverage=leverage,
+        account=account,
+        allocation=allocation,
+        reservations=reservations,
+    )
+    step = Decimal(str(assumptions.quantity_step))
+    quantity = float((Decimal(str(raw_quantity)) / step).to_integral_value(rounding=ROUND_FLOOR) * step)
+    fees, slippage, worst_loss = pipeline._economics(
+        quantity=quantity,
+        stop_price=stop,
+        worst_entry=worst_entry,
+        intent_side=intent.side,
+        venue=venue,
+    )
+    assert settings.paper_strategy_allowlist == []
+    assert not settings.paper_strategy_allowed(intent.strategy_id, intent.strategy_revision)
+    assert venue.taker_fee_bps == assumptions.taker_fee_bps
+    assert worst_loss <= loss_budget + 1e-9
+    assert quantity * worst_entry <= settings.paper_max_position_notional_usd + 1e-9
+    assert quantity * worst_entry <= venue.assessed_notional_usd
+    assert quantity * worst_entry <= venue.depth_usd
+    assert Decimal(str(quantity)) % step == 0
+    assert slippage == 0.0
+    assert quantity == 0.0 or fees > 0
+    return quantity, loss_budget, worst_entry, stop, venue, worst_loss
+
+
+async def _seed_adaptive_sim_session(repository: SimulationRepository, *, tape_id: str):
+    """Persist one immutable native adaptive candidate and a separate SIM tape."""
+
+    source_set_sha256 = _hash("current-adaptive-range-sim-source-set-v1")
+    bars = _adaptive_range_closed_bars()
+    observed_at_ms = bars[-1].close_time_ms + 1
+    original = evaluate_adaptive_closed_bars(
+        bars,
+        observed_at_ms=observed_at_ms,
+        source_set_sha256=source_set_sha256,
+    )
+    assert original.evaluation.trading_mode.value == "DRY_RUN"
+    assert original.evaluation.registry_status == "research"
+    assert original.intent is not None and original.intent.side is Side.LONG
+    assert original.intent.strategy_id == ADAPTIVE_STRATEGY_ID
+    assert original.intent.strategy_revision == ADAPTIVE_STRATEGY_REVISION
+
+    intent = original.intent
+    exit_bar = _exit_bar(intent, open_time_ms=intent.entry_eligible_ts_ms)
+    for bar in bars:
+        assert await repository.record_closed_bar(tape_id, bar)
+    assert await repository.record_closed_bar(tape_id, exit_bar)
+    for symbol in _SYMBOLS[1:]:
+        assert await repository.record_closed_bar(tape_id, _auxiliary_bar(symbol))
+
+    assumptions = SimulationAssumptionsV1(
+        latency_ms=25,
+        maximum_book_age_ms=5_000,
+        maximum_frame_latency_ms=1_000,
+        depth_participation_fraction=1.0,
+        adverse_slippage_bps=0.0,
+        taker_fee_bps=5.0,
+        price_tick=0.01,
+        quantity_step=0.001,
+    )
+    decision_ms = intent.entry_eligible_ts_ms + 500
+    midpoint = (intent.exit_plan.stop_price + intent.exit_plan.target_price) / 2
+    entry_ask = _tick(midpoint, rounding=ROUND_CEILING)
+    entry_bid = _tick(entry_ask - 0.02, rounding=ROUND_FLOOR)
+    assert intent.exit_plan.stop_price < entry_ask < intent.exit_plan.target_price
+    previous: str | None = None
+    frames: dict[str, RecordedTopNBookFrameV2] = {}
+    for sequence, symbol in enumerate(_SYMBOLS, start=1):
+        bid, ask = (entry_bid, entry_ask) if symbol == intent.symbol else (99.99, 100.01)
+        frame = _frame(
+            tape_id=tape_id,
+            sequence=sequence,
+            symbol=symbol,
+            persisted_at_ms=intent.entry_eligible_ts_ms + sequence,
+            previous_frame_sha256=previous,
+            bid=bid,
+            ask=ask,
+        )
+        assert await repository.record_book_frame(frame)
+        frames[symbol] = frame
+        previous = frame.frame_sha256
+
+    exit_bid = _tick(intent.exit_plan.stop_price * 1.01, rounding=ROUND_FLOOR)
+    exit_frame = _frame(
+        tape_id=tape_id,
+        sequence=len(_SYMBOLS) + 1,
+        symbol=intent.symbol,
+        persisted_at_ms=exit_bar.close_time_ms + 10,
+        previous_frame_sha256=previous,
+        bid=exit_bid,
+        ask=_tick(exit_bid + 0.02, rounding=ROUND_CEILING),
+    )
+    assert await repository.record_book_frame(exit_frame)
+    seal = await repository.seal_tape(tape_id, sealed_at_ms=exit_bar.close_time_ms + 100)
+    assert seal.execution_environment == "SIMULATED"
+    assert tuple(item.symbol for item in seal.bar_chains) == tuple(sorted(_SYMBOLS))
+    assert seal.book_chain.entry_count == len(_SYMBOLS) + 1
+    assert not seal.paper_qualification_eligible and not seal.alpha_claim
+    assert await repository.verify_tape(tape_id)
+
+    session = SimulationSessionV1(
+        source="sim-full-path-adaptive",
+        tape_id=tape_id,
+        tape_sha256=seal.tape_sha256,
+        assumptions=assumptions,
+        strategy_allowlist=(
+            SimulationStrategyRefV1(
+                strategy_id=intent.strategy_id,
+                strategy_revision=intent.strategy_revision,
+            ),
+        ),
+        started_at_ms=bars[0].open_time_ms,
+        ends_at_ms=exit_bar.close_time_ms + 120_000,
+    )
+    assert await repository.create_session(session)
+    replayed = await _load_research_bars(repository, tape_id, intent.decision_ts_ms)
+    assert replayed == bars and len(replayed) == 3_245
+    replay = evaluate_adaptive_closed_bars(
+        replayed,
+        observed_at_ms=observed_at_ms,
+        source_set_sha256=source_set_sha256,
+    )
+    assert replay.intent is not None
+    assert canonical_intent_batch_bytes((replay.intent,)) == canonical_intent_batch_bytes((intent,))
+    return bars, intent, session, frames[intent.symbol], exit_bar, decision_ms
+
+
+def test_current_adaptive_hypothetical_sizing_respects_remaining_loss_budget() -> None:
+    """Pure PAPER arithmetic only: no account qualification or PAPER decision is created."""
+
+    bars = _adaptive_range_closed_bars()
+    result = evaluate_adaptive_closed_bars(
+        bars,
+        observed_at_ms=bars[-1].close_time_ms + 1,
+        source_set_sha256=_hash("current-adaptive-range-sim-source-set-v1"),
+    )
+    assert result.intent is not None
+    intent = result.intent
+    assumptions = SimulationAssumptionsV1(
+        latency_ms=25,
+        maximum_book_age_ms=5_000,
+        maximum_frame_latency_ms=1_000,
+        depth_participation_fraction=1.0,
+        adverse_slippage_bps=0.0,
+        taker_fee_bps=5.0,
+        price_tick=0.01,
+        quantity_step=0.001,
+    )
+    midpoint = (intent.exit_plan.stop_price + intent.exit_plan.target_price) / 2
+    ask = _tick(midpoint, rounding=ROUND_CEILING)
+    frame = _frame(
+        tape_id="adaptive-sizing-pure-fixture",
+        sequence=1,
+        symbol=intent.symbol,
+        persisted_at_ms=intent.entry_eligible_ts_ms + 1,
+        previous_frame_sha256=None,
+        bid=_tick(ask - 0.02, rounding=ROUND_FLOOR),
+        ask=ask,
+    )
+    quantity, budget, _entry, _stop, _venue, worst_loss = _adaptive_hypothetical_quantity(
+        intent, frame, assumptions, open_risk_usd=95.0, reserved_risk_usd=3.0
+    )
+    assert budget == pytest.approx(2.0)  # min($25 per-trade, $2 remaining portfolio cap)
+    assert 0.0 < quantity and worst_loss <= budget
+    exhausted, exhausted_budget, *_ = _adaptive_hypothetical_quantity(
+        intent, frame, assumptions, open_risk_usd=100.0, reserved_risk_usd=0.0
+    )
+    assert exhausted_budget == 0.0 and exhausted == 0.0
+    no_capacity, *_ = _adaptive_hypothetical_quantity(
+        intent,
+        frame,
+        assumptions,
+        open_risk_usd=0.0,
+        reserved_risk_usd=0.0,
+        available_balance_usd=0.0,
+    )
+    assert no_capacity == 0.0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_current_adaptive_context_to_sim_stop_is_sealed_and_idempotent() -> None:
+    """Current adaptive → causal candidate review → bounded SIM sizing/execution only."""
+
+    policy.validate_environment()
+    policy.validate_database_url(os.environ["KAIROS_SIM_FULL_PATH_GATE_DATABASE_URL"])
+    policy.validate_installed_sources()
+    settings, database_name = _settings()
+    database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+    await connect_verified_database(database, database_name, local_only=True)
+    try:
+        await database.migrate()
+        repository = SimulationRepository(database.pool)
+        bars, intent, session, entry_frame, exit_bar, decided_at_ms = await _seed_adaptive_sim_session(
+            repository, tape_id="current-adaptive-range-sim-tape-v1"
+        )
+
+        quantity, loss_budget, worst_entry, _risk_stop, _synthetic_venue, worst_loss = (
+            _adaptive_hypothetical_quantity(
+                intent,
+                entry_frame,
+                session.assumptions,
+                open_risk_usd=95.0,
+                reserved_risk_usd=3.0,
+            )
+        )
+        assert quantity > 0 and worst_loss <= loss_budget == pytest.approx(2.0)
+
+        review, context, gateway, route = await _adaptive_candidate_review(
+            bars,
+            intent,
+            macro_state="valid",
+            decision=ReviewDecision.ALLOW,
+            audit=AuditRepository(database.pool),
+        )
+        assert review.decision is ReviewDecision.ALLOW and review.reviewer == "LLM"
+        assert review.model_provenance is not None
+        assert review.model_provenance.provider == "simulator-gate-local"
+        assert review.model_provenance.cost_usd == 0.0 and len(gateway.calls) == 1
+        assert route.intent.canonical_intent_bytes() == intent.canonical_intent_bytes()
+        protected_intent_bytes = intent.canonical_intent_bytes()
+        assert review.intent.canonical_intent_bytes() == intent.canonical_intent_bytes()
+        assert {source.kind: source.availability for source in context.sources} == {
+            "market": "AVAILABLE",
+            "closed_bars": "AVAILABLE",
+            "text": "AVAILABLE",
+            "macro": "AVAILABLE",
+        }
+        assert "text" in context.required_sources and "macro" in context.required_sources
+        text_source = next(source for source in context.sources if source.kind == "text")
+        assert route.evidence_ids
+        assert tuple(receipt.message_id for receipt in text_source.receipts) == route.evidence_ids
+
+        # SIM RiskPolicy only caps the already-sized quantity; it is not account sizing.
+        sim_decision = SimulationRiskPolicy(source="sim-full-path-current-adaptive-risk").evaluate(
+            session=session,
+            review=review,
+            selected_book_frame=entry_frame,
+            decided_at_ms=decided_at_ms,
+            requested_quantity=quantity,
+        )
+        assert sim_decision.approved and sim_decision.execution_environment == "SIMULATED"
+        assert 0 < sim_decision.quantity <= quantity
+        assert sim_decision.price_cap is not None and worst_entry >= sim_decision.price_cap
+        assert not sim_decision.paper_qualification_eligible and not sim_decision.alpha_claim
+
+        capacity_decision = SimulationRiskPolicy(source="sim-full-path-adaptive-capacity").evaluate(
+            session=session,
+            review=review,
+            selected_book_frame=entry_frame,
+            decided_at_ms=decided_at_ms,
+            requested_quantity=quantity + 100.0,
+        )
+        visible_capacity = (
+            sum(level.quantity for level in entry_frame.asks)
+            * session.assumptions.depth_participation_fraction
+        )
+        assert capacity_decision.approved and capacity_decision.quantity < quantity + 100.0
+        assert capacity_decision.quantity <= visible_capacity
+
+        assert await repository.record_risk_decision(sim_decision)
+        admission = SimulationAdmissionV2(
+            source="sim-full-path-current-adaptive-admission",
+            decision=sim_decision,
+            admitted_at_ms=decided_at_ms,
+        )
+        controller = SimulationExecutionController(repository, source="sim-full-path-current-adaptive")
+        trade = await controller.start_trade(admission, created_at_ms=decided_at_ms)
+        entry = await controller.submit_entry(trade, as_of_ms=decided_at_ms + 100)
+        assert entry.receipt is not None and entry.receipt.status == "FILLED"
+        assert entry.receipt.filled_quantity <= quantity
+        pending_exit = await controller.process_closed_bar(
+            trade, exit_bar, as_of_ms=exit_bar.close_time_ms + 1
+        )
+        assert pending_exit is not None and pending_exit.receipt is None
+        assert pending_exit.command.command_kind == "STOP_EXIT_IOC"
+        await database.close()
+        database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+        await connect_verified_database(database, database_name, local_only=True)
+        repository = SimulationRepository(database.pool)
+        saved_context = await database.pool.fetchval(
+            "SELECT payload FROM event_audit WHERE message_id=$1", context.message_id
+        )
+        restored_context = (
+            DecisionContextV1.model_validate(saved_context)
+            if isinstance(saved_context, dict)
+            else DecisionContextV1.model_validate_json(saved_context)
+        )
+        assert restored_context == context
+        assert context.evidence_references()[0] in review.evidence
+        controller = SimulationExecutionController(repository, source="sim-full-path-current-adaptive")
+        recovered = await controller.recover_prepared(
+            session.session_id, as_of_ms=exit_bar.close_time_ms + 100
+        )
+        assert len(recovered) == 1 and recovered[0].command == pending_exit.command
+        stopped = recovered[0]
+        assert stopped is not None and stopped.receipt is not None
+        assert stopped.command.command_kind == "STOP_EXIT_IOC"
+        assert stopped.receipt.status == "FILLED" and stopped.lifecycle_state == "FLAT"
+
+        result_row = await database.pool.fetchrow(
+            "SELECT payload FROM sim_results WHERE trade_id=$1", trade.trade_id
+        )
+        assert result_row is not None
+        payload = result_row["payload"]
+        result = (
+            SimulationResultV1.model_validate(payload)
+            if isinstance(payload, dict)
+            else SimulationResultV1.model_validate_json(payload)
+        )
+        assert result.final_state == "FLAT" and not result.venue_execution_observed
+        assert not result.paper_qualification_eligible and not result.alpha_claim
+        entry_receipt, exit_receipt = entry.receipt, stopped.receipt
+        assert entry_receipt.average_price is not None and exit_receipt.average_price is not None
+        assert entry_receipt.filled_quantity == exit_receipt.filled_quantity == sim_decision.quantity
+        assert result.entry_filled_quantity == result.exit_filled_quantity == sim_decision.quantity
+        for receipt in (entry_receipt, exit_receipt):
+            assert receipt.fee_quote == pytest.approx(
+                receipt.filled_quantity * receipt.average_price * session.assumptions.taker_fee_bps / 10_000
+            )
+        assert intent.canonical_intent_bytes() == protected_intent_bytes
+        assert sim_decision.intent.canonical_intent_bytes() == protected_intent_bytes
+        gross = (exit_receipt.average_price - entry_receipt.average_price) * exit_receipt.filled_quantity
+        fees = entry_receipt.fee_quote + exit_receipt.fee_quote
+        net = gross - fees
+        assert result.model_realized_pnl_quote == pytest.approx(gross)
+        assert result.model_fee_quote == pytest.approx(fees)
+        assert math.isfinite(net) and net == pytest.approx(
+            result.model_realized_pnl_quote - result.model_fee_quote
+        )
+        assert gross < 0 < fees and net < gross
+
+        counts_before_refusal = {
+            table: await database.pool.fetchval(
+                f"SELECT count(*) FROM {table} WHERE session_id=$1", session.session_id
+            )
+            for table in ("sim_admissions", "sim_commands", "sim_results")
+        }
+        assert counts_before_refusal == {"sim_admissions": 1, "sim_commands": 2, "sim_results": 1}
+        for macro_state in ("missing", "stale"):
+            refused, refused_context, refused_gateway, _ = await _adaptive_candidate_review(
+                bars, intent, macro_state=macro_state, decision=ReviewDecision.ALLOW
+            )
+            macro_source = next(source for source in refused_context.sources if source.kind == "macro")
+            assert macro_source.availability == "UNAVAILABLE"
+            assert refused.decision is ReviewDecision.DEFER
+            assert "CONTEXT_REQUIRED_MACRO_UNAVAILABLE" in refused.reason_codes
+            assert refused.reviewer == "DETERMINISTIC" and refused_gateway.calls == []
+            refused_decision = SimulationRiskPolicy(
+                source=f"sim-current-adaptive-{macro_state}-risk"
+            ).evaluate(
+                session=session,
+                review=refused,
+                selected_book_frame=entry_frame,
+                decided_at_ms=decided_at_ms,
+                requested_quantity=quantity,
+            )
+            assert not refused_decision.approved and refused_decision.quantity == 0.0
+            assert await repository.record_risk_decision(refused_decision)
+
+        veto, _veto_context, veto_gateway, _ = await _adaptive_candidate_review(
+            bars, intent, macro_state="valid", decision=ReviewDecision.VETO
+        )
+        assert veto.decision is ReviewDecision.VETO and len(veto_gateway.calls) == 1
+        veto_decision = SimulationRiskPolicy(source="sim-current-adaptive-veto-risk").evaluate(
+            session=session,
+            review=veto,
+            selected_book_frame=entry_frame,
+            decided_at_ms=decided_at_ms,
+            requested_quantity=quantity,
+        )
+        assert not veto_decision.approved and veto_decision.quantity == 0.0
+        assert await repository.record_risk_decision(veto_decision)
+        assert {
+            table: await database.pool.fetchval(
+                f"SELECT count(*) FROM {table} WHERE session_id=$1", session.session_id
+            )
+            for table in ("sim_admissions", "sim_commands", "sim_results")
+        } == counts_before_refusal
+
+        await database.close()
+        database = Database(settings, migration_profile=MigrationProfile.SIMULATOR)
+        await connect_verified_database(database, database_name, local_only=True)
+        repository = SimulationRepository(database.pool)
+        restarted = SimulationExecutionController(repository, source="sim-full-path-current-adaptive")
+        assert (
+            await restarted.recover_prepared(session.session_id, as_of_ms=exit_bar.close_time_ms + 200) == ()
+        )
+        duplicate_entry = await restarted.submit_entry(trade, as_of_ms=decided_at_ms + 200)
+        assert duplicate_entry.receipt == entry.receipt and duplicate_entry.replayed
+        assert (
+            await restarted.process_closed_bar(trade, exit_bar, as_of_ms=exit_bar.close_time_ms + 200) is None
+        )
+        assert (
+            await database.pool.fetchval(
+                "SELECT count(*) FROM sim_commands WHERE trade_id=$1", trade.trade_id
+            )
+            == 2
+        )
+        assert (
+            await database.pool.fetchval("SELECT count(*) FROM sim_results WHERE trade_id=$1", trade.trade_id)
+            == 1
+        )
+        persisted = await database.pool.fetchrow(
+            "SELECT payload FROM sim_results WHERE trade_id=$1", trade.trade_id
+        )
+        assert persisted is not None
+        persisted_payload = persisted["payload"]
+        persisted_result = (
+            SimulationResultV1.model_validate(persisted_payload)
+            if isinstance(persisted_payload, dict)
+            else SimulationResultV1.model_validate_json(persisted_payload)
+        )
+        assert persisted_result == result
+    finally:
+        await database.close()
 
 
 def test_independent_research_pair_keeps_wait_and_opposite_signal_non_executable() -> None:
