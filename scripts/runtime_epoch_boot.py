@@ -248,14 +248,16 @@ def validate_r7_lifecycle_status(value: object, *, now_ms: int | None = None) ->
         "WAITING_SOURCE_NONTRADING",
         "CATCHING_UP_NONTRADING",
     }:
-        validate_r6_lifecycle_status(value, now_ms=now_ms)
+        validate_r6_lifecycle_status(value, now_ms=now_ms, allow_dns=True)
         return value
     if value.get("source_fresh") is not True:
         raise epoch.Rejected("R7_ACCEPTED_NONTRADING_LIFECYCLE_REQUIRED")
     return epoch.validate_running_status(value, OWNER, now_ms=now_ms)
 
 
-def validate_r6_lifecycle_status(value: dict, *, now_ms: int | None = None) -> None:
+def validate_r6_lifecycle_status(
+    value: dict, *, now_ms: int | None = None, allow_dns: bool = False
+) -> None:
     """Recognize a known source pause without calling it fresh or restarting it."""
     known = {
         "RUNNING_NONTRADING",
@@ -266,7 +268,42 @@ def validate_r6_lifecycle_status(value: dict, *, now_ms: int | None = None) -> N
         raise epoch.Rejected("R6_KNOWN_NONTRADING_LIFECYCLE_REQUIRED")
     circuit = value.get("source_transport")
     circuit_keys = {"timeout_rounds", "recoveries", "consecutive_timeout_rounds"}
+    dns_keys = {"dns_failure_rounds", "consecutive_dns_failure_rounds"}
+    schemas = {frozenset(circuit_keys)}
+    if allow_dns:
+        schemas.add(frozenset(circuit_keys | dns_keys))
+    circuit_schema = frozenset(circuit) if isinstance(circuit, dict) else None
+    has_dns_telemetry = circuit_schema == frozenset(circuit_keys | dns_keys)
+    dns_rounds = (
+        circuit.get("dns_failure_rounds", 0) if isinstance(circuit, dict) else 0
+    )
+    consecutive_dns = (
+        circuit.get("consecutive_dns_failure_rounds", 0)
+        if isinstance(circuit, dict)
+        else 0
+    )
+    consecutive_timeouts = (
+        circuit.get("consecutive_timeout_rounds") if isinstance(circuit, dict) else None
+    )
     waiting = value["state"] == "WAITING_SOURCE_NONTRADING"
+    wait_reason = value.get("source_wait_reason")
+    timeout_wait_valid = (
+        wait_reason == "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+        and isinstance(circuit, dict)
+        and type(consecutive_timeouts) is int
+        and consecutive_timeouts >= 1
+        and type(consecutive_dns) is int
+        and consecutive_dns == 0
+    )
+    dns_wait_valid = (
+        allow_dns
+        and wait_reason == "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE"
+        and isinstance(circuit, dict)
+        and type(consecutive_dns) is int
+        and consecutive_dns >= 1
+        and type(consecutive_timeouts) is int
+        and consecutive_timeouts == 0
+    )
     if (
         value.get("trading_started") is not False
         or value.get("source_fresh") is not (value["state"] == "RUNNING_NONTRADING")
@@ -279,24 +316,22 @@ def validate_r6_lifecycle_status(value: dict, *, now_ms: int | None = None) -> N
             )
         )
         or not isinstance(circuit, dict)
-        or set(circuit) != circuit_keys
+        or circuit_schema not in schemas
         or any(
-            type(circuit[key]) is not int or circuit[key] < 0 for key in circuit_keys
+            type(circuit[key]) is not int or circuit[key] < 0
+            for key in circuit_keys | (dns_keys if has_dns_telemetry else set())
         )
-        or circuit["recoveries"] > circuit["timeout_rounds"]
+        or (has_dns_telemetry and dns_rounds < 1)
+        or circuit["recoveries"] > circuit["timeout_rounds"] + dns_rounds
         or circuit["consecutive_timeout_rounds"] > circuit["timeout_rounds"]
-        or (
-            waiting
-            and (
-                value.get("source_wait_reason") != "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
-                or circuit["consecutive_timeout_rounds"] < 1
-            )
-        )
+        or consecutive_dns > dns_rounds
+        or (waiting and not (timeout_wait_valid or dns_wait_valid))
         or (
             not waiting
             and (
-                value.get("source_wait_reason") is not None
+                wait_reason is not None
                 or circuit["consecutive_timeout_rounds"] != 0
+                or consecutive_dns != 0
             )
         )
     ):

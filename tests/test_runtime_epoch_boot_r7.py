@@ -127,6 +127,49 @@ class R7BootTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(boot.epoch.Rejected):
                 boot.validate_r7_lifecycle_status({**waiting, key: invalid})
 
+    def test_r7_dns_source_pause_is_admitted_without_changing_r6_contract(self):
+        waiting_dns = {
+            **accepted_status(),
+            "state": "WAITING_SOURCE_NONTRADING",
+            "source_fresh": False,
+            "source_wait_reason": "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE",
+            "source_transport": {
+                "timeout_rounds": 0,
+                "recoveries": 0,
+                "consecutive_timeout_rounds": 0,
+                "dns_failure_rounds": 1,
+                "consecutive_dns_failure_rounds": 1,
+            },
+        }
+        self.assertIs(boot.validate_r7_lifecycle_status(waiting_dns), waiting_dns)
+        with self.assertRaises(boot.epoch.Rejected):
+            boot.validate_r6_lifecycle_status(waiting_dns)
+
+        for circuit in (
+            {
+                **waiting_dns["source_transport"],
+                "consecutive_timeout_rounds": 1,
+            },
+            {
+                **waiting_dns["source_transport"],
+                "consecutive_dns_failure_rounds": 2,
+            },
+            {
+                **waiting_dns["source_transport"],
+                "dns_failure_rounds": 0,
+            },
+            {
+                "timeout_rounds": 0,
+                "recoveries": 0,
+                "consecutive_timeout_rounds": 0,
+                "dns_failure_rounds": 1,
+            },
+        ):
+            with self.subTest(circuit=circuit), self.assertRaises(boot.epoch.Rejected):
+                boot.validate_r7_lifecycle_status(
+                    {**waiting_dns, "source_transport": circuit}
+                )
+
     def test_already_running_r7_pause_is_reported_without_restart_or_mutation(self):
         controller = boot.BootController.__new__(boot.BootController)
         controller.proofs = {}

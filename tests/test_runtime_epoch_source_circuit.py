@@ -14,6 +14,26 @@ from unittest import mock
 from scripts import runtime_epoch_worker as worker
 
 
+class _ClientConnectorDNSError(Exception):
+    pass
+
+
+class _ClientConnectorCertificateError(Exception):
+    pass
+
+
+def _aiohttp_exception_modules():
+    aiohttp = types.ModuleType("aiohttp")
+    exceptions = types.ModuleType("aiohttp.client_exceptions")
+    exceptions.ClientConnectorDNSError = _ClientConnectorDNSError
+    exceptions.ClientConnectorCertificateError = _ClientConnectorCertificateError
+    aiohttp.client_exceptions = exceptions
+    return {
+        "aiohttp": aiohttp,
+        "aiohttp.client_exceptions": exceptions,
+    }
+
+
 class SourceCircuitTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_runtime_waits_then_recovers_without_new_consumer_or_fake_freshness(
         self,
@@ -83,6 +103,8 @@ class SourceCircuitTests(unittest.IsolatedAsyncioTestCase):
             recovered += 1
             if recovered == 1:
                 raise worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT")
+            if recovered == 2:
+                raise worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE")
             for bar in bars.values():
                 bar.close_time_ms = config["end_exclusive_ms"] - 1
             captured_shutdown[0].set()
@@ -137,15 +159,37 @@ class SourceCircuitTests(unittest.IsolatedAsyncioTestCase):
             result = await worker.runtime(config, Path("unused"), qualification=False)
         self.assertEqual(
             [r["state"] for r in reports],
-            ["WAITING_SOURCE_NONTRADING", "RUNNING_NONTRADING"],
+            [
+                "WAITING_SOURCE_NONTRADING",
+                "WAITING_SOURCE_NONTRADING",
+                "RUNNING_NONTRADING",
+            ],
         )
         self.assertFalse(reports[0]["source_fresh"])
-        self.assertTrue(reports[1]["source_fresh"])
-        self.assertEqual(reports[1]["source_transport"]["recoveries"], 1)
+        self.assertFalse(reports[1]["source_fresh"])
+        self.assertTrue(reports[2]["source_fresh"])
+        self.assertEqual(reports[2]["source_transport"]["recoveries"], 1)
+        self.assertEqual(
+            reports[0]["source_wait_reason"], "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+        )
+        self.assertEqual(
+            reports[1]["source_wait_reason"],
+            "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE",
+        )
+        self.assertEqual(reports[0]["source_transport"]["timeout_rounds"], 1)
+        self.assertNotIn("dns_failure_rounds", reports[0]["source_transport"])
+        self.assertEqual(reports[1]["source_transport"]["timeout_rounds"], 1)
+        self.assertEqual(reports[1]["source_transport"]["dns_failure_rounds"], 1)
+        self.assertEqual(
+            reports[1]["source_transport"]["consecutive_timeout_rounds"], 0
+        )
+        self.assertEqual(
+            reports[1]["source_transport"]["consecutive_dns_failure_rounds"], 1
+        )
         self.assertEqual(result["state"], "STOPPED_NONTRADING")
         self.assertEqual(consumed, ["start", "closed"])
-        self.assertEqual(flush.await_count, 4)
-        wait.assert_awaited_once()
+        self.assertEqual(flush.await_count, 6)
+        self.assertEqual(wait.await_count, 2)
 
     @staticmethod
     def bars(starts):
@@ -183,20 +227,76 @@ class SourceCircuitTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(worker.EpochError, "FINALITY_CLOCK_REGRESSION"):
             worker.bounded_runtime_end(self.bars([120000] * 5), 60000)
 
-    def test_only_complete_timeout_groups_can_defer(self):
+    def test_only_homogeneous_admitted_source_groups_can_defer(self):
         timeout = worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT")
+        dns = worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE")
         self.assertIsNotNone(
             worker.source_wait_reason(ExceptionGroup("synthetic", [timeout, timeout]))
+        )
+        self.assertEqual(
+            worker.source_wait_reason(ExceptionGroup("dns", [dns, dns])),
+            "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE",
         )
         for error in (
             worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_FAILED"),
             worker.EpochError("PAYLOAD_CONFLICT"),
             ExceptionGroup("mixed", [timeout, worker.EpochError("DB_INTEGRITY")]),
+            ExceptionGroup("mixed-dns", [dns, worker.EpochError("DB_INTEGRITY")]),
+            ExceptionGroup("mixed-source", [timeout, dns]),
             RuntimeError("private driver value"),
         ):
             self.assertIsNone(worker.source_wait_reason(error))
             with self.assertRaises(type(error)):
                 worker.SourceCircuit().failed(error)
+
+    async def test_dns_failure_is_retried_only_at_public_get_boundary_and_sanitized(
+        self,
+    ):
+        class Session:
+            calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                raise _ClientConnectorDNSError(None, OSError("private resolver detail"))
+
+        session = Session()
+        with (
+            mock.patch.object(worker.asyncio, "sleep", new=mock.AsyncMock()) as sleep,
+            self.assertRaises(worker.EpochError) as raised,
+            mock.patch.dict(sys.modules, _aiohttp_exception_modules()),
+        ):
+            await worker.fetch_closed_bar_page(session, "BTCUSDT", 0, 60_000)
+
+        self.assertEqual(str(raised.exception), "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE")
+        self.assertEqual(session.calls, worker.FETCH_ATTEMPTS)
+        self.assertEqual(sleep.await_args_list, [mock.call(2), mock.call(4)])
+
+    async def test_tls_http_integrity_database_and_cancellation_stay_fatal(self):
+        tls = _ClientConnectorCertificateError("certificate rejected")
+        for error in (
+            tls,
+            worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_FAILED"),
+            worker.EpochError("REST_RESPONSE_BOUND_EXCEEDED"),
+            worker.EpochError("DB_INTEGRITY"),
+        ):
+            self.assertIsNone(worker.source_wait_reason(error))
+
+        class Session:
+            def get(self, *_args, **_kwargs):
+                raise tls
+
+        with (
+            mock.patch.dict(sys.modules, _aiohttp_exception_modules()),
+            self.assertRaises(_ClientConnectorCertificateError),
+        ):
+            await worker.fetch_closed_bar_page(Session(), "BTCUSDT", 0, 60_000)
+
+        class CancelledSession:
+            def get(self, *_args, **_kwargs):
+                raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await worker.fetch_closed_bar_page(CancelledSession(), "BTCUSDT", 0, 60_000)
 
     def test_timeout_then_success_counts_recovery_without_raising_caps(self):
         circuit = worker.SourceCircuit()
@@ -208,6 +308,21 @@ class SourceCircuitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             circuit.snapshot(),
             {"timeout_rounds": 10, "recoveries": 1, "consecutive_timeout_rounds": 0},
+        )
+
+    def test_dns_telemetry_is_separate_from_timeout_telemetry(self):
+        circuit = worker.SourceCircuit()
+        circuit.failed(worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE"))
+        circuit.failed(worker.EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"))
+        self.assertEqual(
+            circuit.snapshot(),
+            {
+                "timeout_rounds": 1,
+                "recoveries": 0,
+                "consecutive_timeout_rounds": 1,
+                "dns_failure_rounds": 1,
+                "consecutive_dns_failure_rounds": 0,
+            },
         )
 
     async def test_cancelled_outage_wait_stops_without_more_requests(self):

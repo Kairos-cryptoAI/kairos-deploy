@@ -31,7 +31,7 @@ MAX_PENDING = 100
 RECOVERY_PAGE_SIZE = 200
 FINALITY_MS = 5_000
 MAX_STATUS_BYTES = 32_768
-FETCH_TIMEOUT_ATTEMPTS = 3
+FETCH_ATTEMPTS = 3
 FETCH_RETRY_SECONDS = (2, 4)
 SOURCE_WAIT_SECONDS = (5, 15, 30, 60)
 SOURCE_HEARTBEAT_SECONDS = 5
@@ -1463,15 +1463,29 @@ def bounded_runtime_end(values: dict, target: int) -> int:
 
 
 def source_wait_reason(error: BaseException) -> str | None:
-    """Only admitted public-GET timeouts can defer; mixed groups stay fatal."""
+    """Only admitted public-GET transport failures can defer.
+
+    Mixed exception groups stay fatal rather than degrading to one source error.
+    """
     if isinstance(error, ExceptionGroup):
         reasons = [source_wait_reason(child) for child in error.exceptions]
-        return reasons[0] if reasons and all(reasons) else None
+        if (
+            reasons
+            and reasons[0] is not None
+            and all(reason == reasons[0] for reason in reasons)
+        ):
+            return reasons[0]
+        return None
     if (
         isinstance(error, EpochError)
         and str(error) == "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
     ):
         return "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT"
+    if (
+        isinstance(error, EpochError)
+        and str(error) == "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE"
+    ):
+        return "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE"
     return None
 
 
@@ -1480,28 +1494,44 @@ class SourceCircuit:
 
     def __init__(self):
         self.timeouts = 0
+        self.dns_failures = 0
         self.recoveries = 0
         self.consecutive = 0
+        self.consecutive_timeouts = 0
+        self.consecutive_dns_failures = 0
 
     def failed(self, error: BaseException) -> str:
         reason = source_wait_reason(error)
         if reason is None:
             raise error
-        self.timeouts += 1
         self.consecutive += 1
+        if reason == "OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE":
+            self.dns_failures += 1
+            self.consecutive_dns_failures += 1
+            self.consecutive_timeouts = 0
+        else:
+            self.timeouts += 1
+            self.consecutive_timeouts += 1
+            self.consecutive_dns_failures = 0
         return reason
 
     def succeeded(self) -> None:
         if self.consecutive:
             self.recoveries += 1
         self.consecutive = 0
+        self.consecutive_timeouts = 0
+        self.consecutive_dns_failures = 0
 
     def snapshot(self) -> dict:
-        return {
+        result = {
             "timeout_rounds": self.timeouts,
             "recoveries": self.recoveries,
-            "consecutive_timeout_rounds": self.consecutive,
+            "consecutive_timeout_rounds": self.consecutive_timeouts,
         }
+        if self.dns_failures:
+            result["dns_failure_rounds"] = self.dns_failures
+            result["consecutive_dns_failure_rounds"] = self.consecutive_dns_failures
+        return result
 
     async def wait(self, requested, consumer, heartbeat) -> None:
         delay = SOURCE_WAIT_SECONDS[
@@ -1569,8 +1599,8 @@ class EpochWriter:
 
 
 async def fetch_closed_bar_page(session, symbol: str, start: int, finish: int):
-    """Retry only timed-out public GETs, never a database append or publication."""
-    for attempt in range(FETCH_TIMEOUT_ATTEMPTS):
+    """Retry only bounded timeout/DNS failures at the public GET boundary."""
+    for attempt in range(FETCH_ATTEMPTS):
         try:
             async with session.get(
                 "https://fapi.binance.com/fapi/v1/klines",
@@ -1598,8 +1628,20 @@ async def fetch_closed_bar_page(session, symbol: str, start: int, finish: int):
                     chunks.append(chunk)
                 return json.loads(b"".join(chunks))
         except TimeoutError:
-            if attempt + 1 == FETCH_TIMEOUT_ATTEMPTS:
+            if attempt + 1 == FETCH_ATTEMPTS:
                 raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT") from None
+            await asyncio.sleep(FETCH_RETRY_SECONDS[attempt])
+        except Exception as error:
+            try:
+                from aiohttp.client_exceptions import ClientConnectorDNSError
+            except ImportError:
+                ClientConnectorDNSError = None
+            if ClientConnectorDNSError is None or not isinstance(
+                error, ClientConnectorDNSError
+            ):
+                raise
+            if attempt + 1 == FETCH_ATTEMPTS:
+                raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_DNS_FAILURE") from None
             await asyncio.sleep(FETCH_RETRY_SECONDS[attempt])
     raise EpochError("OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT")
 
@@ -1842,8 +1884,13 @@ async def recover(
                             pending_errors.extend(item.exceptions)
                         else:
                             leaves.append(item)
-                    if any(source_wait_reason(e) for e in leaves) and any(
-                        source_wait_reason(e) is None for e in leaves
+                    leaf_reasons = [source_wait_reason(error) for error in leaves]
+                    admitted_reasons = {
+                        reason for reason in leaf_reasons if reason is not None
+                    }
+                    if admitted_reasons and (
+                        any(reason is None for reason in leaf_reasons)
+                        or len(admitted_reasons) != 1
                     ):
                         raise
                     while isinstance(original, ExceptionGroup):
