@@ -23,7 +23,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7')]", source
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]", source
                 )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r2-20261012", source)
@@ -42,7 +42,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7')]", source
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]", source
                 )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r4-20261012", source)
@@ -63,7 +63,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7')]", source
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]", source
                 )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r5-20261012", source)
@@ -80,7 +80,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7')]", source
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]", source
                 )
                 self.assertIn("$Generation = 'original'", source)
                 self.assertIn("epoch-boot-r6-20261012", source)
@@ -95,7 +95,7 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
-                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7')]",
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]",
                     source,
                 )
                 self.assertIn("$Generation = 'original'", source)
@@ -106,6 +106,27 @@ class RuntimeEpochBootLauncherTests(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         launcher = LAUNCHER.read_text(encoding="utf-8")
         self.assertIn("Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R7", installer)
+        self.assertIn("'-Generation'", installer)
+        self.assertIn("'--generation', $Generation", launcher)
+        self.assertIsNone(
+            re.search(r"Register-ScheduledTask[^\r\n]*-Force", installer, re.IGNORECASE)
+        )
+
+    def test_r7dns_has_a_distinct_opt_in_root_scope_and_task(self):
+        for path in (LAUNCHER, INSTALLER):
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "[ValidateSet('original', 'r2', 'r4', 'r5', 'r6', 'r7', 'r7dns')]",
+                    source,
+                )
+                self.assertIn("$Generation = 'original'", source)
+                self.assertIn("epoch-boot-r7dns-20261015", source)
+                self.assertIn("kairos-nontrading-runtime-epoch-boot-r7dns-v1", source)
+                self.assertIn("$generationProperty.Value -cne $Generation", source)
+        installer = INSTALLER.read_text(encoding="utf-8")
+        launcher = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn("Kairos-NonTradingEpoch-69893dc7b7c6-Boot-R7-DNS", installer)
         self.assertIn("'-Generation'", installer)
         self.assertIn("'--generation', $Generation", launcher)
         self.assertIsNone(

@@ -46,6 +46,45 @@ CONTAINERS = {
     "redis": epoch.CONTINUATION_04_REDIS_ID,
     "serve": "f171285853b1ddae798dd11767c2292a133b874ab2928cce8bb8434fe5798981",
 }
+R7DNS_WORK = Path(
+    "D:/Kairos/runtime/runtime-dns-recovery-20261015/"
+    "preflight-b0a90145752d4b1486a466125afbc131"
+)
+# The detached signature was verified by the continuation admission workflow;
+# both exact bytes remain pinned here so boot never consults ambient GPG state.
+R7DNS_SUCCESS_RECEIPT_SHA256 = (
+    "5933c8c99e994209d7829c5cb5ab4862b4522fe43afb2d7ff80e8f74e90765f0"
+)
+R7DNS_SUCCESS_SIGNATURE_SHA256 = (
+    "534803efd215c6e866894aa9be107e9ac528f4e3ba1ebac33b6ec28dc055afb7"
+)
+R7DNS_FAILED_STATUS_PATH = Path(
+    "D:/Kairos/runtime/runtime-incident-20261013/"
+    "read-recovery-r7-cb1bc3984d8440aa965af5b928d2b4fa/output-serve/status.json"
+)
+R7DNS_FAILED_STATUS_SHA256 = (
+    "faf607e8b86b05b579aee162ab113b417356ce409ca41e38b913e3c2b8302354"
+)
+R7DNS_SOURCE_REVISION = "ffa09ddb5a433bdf1dad75b2c8d1f4e9d7999b65"
+R7DNS_SERVE_NAME = "kairos-epoch-69893dc7b7c6-serve-r7-dns-b0a90145"
+R7DNS_SERVE_ID = "5a9fff5848ccd57529029ab8214fc97cc33de6b7efaa371f376fdb07491a2e5b"
+R7DNS_FAILED_SERVE_NAME = "kairos-epoch-69893dc7b7c6-serve-r7"
+R7DNS_FAILED_SERVE_ID = "c08f5b667a84febb2dc1639857b44a52208ea29f9836e14c11685d89ccd55ae0"
+R7DNS_CONFIG_SHA256 = (
+    "07b2e0bef3ccc6807f66af80de75e3c1f01fa5e95bf891e1ab5c3c796ba9a50c"
+)
+R7DNS_OPERATOR_ARCHIVE_SHA256 = (
+    "08781a228ea76bc585cb525c0d973d6dd9bf7bf90cba3497b8a02009c619a6fb"
+)
+R7DNS_QUANT_ARCHIVE_SHA256 = (
+    "bd372577ac5b445db209243061a1e797a54ff76d14bea0a72b7537e10f5938cc"
+)
+R7DNS_OPERATOR_SNAPSHOT_SHA256 = (
+    "4bb0d40250231dd00277a57259123824ea92d40dec675f1516167152dd42c07b"
+)
+R7DNS_QUANT_SNAPSHOT_SHA256 = (
+    "285aaf8ec7961c2bd58a88454f4529f9c2c321457bfad5a5bc900061a702ab72"
+)
 MAX_SECONDS = 3600
 LEASE = ROOT / "boot.active"
 STANDBY_NAME = "kairos-shadow-gate-timescaledb-1"
@@ -240,6 +279,24 @@ def configure_generation_r7() -> None:
     LEASE = ROOT / "boot.active"
 
 
+def configure_generation_r7dns() -> None:
+    """Bind a separate boot profile only to the signed, accepted DNS continuation."""
+    global ROOT, SERVE_WORK, SCOPE, GENERATION, RECEIPT_NAME
+    global PARENT_RECEIPT_SHA256, CONTAINERS, LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r7dns-20261015")
+    SERVE_WORK = R7DNS_WORK
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r7dns-v1"
+    GENERATION = "r7dns"
+    RECEIPT_NAME = "receipt.json"
+    PARENT_RECEIPT_SHA256 = R7DNS_SUCCESS_RECEIPT_SHA256
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": R7DNS_SERVE_ID,
+    }
+    LEASE = ROOT / "boot.active"
+
+
 def validate_r7_lifecycle_status(value: object, *, now_ms: int | None = None) -> dict:
     """Validate R7 status, including only the bounded shared source-pause states."""
     if not isinstance(value, dict) or value.get("trading_started") is not False:
@@ -253,6 +310,144 @@ def validate_r7_lifecycle_status(value: object, *, now_ms: int | None = None) ->
     if value.get("source_fresh") is not True:
         raise epoch.Rejected("R7_ACCEPTED_NONTRADING_LIFECYCLE_REQUIRED")
     return epoch.validate_running_status(value, OWNER, now_ms=now_ms)
+
+
+def validate_r7dns_admission_receipt(value: object) -> dict:
+    """Admit only the exact signed, non-trading DNS continuation receipt."""
+    if not isinstance(value, dict):
+        raise epoch.Rejected("R7DNS_ACCEPTED_RECEIPT_REQUIRED")
+    continuation = value.get("continuation")
+    status = continuation.get("status") if isinstance(continuation, dict) else None
+    proofs = value.get("proofs")
+    retained_pg = proofs.get("retained_cold_pg") if isinstance(proofs, dict) else None
+    retained_redis = (
+        proofs.get("retained_cold_redis") if isinstance(proofs, dict) else None
+    )
+    resources = proofs.get("resources_before") if isinstance(proofs, dict) else None
+    views = resources.get("views") if isinstance(resources, dict) else None
+    pg_view = views.get("pg") if isinstance(views, dict) else None
+    redis_view = views.get("redis") if isinstance(views, dict) else None
+    failed_serve_view = views.get("serve") if isinstance(views, dict) else None
+    if (
+        value.get("state") != "PASS_REVIEWED_NONTRADING_DNS_CONTINUATION"
+        or value.get("source_revision") != R7DNS_SOURCE_REVISION
+        or value.get("failed_status_sha256") != R7DNS_FAILED_STATUS_SHA256
+        or value.get("legacy_unchanged") is not True
+        or value.get("trading_started") is not False
+        or value.get("serving_restart") is not False
+        or not isinstance(continuation, dict)
+        or continuation.get("container") != R7DNS_SERVE_NAME
+        or continuation.get("container_id") != R7DNS_SERVE_ID
+        or continuation.get("graceful_restart_proven") is not True
+        or continuation.get("state") != "PASS_REVIEWED_NONTRADING_DNS_CONTINUATION"
+        or continuation.get("trading_started") is not False
+        or not isinstance(status, dict)
+        or status.get("owner") != OWNER
+        or status.get("state") != "RUNNING_NONTRADING"
+        or status.get("trading_started") is not False
+        or status.get("source_fresh") is not True
+        or status.get("PAPER_QUALIFIED") is not False
+        or status.get("ALPHA_READY") is not False
+        or status.get("LIVE_READY") is not False
+        or status.get("STRATEGY_POLICY") != "REJECT_ALL"
+        or any(
+            type(status.get(key)) is not int or status[key] != 0
+            for key in ("pending_outbox", "unresolved_inbox", "uncompleted_publications")
+        )
+        or not isinstance(proofs, dict)
+        or proofs.get("serve_container") != R7DNS_SERVE_NAME
+        or proofs.get("serve_start_intent") is not True
+        or proofs.get("failed_status_sha256") != R7DNS_FAILED_STATUS_SHA256
+        or proofs.get("operator_snapshot_sha256") != R7DNS_OPERATOR_SNAPSHOT_SHA256
+        or proofs.get("quant_snapshot_sha256") != R7DNS_QUANT_SNAPSHOT_SHA256
+        or not isinstance(pg_view, dict)
+        or pg_view.get("id") != epoch.CONTINUATION_04_TARGET_PG_ID
+        or pg_view.get("name") != "/kairos-epoch-69893dc7b7c6-pg"
+        or not isinstance(redis_view, dict)
+        or redis_view.get("id") != epoch.CONTINUATION_04_REDIS_ID
+        or redis_view.get("name") != "/kairos-epoch-69893dc7b7c6-redis"
+        or not isinstance(failed_serve_view, dict)
+        or failed_serve_view.get("id") != R7DNS_FAILED_SERVE_ID
+        or failed_serve_view.get("name") != "/" + R7DNS_FAILED_SERVE_NAME
+        or (failed_serve_view.get("state") or {}).get("Status") != "exited"
+        or not isinstance(retained_pg, dict)
+        or retained_pg.get("state") != "PASS_COLD_BYTE_COPY"
+        or retained_pg.get("source_volume") != "kairos-epoch-69893dc7b7c6-pg-data"
+        or retained_pg.get("retained_volume")
+        != "kairos-epoch-69893dc7b7c6-r7-cold-pg-ae798c2c"
+        or retained_pg.get("source_readonly") is not True
+        or retained_pg.get("source_unchanged") is not True
+        or retained_pg.get("restore_proven") is not False
+        or retained_pg.get("trading_started") is not False
+        or not isinstance(retained_redis, dict)
+        or retained_redis.get("state") != "PASS_COLD_BYTE_COPY"
+        or retained_redis.get("source_volume") != "kairos-epoch-69893dc7b7c6-redis-data"
+        or retained_redis.get("retained_volume")
+        != "kairos-epoch-69893dc7b7c6-r7-cold-redis-ae798c2c"
+        or retained_redis.get("source_readonly") is not True
+        or retained_redis.get("source_unchanged") is not True
+        or retained_redis.get("restore_proven") is not False
+        or retained_redis.get("trading_started") is not False
+    ):
+        raise epoch.Rejected("R7DNS_EXACT_NONTRADING_ADMISSION_REQUIRED")
+    # Validate the admitted status against its own observation time. It is an
+    # immutable handoff proof, not a claim that this timestamp is current now.
+    observed = status.get("observed_at_utc")
+    if not isinstance(observed, str):
+        raise epoch.Rejected("R7DNS_ACCEPTED_STATUS_TIME_REQUIRED")
+    try:
+        observed_ms = int(datetime.fromisoformat(observed).timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        raise epoch.Rejected("R7DNS_ACCEPTED_STATUS_TIME_REQUIRED") from None
+    validate_r7_lifecycle_status(status, now_ms=observed_ms)
+    return value
+
+
+def validate_r7dns_admission_files() -> dict:
+    """Check pinned receipt/signature and frozen failed-status bytes before binding."""
+    if GENERATION != "r7dns":
+        raise epoch.Rejected("R7DNS_PROFILE_REQUIRED")
+    receipt_path = fresh.safe(SERVE_WORK / RECEIPT_NAME)
+    signature_path = fresh.safe(SERVE_WORK / "receipt.json.asc")
+    failed_status_path = fresh.safe(R7DNS_FAILED_STATUS_PATH)
+    if (
+        fresh.sha(receipt_path) != R7DNS_SUCCESS_RECEIPT_SHA256
+        or fresh.sha(signature_path) != R7DNS_SUCCESS_SIGNATURE_SHA256
+        or fresh.sha(failed_status_path) != R7DNS_FAILED_STATUS_SHA256
+    ):
+        raise epoch.Rejected("R7DNS_ACCEPTED_EVIDENCE_BYTES_CHANGED")
+    failed_status = read_json(failed_status_path)
+    if (
+        failed_status.get("state") != "FAILED_CLOSED"
+        or failed_status.get("error_type") != "ClientConnectorDNSError"
+        or failed_status.get("trading_started") is not False
+    ):
+        raise epoch.Rejected("R7DNS_ORIGINAL_FAILURE_LATCH_MUST_REMAIN_FROZEN")
+    if (
+        fresh.sha(SERVE_WORK / "config-serve.json") != R7DNS_CONFIG_SHA256
+        or fresh.sha(SERVE_WORK / "operator.zip") != R7DNS_OPERATOR_ARCHIVE_SHA256
+        or fresh.sha(SERVE_WORK / "quant.zip") != R7DNS_QUANT_ARCHIVE_SHA256
+    ):
+        raise epoch.Rejected("R7DNS_ACCEPTED_CONFIGURATION_OR_SNAPSHOT_CHANGED")
+    return validate_r7dns_admission_receipt(read_json(receipt_path))
+
+
+def r7dns_admission_binding() -> dict:
+    receipt = validate_r7dns_admission_files()
+    return {
+        "receipt_sha256": R7DNS_SUCCESS_RECEIPT_SHA256,
+        "signature_sha256": R7DNS_SUCCESS_SIGNATURE_SHA256,
+        "failed_status_sha256": R7DNS_FAILED_STATUS_SHA256,
+        "source_revision": R7DNS_SOURCE_REVISION,
+        "serve_name": R7DNS_SERVE_NAME,
+        "serve_id": R7DNS_SERVE_ID,
+        "workdir": SERVE_WORK.as_posix(),
+        "config_sha256": R7DNS_CONFIG_SHA256,
+        "operator_archive_sha256": R7DNS_OPERATOR_ARCHIVE_SHA256,
+        "quant_archive_sha256": R7DNS_QUANT_ARCHIVE_SHA256,
+        "operator_snapshot_sha256": receipt["proofs"]["operator_snapshot_sha256"],
+        "quant_snapshot_sha256": receipt["proofs"]["quant_snapshot_sha256"],
+    }
 
 
 def validate_r6_lifecycle_status(
@@ -393,6 +588,13 @@ def input_paths() -> list[Path]:
     ]
     if any(not fresh.safe(path).is_file() for path in paths):
         raise epoch.Rejected("ADMITTED_BOOT_INPUT_MISSING")
+    if GENERATION == "r7dns":
+        paths.extend(
+            [
+                SERVE_WORK / "receipt.json.asc",
+                R7DNS_FAILED_STATUS_PATH,
+            ]
+        )
     for directory in ("operator", "quant", "runtime-wheelhouse"):
         paths.extend(sorted((SERVE_WORK / directory).rglob("*")))
     return [fresh.safe(path) for path in paths if path.is_file()]
@@ -413,6 +615,12 @@ def validate_binding(value: dict) -> None:
         or re.fullmatch(r"[0-9a-f]{40}", str(value.get("revision"))) is None
     ):
         raise epoch.Rejected("EXACT_SINGLE_NONTRADING_BOOT_BINDING_REQUIRED")
+    if GENERATION == "r7dns":
+        expected_admission = r7dns_admission_binding()
+        if value.get("r7dns_admission") != expected_admission:
+            raise epoch.Rejected("EXACT_R7DNS_ADMISSION_BINDING_REQUIRED")
+    elif "r7dns_admission" in value:
+        raise epoch.Rejected("R7DNS_ADMISSION_MUST_BE_EXPLICITLY_SELECTED")
     sources = value.get("source_files")
     inputs = value.get("inputs")
     if (
@@ -442,6 +650,7 @@ def validate_binding(value: dict) -> None:
 
 def create_binding(revision: str) -> Path:
     verify_source(revision)
+    admission = r7dns_admission_binding() if GENERATION == "r7dns" else None
     if fresh.sha(SERVE_WORK / RECEIPT_NAME) != PARENT_RECEIPT_SHA256:
         raise epoch.Rejected("ACCEPTED_EPOCH_PARENT_RECEIPT_REQUIRED")
     epoch._private_directory(ROOT)
@@ -465,6 +674,8 @@ def create_binding(revision: str) -> Path:
         "containers": CONTAINERS,
         "parent_receipt_sha256": PARENT_RECEIPT_SHA256,
     }
+    if admission is not None:
+        value["r7dns_admission"] = admission
     validate_binding(value)
     fresh.save(path, value)
     return path
@@ -501,6 +712,8 @@ class BootController(epoch.EpochController):
         super().__init__(*args, **kwargs)
         if GENERATION in {"r2", "r4", "r5", "r6", "r7"}:
             self.names["serve"] += "-" + GENERATION
+        elif GENERATION == "r7dns":
+            self.names["serve"] += "-r7-dns-b0a90145"
         if GENERATION == "r2":
             # Original unverified restore resources remain retained and stopped.
             # Reuse only the separate, previously verified disposable names.
@@ -519,6 +732,10 @@ class BootController(epoch.EpochController):
             # R7's accepted verification used transport08; transport07 remains retained.
             self.names["restore_pg"] += "-transport08"
             self.names["restore_volume"] += "-transport08"
+        elif GENERATION == "r7dns":
+            # Reuse the accepted run's nonce namespace, admitted by both validators.
+            self.names["restore_pg"] += "-reviewed-b0a90145"
+            self.names["restore_volume"] += "-reviewed-b0a90145"
 
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
@@ -713,7 +930,7 @@ class BootController(epoch.EpochController):
         if state == "running":
             if GENERATION == "r6":
                 validate_r6_lifecycle_status(previous)
-            elif GENERATION == "r7":
+            elif GENERATION in {"r7", "r7dns"}:
                 validate_r7_lifecycle_status(previous)
             else:
                 epoch.validate_running_status(previous, OWNER)
@@ -735,7 +952,7 @@ class BootController(epoch.EpochController):
         if (
             previous.get("state") != "RUNNING_NONTRADING"
             and not (
-                GENERATION in {"r6", "r7"}
+                GENERATION in {"r6", "r7", "r7dns"}
                 and previous.get("state")
                 in {"WAITING_SOURCE_NONTRADING", "CATCHING_UP_NONTRADING"}
             )
@@ -749,7 +966,7 @@ class BootController(epoch.EpochController):
             validate_r6_lifecycle_status(
                 previous, now_ms=int(observed.timestamp() * 1000)
             )
-        elif GENERATION == "r7":
+        elif GENERATION in {"r7", "r7dns"}:
             validate_r7_lifecycle_status(
                 previous, now_ms=int(observed.timestamp() * 1000)
             )
@@ -893,7 +1110,7 @@ def main(argv=None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--generation",
-        choices=("original", "r2", "r4", "r5", "r6", "r7"),
+        choices=("original", "r2", "r4", "r5", "r6", "r7", "r7dns"),
         default="original",
     )
     parser.add_argument("--binding", type=Path)
@@ -910,6 +1127,8 @@ def main(argv=None) -> int:
         configure_generation_r6()
     elif args.generation == "r7":
         configure_generation_r7()
+    elif args.generation == "r7dns":
+        configure_generation_r7dns()
     args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None
