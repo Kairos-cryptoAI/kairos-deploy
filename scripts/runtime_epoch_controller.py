@@ -425,42 +425,52 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
         "boot-verify-restore",
         "incident-verify-restore",
     } and (
-        value["restore_host"]
-        not in {
-            "kairos-epoch-" + value["owner"][:12] + "-restore",
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-incident03"}
-                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
-                else set()
-            ),
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport03"}
-                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
-                else set()
-            ),
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport04"}
-                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
-                else set()
-            ),
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport05"}
-                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
-                else set()
-            ),
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport06"}
-                if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
-                else set()
-            ),
-            *(
-                {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport07"}
-                | {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport08"}
-                if value["owner"] == CONTINUATION_OWNER
-                and mode == "boot-verify-restore"
-                else set()
-            ),
-        }
+        (
+            value["restore_host"]
+            not in {
+                "kairos-epoch-" + value["owner"][:12] + "-restore",
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-incident03"}
+                    if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport03"}
+                    if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport04"}
+                    if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport05"}
+                    if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport06"}
+                    if value["owner"] == CONTINUATION_OWNER and mode != "verify-restore"
+                    else set()
+                ),
+                *(
+                    {"kairos-epoch-" + CONTINUATION_OWNER[:12] + "-restore-transport07"}
+                    | {
+                        "kairos-epoch-"
+                        + CONTINUATION_OWNER[:12]
+                        + "-restore-transport08"
+                    }
+                    if value["owner"] == CONTINUATION_OWNER
+                    and mode == "boot-verify-restore"
+                    else set()
+                ),
+            }
+            and not (
+                mode == "boot-verify-restore"
+                and _reviewed_boot_restore_host(value["owner"], value["restore_host"])
+            )
+        )
         or value["restore_database"]
         != "kairos_recovery_" + value["owner"][:12] + "_epochrestore"
         or not isinstance(value["expected_seed"], dict)
@@ -493,6 +503,14 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
     ):
         raise Rejected("EXACT_INCIDENT_TARGET_REQUIRED")
     return value
+
+
+def _reviewed_boot_restore_host(owner: object, host: object) -> bool:
+    if __package__:
+        from scripts.runtime_epoch_worker import is_reviewed_boot_restore_host
+    else:
+        from runtime_epoch_worker import is_reviewed_boot_restore_host
+    return is_reviewed_boot_restore_host(owner, host)
 
 
 def validate_worker_tmpfs(value: object) -> dict:
@@ -1371,7 +1389,19 @@ class EpochController:
         end = min(time.monotonic() + seconds, self.deadline - 30)
         while time.monotonic() < end:
             result = self.docker(
-                ["exec", name, "pg_isready", "-U", "kairos", "-d", "postgres"],
+                [
+                    "exec",
+                    name,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    "5432",
+                    "-U",
+                    "kairos",
+                    "-d",
+                    "postgres",
+                ],
                 seconds=5,
                 allow_failure=True,
             )

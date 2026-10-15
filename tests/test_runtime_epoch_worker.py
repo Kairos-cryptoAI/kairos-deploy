@@ -37,6 +37,23 @@ def _catchup_config(**changes):
 
 
 class WorkerConfigTests(unittest.TestCase):
+    def test_reviewed_restore_clone_names_are_exact_epoch_and_nonce_scoped(self):
+        owner = "69893dc7b7c647f49967387e7efca9fb"
+        good = "kairos-epoch-69893dc7b7c6-restore-reviewed-0123abcd"
+        self.assertTrue(worker.is_reviewed_boot_restore_host(owner, good))
+        for invalid_owner, host in (
+            (OWNER, good),
+            (owner, good + "-extra"),
+            (owner, good[:-1]),
+            (owner, good.replace("0123abcd", "arbitrary")),
+            (owner, None),
+            (owner, "kairos-paper-gate-timescaledb-1"),
+        ):
+            with self.subTest(owner=invalid_owner, host=host):
+                self.assertFalse(
+                    worker.is_reviewed_boot_restore_host(invalid_owner, host)
+                )
+
     @staticmethod
     def _seed_config(**changes):
         value = {

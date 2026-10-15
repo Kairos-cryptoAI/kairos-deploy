@@ -300,41 +300,44 @@ def validate_config(value: dict, mode: str) -> None:
                 "restore_admin_password",
                 "expected_seed",
             }
-            or value.get("restore_host")
-            not in {
-                "kairos-epoch-" + owner[:12] + "-restore",
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-incident03"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-transport03"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-transport04"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-transport05"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-transport06"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-                *(
-                    {"kairos-epoch-69893dc7b7c6-restore-transport07"}
-                    | {"kairos-epoch-69893dc7b7c6-restore-transport08"}
-                    if owner == "69893dc7b7c647f49967387e7efca9fb"
-                    else set()
-                ),
-            }
+            or (
+                value.get("restore_host")
+                not in {
+                    "kairos-epoch-" + owner[:12] + "-restore",
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-incident03"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-transport03"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-transport04"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-transport05"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-transport06"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                    *(
+                        {"kairos-epoch-69893dc7b7c6-restore-transport07"}
+                        | {"kairos-epoch-69893dc7b7c6-restore-transport08"}
+                        if owner == "69893dc7b7c647f49967387e7efca9fb"
+                        else set()
+                    ),
+                }
+                and not is_reviewed_boot_restore_host(owner, value.get("restore_host"))
+            )
             or value.get("restore_database")
             != "kairos_recovery_" + owner[:12] + "_epochrestore"
         ):
@@ -421,6 +424,23 @@ def dsn(config: dict, role: str) -> str:
         "kairos_epoch_consumer": "consumer_password",
     }[role]
     return f"postgresql://{role}:{quote(config[key], safe='')}@{config['pg_host']}:5432/{config['database']}"
+
+
+def is_reviewed_boot_restore_host(owner: object, host: object) -> bool:
+    """Fresh clone names for reviewed operations on the one admitted epoch.
+
+    This admits no resource by itself: the operator must still prove absence,
+    ownership, mounts and an exact independently restored database snapshot.
+    Retained failed clones therefore never need to be removed or overwritten.
+    """
+    return (
+        owner == "69893dc7b7c647f49967387e7efca9fb"
+        and isinstance(host, str)
+        and re.fullmatch(
+            r"kairos-epoch-69893dc7b7c6-restore-reviewed-[0-9a-f]{8}", host
+        )
+        is not None
+    )
 
 
 async def connect(config: dict, role: str):

@@ -90,6 +90,26 @@ def config(mode: str, **overrides: object) -> dict:
 
 
 class RuntimeEpochControllerTests(unittest.TestCase):
+    def test_fresh_reviewed_clone_is_only_admitted_for_owned_boot_restore(self):
+        owner = epoch.CONTINUATION_OWNER
+        value = config(
+            "verify-restore",
+            owner=owner,
+            database="kairos_epoch_" + owner[:12],
+            pg_host="kairos-epoch-" + owner[:12] + "-pg",
+            redis_host="kairos-epoch-" + owner[:12] + "-redis",
+            restore_host="kairos-epoch-" + owner[:12] + "-restore-reviewed-0123abcd",
+            restore_database="kairos_recovery_" + owner[:12] + "_epochrestore",
+        )
+        epoch.validate_worker_config(value, mode="boot-verify-restore")
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_config(value, mode="verify-restore")
+        with self.assertRaises(epoch.Rejected):
+            epoch.validate_worker_config(
+                {**value, "restore_host": value["restore_host"] + "-extra"},
+                mode="boot-verify-restore",
+            )
+
     def test_metadata_digest_ignores_only_mount_enumeration_order(self):
         view = {
             "id": "a" * 64,
@@ -123,6 +143,62 @@ class RuntimeEpochControllerTests(unittest.TestCase):
         ):
             with self.subTest(mounts=mounts), self.assertRaises(epoch.Rejected):
                 epoch.normalize_container_metadata({"mounts": mounts})
+
+    def test_wait_postgres_requires_tcp_acceptance_not_init_socket_readiness(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.deadline = 1_000
+        polls = iter(
+            (
+                "127.0.0.1:5432 - no response",
+                "127.0.0.1:5432 - rejecting connections",
+                "127.0.0.1:5432 - accepting connections",
+            )
+        )
+        commands = []
+
+        def docker(args, **kwargs):
+            commands.append((args, kwargs))
+            return next(polls)
+
+        controller.docker = docker
+        with (
+            patch.object(epoch.time, "monotonic", return_value=100),
+            patch.object(epoch.time, "sleep") as sleep,
+        ):
+            controller.wait_postgres("exact-restore-container", seconds=20)
+
+        expected = [
+            "exec",
+            "exact-restore-container",
+            "pg_isready",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            "5432",
+            "-U",
+            "kairos",
+            "-d",
+            "postgres",
+        ]
+        self.assertEqual([args for args, _kwargs in commands], [expected] * 3)
+        self.assertTrue(all(kwargs["allow_failure"] for _args, kwargs in commands))
+        self.assertTrue(all(kwargs["seconds"] == 5 for _args, kwargs in commands))
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 2])
+
+    def test_wait_postgres_respects_global_deadline_without_polling(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.deadline = 129
+        controller.docker = lambda *_args, **_kwargs: self.fail(
+            "readiness command must not start inside the deadline safety margin"
+        )
+        with (
+            patch.object(epoch.time, "monotonic", return_value=100),
+            patch.object(epoch.time, "sleep") as sleep,
+            self.assertRaisesRegex(epoch.Rejected, "NEW_POSTGRES_READINESS_TIMEOUT"),
+        ):
+            controller.wait_postgres("exact-restore-container", seconds=120)
+        sleep.assert_not_called()
 
     def test_attempt_02_initializer_has_fowner_and_tmpfs_for_image_pg_volume(self):
         controller = epoch.EpochController.__new__(epoch.EpochController)
