@@ -85,6 +85,39 @@ CONTROLLED_RUNTIME_PUBLIC_TABLES = (
     "source_cursors",
     "source_usage_reservations",
 )
+# Keep the source scan narrow: the materialized CTE contains only grouping and
+# primary-key columns, while the five selected payloads are joined by audit PK.
+ANCHORS_SQL = """
+WITH matching AS MATERIALIZED (
+    SELECT payload->>'symbol' AS symbol,
+           (payload->>'open_time_ms')::bigint AS open_ms,
+           produced_at,
+           message_id
+    FROM public.event_audit
+    WHERE topic = $1
+      AND source = $2
+      AND payload->>'symbol' = ANY($3::text[])
+), stats AS (
+    SELECT symbol,
+           count(*) AS n,
+           count(DISTINCT open_ms) AS u,
+           min(open_ms) AS lo,
+           max(open_ms) AS hi
+    FROM matching
+    GROUP BY symbol
+), latest AS (
+    SELECT DISTINCT ON (symbol) symbol, produced_at, message_id
+    FROM matching
+    ORDER BY symbol, open_ms DESC, produced_at DESC, message_id DESC
+)
+SELECT stats.symbol, stats.n, stats.u, stats.lo, stats.hi, audit.payload
+FROM stats
+JOIN latest USING (symbol)
+JOIN public.event_audit AS audit
+  ON audit.produced_at = latest.produced_at
+ AND audit.message_id = latest.message_id
+ORDER BY stats.symbol
+""".strip()
 MODES = (
     "prepare",
     "seed",
@@ -1431,30 +1464,34 @@ async def verify_restore(config: dict) -> dict:
 async def anchors(pool) -> dict:
     from kairos_core.contracts import ClosedBarEventV1
 
-    result = {}
     async with pool.acquire() as connection:
-        for symbol in SYMBOLS:
-            checks = await connection.fetchrow(
-                """WITH b AS (SELECT (payload->>'open_time_ms')::bigint t FROM event_audit WHERE topic=$1 AND source=$2 AND payload->>'symbol'=$3) SELECT count(*) n,count(DISTINCT t) u,min(t) lo,max(t) hi FROM b""",
-                TOPIC,
-                SOURCE,
-                symbol,
-            )
-            if (
-                not checks["n"]
-                or checks["n"] != checks["u"]
-                or checks["hi"] - checks["lo"] != (checks["n"] - 1) * MINUTE
-            ):
-                raise EpochError("FIVE_UNIQUE_CONTIGUOUS_CHAINS_REQUIRED")
-            raw = await connection.fetchval(
-                "SELECT payload FROM event_audit WHERE topic=$1 AND source=$2 AND payload->>'symbol'=$3 ORDER BY (payload->>'open_time_ms')::bigint DESC LIMIT 1",
-                TOPIC,
-                SOURCE,
-                symbol,
-            )
-            result[symbol] = ClosedBarEventV1.model_validate(
-                json.loads(raw) if isinstance(raw, str) else raw
-            )
+        rows = await connection.fetch(ANCHORS_SQL, TOPIC, SOURCE, list(SYMBOLS))
+
+    # Validate the complete chain summary before parsing any model payload.
+    symbols = [row["symbol"] for row in rows]
+    if (
+        len(rows) != len(SYMBOLS)
+        or len(set(symbols)) != len(SYMBOLS)
+        or set(symbols) != set(SYMBOLS)
+    ):
+        raise EpochError("FIVE_UNIQUE_CONTIGUOUS_CHAINS_REQUIRED")
+    for row in rows:
+        if (
+            not row["n"]
+            or row["n"] != row["u"]
+            or row["hi"] - row["lo"] != (row["n"] - 1) * MINUTE
+        ):
+            raise EpochError("FIVE_UNIQUE_CONTIGUOUS_CHAINS_REQUIRED")
+
+    result = {}
+    for row in rows:
+        raw = row["payload"]
+        event = ClosedBarEventV1.model_validate(
+            json.loads(raw) if isinstance(raw, str) else raw
+        )
+        if event.symbol != row["symbol"]:
+            raise EpochError("FIVE_UNIQUE_CONTIGUOUS_CHAINS_REQUIRED")
+        result[row["symbol"]] = event
     return result
 
 
