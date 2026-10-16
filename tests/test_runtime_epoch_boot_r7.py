@@ -532,6 +532,20 @@ class R7BootTests(unittest.TestCase):
                     **receipt,
                     "restart_status": {**status, "state": "FAILED_CLOSED"},
                 },
+                *(
+                    {
+                        **receipt,
+                        "root_adjudication": {
+                            **receipt["root_adjudication"],
+                            "verification_work": path,
+                        },
+                    }
+                    for path in (
+                        "relative-proof",
+                        "C:/foreign/proof",
+                        str(boot.R7SQL_WORK.parent / ".." / "outside-proof"),
+                    )
+                ),
             ):
                 with self.subTest(state=invalid.get("state")), self.assertRaises(
                     boot.epoch.Rejected

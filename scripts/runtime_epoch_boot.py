@@ -16,7 +16,7 @@ import subprocess
 import time
 import uuid
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 if __package__:
     from scripts import runtime_epoch_controller as epoch
@@ -610,15 +610,19 @@ def validate_r7sql_admission_receipt(value: object) -> dict:
             for key in ("failure_sha256", "helper_sha256")
         )
         or not isinstance(root_adjudication.get("verification_work"), str)
-        or not Path(root_adjudication["verification_work"]).is_absolute()
+        or not PureWindowsPath(root_adjudication["verification_work"]).is_absolute()
     ):
         raise epoch.Rejected("R7SQL_EXACT_NONTRADING_ADMISSION_REQUIRED")
     try:
-        verification_work = Path(root_adjudication["verification_work"])
-        verification_work.relative_to(R7SQL_WORK.parent)
+        verification_work = PureWindowsPath(root_adjudication["verification_work"])
+        if ".." in verification_work.parts:
+            raise ValueError("parent traversal")
+        verification_work.relative_to(PureWindowsPath(R7SQL_WORK.parent))
     except ValueError:
         raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED") from None
-    if verification_work == R7SQL_WORK.parent or verification_work == R7SQL_WORK:
+    if verification_work in {
+        PureWindowsPath(R7SQL_WORK.parent), PureWindowsPath(R7SQL_WORK)
+    }:
         raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED")
     for anchor in value["old_audit_prefix_by_symbol"].values():
         if (
