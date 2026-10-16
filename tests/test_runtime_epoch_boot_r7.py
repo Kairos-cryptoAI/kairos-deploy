@@ -6,6 +6,7 @@ import contextlib
 import io
 import unittest
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from unittest.mock import patch
 
 from scripts import runtime_epoch_boot as boot
@@ -524,6 +525,19 @@ class R7BootTests(unittest.TestCase):
         receipt.update({key: "c" * 64 for key in hashes})
         with patch.object(boot, "R7SQL_SERVE_ID", "d" * 64):
             self.assertIs(boot.validate_r7sql_admission_receipt(receipt), receipt)
+            # Python 3.11 handles a foreign-flavour Path object's parts
+            # differently from its string; reproduce the Linux case on Windows.
+            portable_work = PurePosixPath(boot.R7SQL_WORK.as_posix())
+            portable_receipt = {
+                **receipt,
+                "work_directory": str(portable_work),
+                "root_adjudication": {
+                    **receipt["root_adjudication"],
+                    "verification_work": str(portable_work.parent / "verification-test"),
+                },
+            }
+            with patch.object(boot, "R7SQL_WORK", portable_work):
+                self.assertIs(boot.validate_r7sql_admission_receipt(portable_receipt), portable_receipt)
             for invalid in (
                 {**receipt, "state": "INCOMPLETE"},
                 {**receipt, "trading_started": True},

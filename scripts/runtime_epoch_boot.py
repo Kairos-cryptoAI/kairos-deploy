@@ -617,11 +617,11 @@ def validate_r7sql_admission_receipt(value: object) -> dict:
         verification_work = PureWindowsPath(root_adjudication["verification_work"])
         if ".." in verification_work.parts:
             raise ValueError("parent traversal")
-        verification_work.relative_to(PureWindowsPath(R7SQL_WORK.parent))
+        verification_work.relative_to(PureWindowsPath(str(R7SQL_WORK.parent)))
     except ValueError:
         raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED") from None
     if verification_work in {
-        PureWindowsPath(R7SQL_WORK.parent), PureWindowsPath(R7SQL_WORK)
+        PureWindowsPath(str(R7SQL_WORK.parent)), PureWindowsPath(str(R7SQL_WORK))
     }:
         raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED")
     for anchor in value["old_audit_prefix_by_symbol"].values():
