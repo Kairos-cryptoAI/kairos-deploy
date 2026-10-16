@@ -331,6 +331,213 @@ class R7BootTests(unittest.TestCase):
             self.assertEqual(boot.LEASE, boot.ROOT / "boot.active")
             self.assertNotEqual(boot.ROOT, old_root)
 
+    def test_r7sql_is_separate_and_closed_until_receipt_signature_and_id_are_pinned(self):
+        names = (
+            "ROOT", "SERVE_WORK", "SCOPE", "GENERATION", "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256", "CONTAINERS", "LEASE",
+        )
+        with contextlib.ExitStack() as stack:
+            for name in names:
+                stack.enter_context(patch.object(boot, name, getattr(boot, name)))
+            for name in ("R7SQL_RECEIPT_SHA256", "R7SQL_SIGNATURE_SHA256", "R7SQL_SERVE_ID"):
+                stack.enter_context(patch.object(boot, name, None))
+            boot.configure_generation_r7sql()
+            self.assertEqual(boot.GENERATION, "r7sql")
+            self.assertEqual(
+                boot.ROOT.as_posix(), "D:/Kairos/runtime/epoch-boot-r7sql-20261016"
+            )
+            self.assertEqual(
+                boot.SERVE_WORK.as_posix(),
+                "D:/Kairos/runtime/runtime-sql-recovery-20261016/"
+                "work-b45eda59250048a6b376f625be82febe",
+            )
+            self.assertEqual(
+                boot.SCOPE, "kairos-nontrading-runtime-epoch-boot-r7sql-v1"
+            )
+            self.assertEqual(
+                boot.RECEIPT_NAME, "controlled-continuation-receipt.json"
+            )
+            self.assertIsNone(boot.PARENT_RECEIPT_SHA256)
+            self.assertIsNone(boot.CONTAINERS["serve"])
+            self.assertEqual(
+                boot.R7SQL_OLD_FAILED_STATUS_SHA256,
+                "3ca166304a0a083c9c234dd3f7a2f589ebd8df4d7fa58891cbed5ff8824d911c",
+            )
+            self.assertEqual(
+                boot.R7SQL_OLD_FAILED_STATUS_PATH.as_posix(),
+                "D:/Kairos/runtime/runtime-dns-recovery-20261015/"
+                "preflight-b0a90145752d4b1486a466125afbc131/output-serve/status.json",
+            )
+            with self.assertRaisesRegex(
+                boot.epoch.Rejected, "R7SQL_ACCEPTED_EVIDENCE_PIN_REQUIRED"
+            ):
+                boot.validate_r7sql_admission_files()
+
+    def test_r7sql_keeps_the_old_timeout_status_hash_and_failure_latch_frozen(self):
+        global_names = (
+            "ROOT", "SERVE_WORK", "SCOPE", "GENERATION", "RECEIPT_NAME",
+            "PARENT_RECEIPT_SHA256", "CONTAINERS", "LEASE",
+        )
+        with contextlib.ExitStack() as stack:
+            for name in global_names:
+                stack.enter_context(patch.object(boot, name, getattr(boot, name)))
+            boot.configure_generation_r7sql()
+            self._assert_r7sql_old_timeout_latch()
+
+    def _assert_r7sql_old_timeout_latch(self):
+        old_status = {
+            "state": "FAILED_CLOSED",
+            "error_type": "TimeoutError",
+            "trading_started": False,
+        }
+        receipt_path = boot.R7SQL_WORK / boot.R7SQL_RECEIPT_NAME
+        signature_path = boot.R7SQL_WORK / (boot.R7SQL_RECEIPT_NAME + ".asc")
+        old_config_path = boot.R7DNS_WORK / "config-serve.json"
+        path_hashes = {
+            receipt_path.as_posix(): "a" * 64,
+            signature_path.as_posix(): "b" * 64,
+            boot.R7SQL_OLD_FAILED_STATUS_PATH.as_posix(): boot.R7SQL_OLD_FAILED_STATUS_SHA256,
+            old_config_path.as_posix(): boot.R7DNS_CONFIG_SHA256,
+        }
+
+        def read_json(path, **_kwargs):
+            return old_status if path == boot.R7SQL_OLD_FAILED_STATUS_PATH else None
+
+        with (
+            patch.object(boot, "GENERATION", "r7sql"),
+            patch.object(boot, "R7SQL_RECEIPT_SHA256", "a" * 64),
+            patch.object(boot, "R7SQL_SIGNATURE_SHA256", "b" * 64),
+            patch.object(boot, "R7SQL_SERVE_ID", "c" * 64),
+            patch.object(boot.fresh, "safe", side_effect=lambda path: path),
+            patch.object(
+                boot.fresh,
+                "sha",
+                side_effect=lambda path: path_hashes[path.as_posix()],
+            ),
+            patch.object(boot, "read_json", side_effect=read_json),
+            self.assertRaisesRegex(
+                boot.epoch.Rejected, "R7SQL_ACCEPTED_RECEIPT_REQUIRED"
+            ),
+        ):
+            boot.validate_r7sql_admission_files()
+
+        old_status["error_type"] = "OtherError"
+        with (
+            patch.object(boot, "GENERATION", "r7sql"),
+            patch.object(boot, "R7SQL_RECEIPT_SHA256", "a" * 64),
+            patch.object(boot, "R7SQL_SIGNATURE_SHA256", "b" * 64),
+            patch.object(boot, "R7SQL_SERVE_ID", "c" * 64),
+            patch.object(boot.fresh, "safe", side_effect=lambda path: path),
+            patch.object(
+                boot.fresh,
+                "sha",
+                side_effect=lambda path: path_hashes[path.as_posix()],
+            ),
+            patch.object(boot, "read_json", side_effect=read_json),
+            self.assertRaisesRegex(
+                boot.epoch.Rejected,
+                "R7SQL_OLD_FAILED_TIMEOUT_LATCH_MUST_REMAIN_FROZEN",
+            ),
+        ):
+            boot.validate_r7sql_admission_files()
+
+    def test_r7sql_receipt_requires_exact_pass_and_nontrading_shape(self):
+        from scripts.runtime_epoch_boot import R7SQL_SERVE_NAME
+
+        status = accepted_status()
+        status.pop("source_fresh")
+        status["cycles"] = 12
+        pair = {
+            "path": boot.R7SQL_PAIRED_RECEIPT_PATH,
+            "sha256": boot.R7SQL_PAIRED_RECEIPT_SHA256,
+            "worker_receipt_path": "D:/Kairos/runtime/runtime-sql-recovery-20261016/"
+            "paired-36ec9b02e35a4d96a1e402611b8a7307/worker-output/exact-queue-drill.json",
+            "worker_receipt_sha256": "a" * 64,
+        }
+        hashes = (
+            "boot_controller_sha256", "epoch_controller_sha256",
+            "new_sql_after_backup_sha256",
+            "operator_snapshot_sha256", "quant_snapshot_sha256",
+            "worker_config_sha256", "serve_stop_receipt_sha256",
+        )
+        receipt = {
+            "schema_version": 1,
+            "state": "PASS_NONTRADING_SQL_CONTINUATION",
+            "run_id": boot.R7SQL_WORK.name.removeprefix("work-"),
+            "owner": boot.OWNER,
+            "work_directory": str(boot.R7SQL_WORK),
+            "deploy_root": str(boot.epoch.REPO),
+            "deploy_revision": boot.R7SQL_SOURCE_REVISION,
+            "worker_sha256": boot.R7SQL_WORKER_SHA256,
+            "paired_clone_receipt": pair,
+            "new_serve_name": R7SQL_SERVE_NAME,
+            "new_serve_id": "d" * 64,
+            "old_failed_container_id": boot.R7DNS_SERVE_ID,
+            "old_failed_status_sha256": boot.R7SQL_OLD_FAILED_STATUS_SHA256,
+            "accepted_old_config_sha256": boot.R7DNS_CONFIG_SHA256,
+            "accepted_source_snapshot_sha256": boot.R7SQL_SOURCE_SNAPSHOT_SHA256,
+            "accepted_dump_sha256": boot.R7SQL_SOURCE_DUMP_SHA256,
+            "fresh_redis_adjudication": {
+                "work": str(
+                    boot.R7SQL_WORK.parent
+                    / "redis-read-4caa1dd790034c09a75c4aa2981e5f2d"
+                ),
+                "receipt_sha256": "e" * 64,
+                "evidence_sha256": "f" * 64,
+            },
+            "legacy_unchanged": True,
+            "required_gap_bars_at_admission": 1,
+            "preserved_queue_rows_sha256": {
+                "kind": "preserved",
+                "outbox_count": 8600,
+                "outbox_sha256": "c" * 64,
+                "inbox_count": 8600,
+                "inbox_sha256": "d" * 64,
+            },
+            "old_audit_prefix_by_symbol": {
+                symbol: {"rows": 1, "sha256": "b" * 64}
+                for symbol in boot.epoch.SYMBOLS
+            },
+            "five_symbol_fresh_progress_proven": True,
+            "all_native_queue_rows_caught_up": True,
+            "execution_rows_after": 0,
+            "trading_started": False,
+            "orders_submitted": 0,
+            "paid_calls": 0,
+            "primary_migration": False,
+            "automatic_retry": False,
+            "readiness": {
+                "PAPER_QUALIFIED": False,
+                "ALPHA_READY": False,
+                "LIVE_READY": False,
+            },
+            "root_adjudication": {
+                "failure_sha256": "1" * 64,
+                "helper_sha256": "2" * 64,
+                "verification_work": str(
+                    boot.R7SQL_WORK.parent / "verification-test"
+                ),
+            },
+            "serve_status": status,
+            "restart_status": dict(status),
+        }
+        receipt.update({key: "c" * 64 for key in hashes})
+        with patch.object(boot, "R7SQL_SERVE_ID", "d" * 64):
+            self.assertIs(boot.validate_r7sql_admission_receipt(receipt), receipt)
+            for invalid in (
+                {**receipt, "state": "INCOMPLETE"},
+                {**receipt, "trading_started": True},
+                {**receipt, "new_serve_name": boot.R7DNS_SERVE_NAME},
+                {
+                    **receipt,
+                    "restart_status": {**status, "state": "FAILED_CLOSED"},
+                },
+            ):
+                with self.subTest(state=invalid.get("state")), self.assertRaises(
+                    boot.epoch.Rejected
+                ):
+                    boot.validate_r7sql_admission_receipt(invalid)
+
     def test_r7dns_admits_only_the_exact_nontrading_receipt(self):
         value = accepted_r7dns_receipt()
         self.assertIs(boot.validate_r7dns_admission_receipt(value), value)
@@ -491,6 +698,27 @@ class R7BootTests(unittest.TestCase):
             mode="boot-verify-restore",
         )
 
+    def test_r7sql_uses_exact_nonce_bound_serve_and_restore_names(self):
+        def initialize(controller, *_args, **_kwargs):
+            controller.names = boot.epoch.resource_names(boot.OWNER)
+
+        with (
+            patch.object(boot, "GENERATION", "r7sql"),
+            patch.object(boot.epoch.EpochController, "__init__", new=initialize),
+        ):
+            controller = boot.BootController(
+                boot.OWNER, expected_revision="a" * 40
+            )
+        self.assertEqual(controller.names["serve"], boot.R7SQL_SERVE_NAME)
+        self.assertEqual(
+            controller.names["restore_pg"],
+            "kairos-epoch-69893dc7b7c6-restore-reviewed-b45eda59",
+        )
+        self.assertEqual(
+            controller.names["restore_volume"],
+            "kairos-epoch-69893dc7b7c6-restore-data-reviewed-b45eda59",
+        )
+
     def test_r7dns_controller_mounts_the_receipt_bound_workdir(self):
         def initialize(controller, *_args, **_kwargs):
             controller.names = boot.epoch.resource_names(boot.OWNER)
@@ -596,6 +824,27 @@ class R7BootTests(unittest.TestCase):
         docker.assert_not_called()
         phase.assert_not_called()
 
+    def test_already_running_r7sql_is_validated_without_restart_or_mutation(self):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.proofs = {}
+        value = accepted_status()
+        resources = {
+            "standby": {"left_untouched": True},
+            "views": {key: {"state": {"Status": "running"}} for key in boot.CONTAINERS},
+        }
+        with (
+            patch.object(boot, "GENERATION", "r7sql"),
+            patch.object(controller, "validate_resources", return_value=resources),
+            patch.object(boot, "read_json", return_value=value),
+            patch.object(controller, "docker") as docker,
+            patch.object(controller, "phase") as phase,
+        ):
+            result = controller.run_boot()
+        self.assertEqual(result["result"], "ALREADY_RUNNING_NONTRADING")
+        self.assertIs(result["status"], value)
+        docker.assert_not_called()
+        phase.assert_not_called()
+
     def test_r7dns_recognizes_only_admitted_dns_pause_not_failed_latch(self):
         waiting = {
             **accepted_status(),
@@ -628,6 +877,16 @@ class R7BootTests(unittest.TestCase):
             self.assertEqual(boot.main([]), 0)
             configure.assert_not_called()
             self.assertEqual(boot.main(["--generation", "r7dns"]), 0)
+            configure.assert_called_once_with()
+
+    def test_explicit_r7sql_cli_is_opt_in(self):
+        with (
+            patch.object(boot, "configure_generation_r7sql") as configure,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(boot.main([]), 0)
+            configure.assert_not_called()
+            self.assertEqual(boot.main(["--generation", "r7sql"]), 0)
             configure.assert_called_once_with()
 
 

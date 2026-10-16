@@ -85,6 +85,38 @@ R7DNS_OPERATOR_SNAPSHOT_SHA256 = (
 R7DNS_QUANT_SNAPSHOT_SHA256 = (
     "285aaf8ec7961c2bd58a88454f4529f9c2c321457bfad5a5bc900061a702ab72"
 )
+# Reviewed SQL continuation: exact signed receipt, failed-wrapper adjudication,
+# and serving identity are independent of the retained DNS generation.
+R7SQL_WORK = Path(
+    "D:/Kairos/runtime/runtime-sql-recovery-20261016/"
+    "work-b45eda59250048a6b376f625be82febe"
+)
+R7SQL_RECEIPT_SHA256 = "6d2e855c4804dfaffdfab91e604ab9f13e634b553824bd05dde3fa724e161c74"
+R7SQL_SIGNATURE_SHA256 = "72491a955dd7a616143673e1d3958b386a9b2201b709940321977849d9e99161"
+R7SQL_SERVE_ID = "2cfadb6fe53a58639db6c74bbdd31d993fe7bc05f817668979a8bee407021a83"
+R7SQL_RECEIPT_NAME = "controlled-continuation-receipt.json"
+R7SQL_SERVE_NAME = "kairos-epoch-69893dc7b7c6-serve-r7-sql-b45eda59"
+R7SQL_SOURCE_REVISION = "682d8e237d0046371717981728aa23199fbb2d86"
+R7SQL_WORKER_SHA256 = (
+    "5d9389b05b43ccf69ae8e2afff562a659d50a02f7ea00689078919e04ed1103b"
+)
+R7SQL_OLD_FAILED_STATUS_PATH = R7DNS_WORK / "output-serve/status.json"
+R7SQL_OLD_FAILED_STATUS_SHA256 = (
+    "3ca166304a0a083c9c234dd3f7a2f589ebd8df4d7fa58891cbed5ff8824d911c"
+)
+R7SQL_PAIRED_RECEIPT_PATH = (
+    "D:/Kairos/runtime/runtime-sql-recovery-20261016/"
+    "paired-36ec9b02e35a4d96a1e402611b8a7307/adjudicated-receipt.json"
+)
+R7SQL_PAIRED_RECEIPT_SHA256 = (
+    "3c0976d9c4f50ec720cf03c818ceb41dd36d2a3fce12183cb6fb42c610c007ea"
+)
+R7SQL_SOURCE_SNAPSHOT_SHA256 = (
+    "46b2eb6b3beca5ee87ee41d91c4ffa66632c34fa5128ea4bfa579b9dd9fb4072"
+)
+R7SQL_SOURCE_DUMP_SHA256 = (
+    "07630586eaef6e223feff961b35bb189f5d171c53c09368076ffd3f9b5ea2e01"
+)
 MAX_SECONDS = 3600
 LEASE = ROOT / "boot.active"
 STANDBY_NAME = "kairos-shadow-gate-timescaledb-1"
@@ -297,6 +329,24 @@ def configure_generation_r7dns() -> None:
     LEASE = ROOT / "boot.active"
 
 
+def configure_generation_r7sql() -> None:
+    """Bind only the separately accepted non-trading SQL continuation."""
+    global ROOT, SERVE_WORK, SCOPE, GENERATION, RECEIPT_NAME
+    global PARENT_RECEIPT_SHA256, CONTAINERS, LEASE
+    ROOT = Path("D:/Kairos/runtime/epoch-boot-r7sql-20261016")
+    SERVE_WORK = R7SQL_WORK
+    SCOPE = "kairos-nontrading-runtime-epoch-boot-r7sql-v1"
+    GENERATION = "r7sql"
+    RECEIPT_NAME = R7SQL_RECEIPT_NAME
+    PARENT_RECEIPT_SHA256 = R7SQL_RECEIPT_SHA256
+    CONTAINERS = {
+        "pg": epoch.CONTINUATION_04_TARGET_PG_ID,
+        "redis": epoch.CONTINUATION_04_REDIS_ID,
+        "serve": R7SQL_SERVE_ID,
+    }
+    LEASE = ROOT / "boot.active"
+
+
 def validate_r7_lifecycle_status(value: object, *, now_ms: int | None = None) -> dict:
     """Validate R7 status, including only the bounded shared source-pause states."""
     if not isinstance(value, dict) or value.get("trading_started") is not False:
@@ -450,6 +500,236 @@ def r7dns_admission_binding() -> dict:
     }
 
 
+def validate_r7sql_admission_receipt(value: object) -> dict:
+    """Validate the exact non-trading SQL continuation receipt shape/content."""
+    if not isinstance(value, dict):
+        raise epoch.Rejected("R7SQL_ACCEPTED_RECEIPT_REQUIRED")
+    expected_keys = {
+        "schema_version", "state", "run_id", "owner", "work_directory",
+        "deploy_root", "deploy_revision", "worker_sha256", "paired_clone_receipt",
+        "new_serve_name", "new_serve_id", "old_failed_container_id",
+        "old_failed_status_sha256", "accepted_old_config_sha256",
+        "boot_controller_sha256", "epoch_controller_sha256",
+        "accepted_source_snapshot_sha256", "accepted_dump_sha256",
+        "fresh_redis_adjudication", "legacy_unchanged", "new_sql_after_backup_sha256",
+        "required_gap_bars_at_admission", "preserved_queue_rows_sha256",
+        "old_audit_prefix_by_symbol", "operator_snapshot_sha256",
+        "quant_snapshot_sha256", "worker_config_sha256", "serve_status",
+        "serve_stop_receipt_sha256", "restart_status",
+        "five_symbol_fresh_progress_proven", "all_native_queue_rows_caught_up",
+        "execution_rows_after", "trading_started", "orders_submitted", "paid_calls",
+        "primary_migration", "automatic_retry", "readiness", "root_adjudication",
+    }
+    pair = value.get("paired_clone_receipt")
+    readiness = value.get("readiness")
+    root_adjudication = value.get("root_adjudication")
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != 1
+        or value.get("state") != "PASS_NONTRADING_SQL_CONTINUATION"
+        or value.get("run_id") != R7SQL_WORK.name.removeprefix("work-")
+        or value.get("owner") != OWNER
+        or value.get("work_directory") != str(R7SQL_WORK)
+        or not isinstance(value.get("deploy_root"), str)
+        or Path(value["deploy_root"]).as_posix() != epoch.REPO.as_posix()
+        or value.get("deploy_revision") != R7SQL_SOURCE_REVISION
+        or value.get("worker_sha256") != R7SQL_WORKER_SHA256
+        or not isinstance(pair, dict)
+        or set(pair) != {"path", "sha256", "worker_receipt_path", "worker_receipt_sha256"}
+        or not isinstance(pair.get("path"), str)
+        or Path(pair["path"]).as_posix() != Path(R7SQL_PAIRED_RECEIPT_PATH).as_posix()
+        or pair.get("sha256") != R7SQL_PAIRED_RECEIPT_SHA256
+        or not isinstance(pair.get("worker_receipt_path"), str)
+        or not pair["worker_receipt_path"].replace("\\", "/").endswith(
+            "/worker-output/exact-queue-drill.json"
+        )
+        or re.fullmatch(r"[0-9a-f]{64}", str(pair.get("worker_receipt_sha256", ""))) is None
+        or value.get("new_serve_name") != R7SQL_SERVE_NAME
+        or value.get("new_serve_id") != R7SQL_SERVE_ID
+        or value.get("old_failed_container_id") != R7DNS_SERVE_ID
+        or value.get("old_failed_status_sha256") != R7SQL_OLD_FAILED_STATUS_SHA256
+        or value.get("accepted_old_config_sha256") != R7DNS_CONFIG_SHA256
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value.get(key, ""))) is None
+            for key in (
+                "boot_controller_sha256", "epoch_controller_sha256",
+                "accepted_source_snapshot_sha256", "accepted_dump_sha256",
+                "new_sql_after_backup_sha256",
+                "operator_snapshot_sha256", "quant_snapshot_sha256",
+                "worker_config_sha256", "serve_stop_receipt_sha256",
+            )
+        )
+        or value.get("accepted_source_snapshot_sha256") != R7SQL_SOURCE_SNAPSHOT_SHA256
+        or value.get("accepted_dump_sha256") != R7SQL_SOURCE_DUMP_SHA256
+        or type(value.get("required_gap_bars_at_admission")) is not int
+        or not 0 <= value["required_gap_bars_at_admission"] <= epoch.MAX_CATCHUP_BARS
+        or value.get("legacy_unchanged") is not True
+        or value.get("five_symbol_fresh_progress_proven") is not True
+        or value.get("all_native_queue_rows_caught_up") is not True
+        or value.get("execution_rows_after") != 0
+        or value.get("trading_started") is not False
+        or value.get("orders_submitted") != 0
+        or value.get("paid_calls") != 0
+        or value.get("primary_migration") is not False
+        or value.get("automatic_retry") is not False
+        or not isinstance(readiness, dict)
+        or readiness != {"PAPER_QUALIFIED": False, "ALPHA_READY": False, "LIVE_READY": False}
+        or not isinstance(value.get("fresh_redis_adjudication"), dict)
+        or set(value["fresh_redis_adjudication"])
+        != {"work", "receipt_sha256", "evidence_sha256"}
+        or Path(str(value["fresh_redis_adjudication"].get("work", ""))).parent.as_posix()
+        != R7SQL_WORK.parent.as_posix()
+        or re.fullmatch(
+            r"redis-read-[0-9a-f]{32}",
+            Path(str(value["fresh_redis_adjudication"].get("work", ""))).name,
+        ) is None
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value["fresh_redis_adjudication"].get(key, ""))) is None
+            for key in ("receipt_sha256", "evidence_sha256")
+        )
+        or not isinstance(value.get("serve_status"), dict)
+        or not isinstance(value.get("restart_status"), dict)
+        or not isinstance(value.get("preserved_queue_rows_sha256"), dict)
+        or set(value["preserved_queue_rows_sha256"])
+        != {"kind", "outbox_count", "outbox_sha256", "inbox_count", "inbox_sha256"}
+        or value["preserved_queue_rows_sha256"].get("kind") != "preserved"
+        or value["preserved_queue_rows_sha256"].get("outbox_count") != 8600
+        or value["preserved_queue_rows_sha256"].get("inbox_count") != 8600
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(value["preserved_queue_rows_sha256"].get(key, ""))) is None
+            for key in ("outbox_sha256", "inbox_sha256")
+        )
+        or not isinstance(value.get("old_audit_prefix_by_symbol"), dict)
+        or set(value["old_audit_prefix_by_symbol"]) != set(epoch.SYMBOLS)
+        or not isinstance(root_adjudication, dict)
+        or not {"failure_sha256", "helper_sha256", "verification_work"}.issubset(
+            root_adjudication
+        )
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(root_adjudication.get(key, ""))) is None
+            for key in ("failure_sha256", "helper_sha256")
+        )
+        or not isinstance(root_adjudication.get("verification_work"), str)
+        or not Path(root_adjudication["verification_work"]).is_absolute()
+    ):
+        raise epoch.Rejected("R7SQL_EXACT_NONTRADING_ADMISSION_REQUIRED")
+    try:
+        verification_work = Path(root_adjudication["verification_work"])
+        verification_work.relative_to(R7SQL_WORK.parent)
+    except ValueError:
+        raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED") from None
+    if verification_work == R7SQL_WORK.parent or verification_work == R7SQL_WORK:
+        raise epoch.Rejected("R7SQL_ROOT_ADJUDICATION_WORKDIR_REQUIRED")
+    for anchor in value["old_audit_prefix_by_symbol"].values():
+        if (
+            not isinstance(anchor, dict)
+            or type(anchor.get("rows")) is not int
+            or anchor["rows"] < 0
+            or re.fullmatch(r"[0-9a-f]{64}", str(anchor.get("sha256", ""))) is None
+        ):
+            raise epoch.Rejected("R7SQL_OLD_AUDIT_PREFIX_REQUIRED")
+    for key in ("serve_status", "restart_status"):
+        status = value[key]
+        if (
+            status.get("state") != "RUNNING_NONTRADING"
+            or status.get("owner") != OWNER
+            or status.get("trading_started") is not False
+            or status.get("PAPER_QUALIFIED") is not False
+            or status.get("ALPHA_READY") is not False
+            or status.get("LIVE_READY") is not False
+            or status.get("STRATEGY_POLICY") != "REJECT_ALL"
+            or any(type(status.get(field)) is not int or status[field] != 0
+                   for field in ("pending_outbox", "unresolved_inbox", "uncompleted_publications"))
+        ):
+            raise epoch.Rejected("R7SQL_NONTRADING_STATUS_PROJECTION_REQUIRED")
+        marks = status.get("watermarks_ms")
+        if not isinstance(marks, dict) or set(marks) != set(epoch.SYMBOLS):
+            raise epoch.Rejected("R7SQL_FIVE_SYMBOL_STATUS_REQUIRED")
+        observed = status.get("observed_at_utc")
+        try:
+            observed_ms = int(datetime.fromisoformat(observed.replace("Z", "+00:00")).timestamp() * 1000)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            raise epoch.Rejected("R7SQL_ACCEPTED_STATUS_TIME_REQUIRED") from None
+        epoch.validate_running_status(status, OWNER, now_ms=observed_ms)
+    return value
+
+
+def validate_r7sql_admission_files() -> dict:
+    """Fail closed until root pins receipt, detached signature, and serve ID."""
+    if GENERATION != "r7sql":
+        raise epoch.Rejected("R7SQL_PROFILE_REQUIRED")
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", str(pin or "")) is None
+        for pin in (R7SQL_RECEIPT_SHA256, R7SQL_SIGNATURE_SHA256, R7SQL_SERVE_ID)
+    ):
+        raise epoch.Rejected("R7SQL_ACCEPTED_EVIDENCE_PIN_REQUIRED")
+    receipt_path = fresh.safe(SERVE_WORK / RECEIPT_NAME)
+    signature_path = fresh.safe(SERVE_WORK / (RECEIPT_NAME + ".asc"))
+    old_status_path = fresh.safe(R7SQL_OLD_FAILED_STATUS_PATH)
+    old_config_path = fresh.safe(R7DNS_WORK / "config-serve.json")
+    if (
+        fresh.sha(receipt_path) != R7SQL_RECEIPT_SHA256
+        or fresh.sha(signature_path) != R7SQL_SIGNATURE_SHA256
+        or fresh.sha(old_status_path) != R7SQL_OLD_FAILED_STATUS_SHA256
+        or fresh.sha(old_config_path) != R7DNS_CONFIG_SHA256
+    ):
+        raise epoch.Rejected("R7SQL_ACCEPTED_EVIDENCE_BYTES_CHANGED")
+    old_status = read_json(old_status_path)
+    if (
+        old_status.get("state") != "FAILED_CLOSED"
+        or old_status.get("error_type") != "TimeoutError"
+        or old_status.get("trading_started") is not False
+    ):
+        raise epoch.Rejected("R7SQL_OLD_FAILED_TIMEOUT_LATCH_MUST_REMAIN_FROZEN")
+    receipt = validate_r7sql_admission_receipt(read_json(receipt_path))
+    if (
+        fresh.sha(fresh.safe(SERVE_WORK / "config-serve.json"))
+        != receipt["worker_config_sha256"]
+        or fresh.sha(fresh.safe(SERVE_WORK / "operator/runtime_epoch_worker.py"))
+        != R7SQL_WORKER_SHA256
+        or directory_snapshot_sha256(SERVE_WORK / "operator")
+        != receipt["operator_snapshot_sha256"]
+        or directory_snapshot_sha256(SERVE_WORK / "quant")
+        != receipt["quant_snapshot_sha256"]
+        or not fresh.safe(SERVE_WORK / "operator.zip").is_file()
+        or not fresh.safe(SERVE_WORK / "quant.zip").is_file()
+    ):
+        raise epoch.Rejected("R7SQL_ACCEPTED_CONFIGURATION_OR_SNAPSHOT_CHANGED")
+    return receipt
+
+
+def r7sql_admission_binding() -> dict:
+    receipt = validate_r7sql_admission_files()
+    return {
+        "receipt_sha256": R7SQL_RECEIPT_SHA256,
+        "signature_sha256": R7SQL_SIGNATURE_SHA256,
+        "old_failed_status_sha256": R7SQL_OLD_FAILED_STATUS_SHA256,
+        "source_revision": R7SQL_SOURCE_REVISION,
+        "serve_name": R7SQL_SERVE_NAME,
+        "serve_id": R7SQL_SERVE_ID,
+        "workdir": SERVE_WORK.as_posix(),
+        "worker_sha256": R7SQL_WORKER_SHA256,
+        "receipt_run_id": receipt["run_id"],
+    }
+
+
+def directory_snapshot_sha256(root: Path) -> str:
+    """Hash an extracted ordinary-file snapshot with the controller's manifest format."""
+    root = fresh.safe(root)
+    if root.is_symlink() or not root.is_dir():
+        raise epoch.Rejected("R7SQL_SOURCE_SNAPSHOT_DIRECTORY_REQUIRED")
+    manifest = {}
+    for path in root.rglob("*"):
+        fresh.safe(path)
+        if path.is_symlink():
+            raise epoch.Rejected("R7SQL_SOURCE_SNAPSHOT_LINK_REJECTED")
+        if path.is_file():
+            manifest[path.relative_to(root).as_posix()] = fresh.sha(path)
+        elif not path.is_dir():
+            raise epoch.Rejected("R7SQL_SOURCE_SNAPSHOT_ENTRY_REJECTED")
+    return fresh.digest(manifest)
+
+
 def validate_r6_lifecycle_status(
     value: dict, *, now_ms: int | None = None, allow_dns: bool = False
 ) -> None:
@@ -582,10 +862,13 @@ def input_paths() -> list[Path]:
         PARENT / "continuation-04/continuation-private.json",
         SERVE_WORK / "config-serve.json",
         SERVE_WORK / RECEIPT_NAME,
-        SERVE_WORK / "operator.zip",
         epoch.AUX_WHEELHOUSE / epoch.AUX_NUMPY,
         epoch.ACTIVE_LEASE,
     ]
+    if GENERATION == "r7sql":
+        paths.extend([SERVE_WORK / "operator.zip", SERVE_WORK / "quant.zip"])
+    else:
+        paths.append(SERVE_WORK / "operator.zip")
     if any(not fresh.safe(path).is_file() for path in paths):
         raise epoch.Rejected("ADMITTED_BOOT_INPUT_MISSING")
     if GENERATION == "r7dns":
@@ -593,6 +876,14 @@ def input_paths() -> list[Path]:
             [
                 SERVE_WORK / "receipt.json.asc",
                 R7DNS_FAILED_STATUS_PATH,
+            ]
+        )
+    elif GENERATION == "r7sql":
+        paths.extend(
+            [
+                SERVE_WORK / (RECEIPT_NAME + ".asc"),
+                R7SQL_OLD_FAILED_STATUS_PATH,
+                R7DNS_WORK / "config-serve.json",
             ]
         )
     for directory in ("operator", "quant", "runtime-wheelhouse"):
@@ -619,8 +910,18 @@ def validate_binding(value: dict) -> None:
         expected_admission = r7dns_admission_binding()
         if value.get("r7dns_admission") != expected_admission:
             raise epoch.Rejected("EXACT_R7DNS_ADMISSION_BINDING_REQUIRED")
+        if "r7sql_admission" in value:
+            raise epoch.Rejected("R7SQL_ADMISSION_MUST_NOT_BE_REUSED_FOR_R7DNS")
+    elif GENERATION == "r7sql":
+        expected_admission = r7sql_admission_binding()
+        if value.get("r7sql_admission") != expected_admission:
+            raise epoch.Rejected("EXACT_R7SQL_ADMISSION_BINDING_REQUIRED")
+        if "r7dns_admission" in value:
+            raise epoch.Rejected("R7DNS_ADMISSION_MUST_NOT_BE_REUSED_FOR_R7SQL")
     elif "r7dns_admission" in value:
         raise epoch.Rejected("R7DNS_ADMISSION_MUST_BE_EXPLICITLY_SELECTED")
+    elif "r7sql_admission" in value:
+        raise epoch.Rejected("R7SQL_ADMISSION_MUST_BE_EXPLICITLY_SELECTED")
     sources = value.get("source_files")
     inputs = value.get("inputs")
     if (
@@ -650,7 +951,14 @@ def validate_binding(value: dict) -> None:
 
 def create_binding(revision: str) -> Path:
     verify_source(revision)
-    admission = r7dns_admission_binding() if GENERATION == "r7dns" else None
+    admission = None
+    admission_key = None
+    if GENERATION == "r7dns":
+        admission = r7dns_admission_binding()
+        admission_key = "r7dns_admission"
+    elif GENERATION == "r7sql":
+        admission = r7sql_admission_binding()
+        admission_key = "r7sql_admission"
     if fresh.sha(SERVE_WORK / RECEIPT_NAME) != PARENT_RECEIPT_SHA256:
         raise epoch.Rejected("ACCEPTED_EPOCH_PARENT_RECEIPT_REQUIRED")
     epoch._private_directory(ROOT)
@@ -674,8 +982,8 @@ def create_binding(revision: str) -> Path:
         "containers": CONTAINERS,
         "parent_receipt_sha256": PARENT_RECEIPT_SHA256,
     }
-    if admission is not None:
-        value["r7dns_admission"] = admission
+    if admission is not None and admission_key is not None:
+        value[admission_key] = admission
     validate_binding(value)
     fresh.save(path, value)
     return path
@@ -714,6 +1022,8 @@ class BootController(epoch.EpochController):
             self.names["serve"] += "-" + GENERATION
         elif GENERATION == "r7dns":
             self.names["serve"] += "-r7-dns-b0a90145"
+        elif GENERATION == "r7sql":
+            self.names["serve"] += "-r7-sql-b45eda59"
         if GENERATION == "r2":
             # Original unverified restore resources remain retained and stopped.
             # Reuse only the separate, previously verified disposable names.
@@ -736,6 +1046,9 @@ class BootController(epoch.EpochController):
             # Reuse the accepted run's nonce namespace, admitted by both validators.
             self.names["restore_pg"] += "-reviewed-b0a90145"
             self.names["restore_volume"] += "-reviewed-b0a90145"
+        elif GENERATION == "r7sql":
+            self.names["restore_pg"] += "-reviewed-b45eda59"
+            self.names["restore_volume"] += "-reviewed-b45eda59"
 
     def validate_isolated_standby(self) -> dict:
         """Leave one already-running, unrelated test DB untouched and isolated."""
@@ -930,7 +1243,7 @@ class BootController(epoch.EpochController):
         if state == "running":
             if GENERATION == "r6":
                 validate_r6_lifecycle_status(previous)
-            elif GENERATION in {"r7", "r7dns"}:
+            elif GENERATION in {"r7", "r7dns", "r7sql"}:
                 validate_r7_lifecycle_status(previous)
             else:
                 epoch.validate_running_status(previous, OWNER)
@@ -952,7 +1265,7 @@ class BootController(epoch.EpochController):
         if (
             previous.get("state") != "RUNNING_NONTRADING"
             and not (
-                GENERATION in {"r6", "r7", "r7dns"}
+                GENERATION in {"r6", "r7", "r7dns", "r7sql"}
                 and previous.get("state")
                 in {"WAITING_SOURCE_NONTRADING", "CATCHING_UP_NONTRADING"}
             )
@@ -966,7 +1279,7 @@ class BootController(epoch.EpochController):
             validate_r6_lifecycle_status(
                 previous, now_ms=int(observed.timestamp() * 1000)
             )
-        elif GENERATION in {"r7", "r7dns"}:
+        elif GENERATION in {"r7", "r7dns", "r7sql"}:
             validate_r7_lifecycle_status(
                 previous, now_ms=int(observed.timestamp() * 1000)
             )
@@ -1110,7 +1423,7 @@ def main(argv=None) -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--generation",
-        choices=("original", "r2", "r4", "r5", "r6", "r7", "r7dns"),
+        choices=("original", "r2", "r4", "r5", "r6", "r7", "r7dns", "r7sql"),
         default="original",
     )
     parser.add_argument("--binding", type=Path)
@@ -1129,6 +1442,8 @@ def main(argv=None) -> int:
         configure_generation_r7()
     elif args.generation == "r7dns":
         configure_generation_r7dns()
+    elif args.generation == "r7sql":
+        configure_generation_r7sql()
     args.binding = args.binding or ROOT / "binding.json"
     controller = None
     work = None
