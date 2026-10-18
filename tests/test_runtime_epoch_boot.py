@@ -31,6 +31,139 @@ def state() -> dict:
 
 
 class BootAdmissionTests(unittest.TestCase):
+    def test_metadata_docker_call_keeps_default_twenty_second_bound(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.deadline = time.monotonic() + 120
+        controller.names = epoch.resource_names(boot.OWNER)
+        with TemporaryDirectory() as directory:
+            controller.work = Path(directory)
+
+            class Native:
+                def __init__(self):
+                    self.operations = []
+
+                def call(self, arguments, deadline, *, seconds, allow_failure):
+                    self.seen = (arguments, seconds, allow_failure)
+                    return 0, "metadata"
+
+            controller.native = Native()
+            self.assertEqual(controller.docker(["ps"]), "metadata")
+            self.assertEqual(controller.native.seen, (["ps"], 20, False))
+
+    def test_boot_starts_only_stopped_admitted_data_containers_with_ninety_seconds(
+        self,
+    ):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.names = epoch.resource_names(boot.OWNER)
+        controller.docker = mock.Mock()
+        controller.inspect_container = mock.Mock(
+            side_effect=[
+                {"id": boot.CONTAINERS["pg"], "state": {"Status": "exited"}},
+                {"id": boot.CONTAINERS["redis"], "state": {"Status": "exited"}},
+            ]
+        )
+
+        controller.start_existing_data_containers()
+
+        self.assertEqual(
+            controller.docker.call_args_list,
+            [
+                mock.call(["start", controller.names["target_pg"]], seconds=90),
+                mock.call(["start", controller.names["redis"]], seconds=90),
+            ],
+        )
+
+    def test_boot_does_not_restart_already_running_data_containers(self):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.names = epoch.resource_names(boot.OWNER)
+        controller.docker = mock.Mock()
+        controller.inspect_container = mock.Mock(
+            side_effect=[
+                {"id": boot.CONTAINERS["pg"], "state": {"Status": "running"}},
+                {"id": boot.CONTAINERS["redis"], "state": {"Status": "running"}},
+            ]
+        )
+        controller.start_existing_data_containers()
+        controller.docker.assert_not_called()
+
+    def test_boot_postgres_start_failure_prevents_redis_start(self):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.names = epoch.resource_names(boot.OWNER)
+        controller.docker = mock.Mock(side_effect=epoch.Rejected("unknown"))
+        controller.inspect_container = mock.Mock(
+            return_value={"id": boot.CONTAINERS["pg"], "state": {"Status": "exited"}}
+        )
+        with self.assertRaisesRegex(epoch.Rejected, "unknown"):
+            controller.start_existing_data_containers()
+        controller.docker.assert_called_once_with(
+            ["start", controller.names["target_pg"]], seconds=90
+        )
+
+    def test_docker_failure_diagnostic_uses_fixed_start_category_only(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.deadline = time.monotonic() + 120
+        controller.names = epoch.resource_names(boot.OWNER)
+        with TemporaryDirectory() as directory:
+            controller.work = Path(directory)
+
+            class Native:
+                def __init__(self):
+                    self.operations = [
+                        {
+                            "sequence": 30,
+                            "exit_code": 125,
+                            "timed_out": True,
+                            "overflow": False,
+                            "elapsed_seconds": 90.0,
+                            "cli_tree": True,
+                        }
+                    ]
+
+                def call(self, *_args, **_kwargs):
+                    raise RuntimeError("PRIVATE_SENTINEL_SECRET")
+
+            controller.native = Native()
+            with self.assertRaisesRegex(
+                epoch.Rejected, "BOUNDED_DOCKER_OPERATION_FAILED_RUNTIMEERROR"
+            ):
+                controller.docker(["start", controller.names["target_pg"]])
+            diagnostic_path = controller.work / "first-cli-failure.json"
+            diagnostic = json.loads(diagnostic_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                diagnostic["operation"]["operation_category"],
+                "DOCKER_START_TARGET_PG",
+            )
+            self.assertNotIn("PRIVATE_SENTINEL_SECRET", diagnostic_path.read_text())
+            self.assertNotIn(controller.names["target_pg"], diagnostic_path.read_text())
+
+    def test_docker_diagnostic_never_serializes_unrecognized_sentinel_arguments(self):
+        controller = epoch.EpochController.__new__(epoch.EpochController)
+        controller.deadline = time.monotonic() + 120
+        controller.names = epoch.resource_names(boot.OWNER)
+        with TemporaryDirectory() as directory:
+            controller.work = Path(directory)
+
+            class Native:
+                def __init__(self):
+                    self.operations = [{"sequence": 1, "exit_code": 125}]
+
+                def call(self, *_args, **_kwargs):
+                    raise RuntimeError("PRIVATE_DRIVER_SENTINEL")
+
+            controller.native = Native()
+            with self.assertRaises(epoch.Rejected):
+                controller.docker(
+                    [
+                        "start",
+                        controller.names["target_pg"],
+                        "PRIVATE_SENTINEL_ARGUMENT",
+                    ]
+                )
+            diagnostic = (controller.work / "first-cli-failure.json").read_text()
+            self.assertIn('"operation_category": "DOCKER_OTHER"', diagnostic)
+            self.assertNotIn("PRIVATE_SENTINEL_ARGUMENT", diagnostic)
+            self.assertNotIn("PRIVATE_DRIVER_SENTINEL", diagnostic)
+
     def test_r2_boot_scope_is_exact_new_container_and_does_not_relabel_original(self):
         keys = (
             "ROOT",
@@ -289,12 +422,30 @@ class BootAdmissionTests(unittest.TestCase):
                 side_effect=[resources, resources, resources, final]
             )
             controller.inspect_container = mock.Mock(
-                return_value={"state": {"Status": "exited"}}
+                side_effect=[
+                    {
+                        "id": boot.CONTAINERS["pg"],
+                        "state": {"Status": "exited"},
+                    },
+                    {
+                        "id": boot.CONTAINERS["redis"],
+                        "state": {"Status": "exited"},
+                    },
+                ]
             )
             calls = []
-            controller.docker = mock.Mock(
-                side_effect=lambda args: calls.append(tuple(args)) or ""
-            )
+            data_start_seconds = []
+
+            def docker(args, **kwargs):
+                calls.append(tuple(args))
+                if args[0] == "start" and args[1] in {
+                    controller.names["target_pg"],
+                    controller.names["redis"],
+                }:
+                    data_start_seconds.append(kwargs.get("seconds", 20))
+                return ""
+
+            controller.docker = mock.Mock(side_effect=docker)
             controller.prepare_snapshots = mock.Mock()
             controller.wait_postgres = mock.Mock()
             controller.create_volume = mock.Mock(
@@ -361,6 +512,7 @@ class BootAdmissionTests(unittest.TestCase):
                 result = controller.run_boot()
             self.assertEqual(result["result"], "PASS_NONTRADING_EPOCH_BOOT")
             self.assertEqual(controller.backup_and_verify.call_count, 2)
+            self.assertEqual(data_start_seconds, [90, 90])
             restore_volume = controller.names["restore_volume"]
             self.assertEqual(
                 [

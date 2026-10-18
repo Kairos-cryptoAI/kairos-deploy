@@ -1239,6 +1239,19 @@ class BootController(epoch.EpochController):
             "initialized_uid": 70,
         }
 
+    def start_existing_data_containers(self) -> None:
+        """Start only the exact admitted, stopped PG/Redis containers, once each."""
+        for key, resource_key in (("target_pg", "pg"), ("redis", "redis")):
+            name = self.names[key]
+            view = self.inspect_container(name)
+            if view.get("id") != CONTAINERS[resource_key]:
+                raise epoch.Rejected("BOOT_EXACT_EXISTING_RESOURCE_REQUIRED")
+            state = (view.get("state") or {}).get("Status")
+            if state == "exited":
+                self.docker(["start", name], seconds=90)
+            elif state != "running":
+                raise epoch.Rejected("BOOT_EXACT_EXISTING_RESOURCE_REQUIRED")
+
     def run_boot(self) -> dict:
         before_resources = self.validate_resources(allow_running=True)
         self.proofs["isolated_standby"] = before_resources["standby"]
@@ -1309,10 +1322,7 @@ class BootController(epoch.EpochController):
         ).stdout
         epoch.validate_aux_wheelhouse(epoch.AUX_WHEELHOUSE, quant_lock)
         self.prepare_snapshots()
-        for key in ("target_pg", "redis"):
-            name = self.names[key]
-            if self.inspect_container(name)["state"]["Status"] == "exited":
-                self.docker(["start", name])
+        self.start_existing_data_containers()
         self.wait_postgres(self.names["target_pg"])
         self._admin_password = (PARENT / "target-admin-password").read_text().strip()
         before = self.boot_state("before")

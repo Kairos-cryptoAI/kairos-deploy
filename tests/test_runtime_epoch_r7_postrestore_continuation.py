@@ -189,15 +189,20 @@ class PostRestoreTests(unittest.TestCase):
                     }
                 ],
             )
-            controller = SimpleNamespace(
-                native=native, work=Path(directory), deadline=100.0
-            )
+            controller = post.epoch.EpochController.__new__(post.epoch.EpochController)
+            controller.native = native
+            controller.work = Path(directory)
+            controller.deadline = 100.0
+            controller.names = {}
             with self.assertRaises(post.epoch.Rejected):
                 post.epoch.EpochController.docker(controller, ["private argument"])
             projected = (Path(directory) / "first-cli-failure.json").read_text()
             self.assertNotIn("private driver", projected)
             self.assertNotIn("private argument", projected)
             self.assertTrue(json.loads(projected)["operation"]["timed_out"])
+            self.assertEqual(
+                json.loads(projected)["operation"]["operation_category"], "DOCKER_OTHER"
+            )
 
 
 if __name__ == "__main__":

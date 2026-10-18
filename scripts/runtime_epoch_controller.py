@@ -1019,6 +1019,9 @@ class EpochController:
                 )
             }
             projection["cli_tree_proven"] = bool(last.get("cli_tree"))
+            projection["operation_category"] = self._safe_docker_operation_category(
+                arguments
+            )
             try:
                 diagnostic = self.work / "first-cli-failure.json"
                 if not diagnostic.exists():
@@ -1030,6 +1033,18 @@ class EpochController:
             raise Rejected(
                 "BOUNDED_DOCKER_OPERATION_FAILED_" + type(exc).__name__.upper()
             ) from None
+
+    def _safe_docker_operation_category(self, arguments: list[str]) -> str:
+        """Return only a fixed category for exact, admitted data-container starts."""
+        if len(arguments) == 2 and arguments[0] == "start":
+            for key, category in (
+                ("target_pg", "DOCKER_START_TARGET_PG"),
+                ("redis", "DOCKER_START_TARGET_REDIS"),
+                ("serve", "DOCKER_START_TARGET_SERVE"),
+            ):
+                if arguments[1] == self.names.get(key):
+                    return category
+        return "DOCKER_OTHER"
 
     def inspect_container(self, name: str) -> dict:
         return normalize_container_metadata(
