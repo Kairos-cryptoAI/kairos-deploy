@@ -106,7 +106,11 @@ BASE_SOURCE_ENVIRONMENT_KEYS = {
         "KAIROS_X_USER_READ_UNIT_COST_MICROUSD",
     },
     "router": {*BASE_COMMON_ENVIRONMENT_KEYS},
-    "aggregator": {*BASE_COMMON_ENVIRONMENT_KEYS},
+    "aggregator": {
+        *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_CANDIDATE_REQUIRE_MACRO_CONTEXT",
+        "KAIROS_CANDIDATE_REQUIRE_TEXT_CONTEXT",
+    },
     "macro-strategist": {*BASE_COMMON_ENVIRONMENT_KEYS},
     "risk-manager": {
         *BASE_COMMON_ENVIRONMENT_KEYS,
@@ -530,6 +534,12 @@ def validate_compose(
         errors.append("strategy-engine: base topology must remain DRY_RUN")
     if strategy_env.get("KAIROS_ENABLED_STRATEGY_IDS") != "[]":
         errors.append("strategy-engine: rejected alpha sleeves must remain disabled")
+
+    aggregator_env = services.get("aggregator", {}).get("environment", {}) or {}
+    if not _is_true(aggregator_env.get("KAIROS_CANDIDATE_REQUIRE_MACRO_CONTEXT")):
+        errors.append("aggregator: candidate Macro context must be required")
+    if not _is_true(aggregator_env.get("KAIROS_CANDIDATE_REQUIRE_TEXT_CONTEXT")):
+        errors.append("aggregator: candidate Text context must be required")
 
     risk_env = services.get("risk-manager", {}).get("environment", {}) or {}
     if not _is_true(risk_env.get("KAIROS_REQUIRE_RECONCILED_ACCOUNT")):

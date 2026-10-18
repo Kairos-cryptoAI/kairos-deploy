@@ -156,6 +156,9 @@ gateway with default settings and requests `LLMWorkload.TEXT_SCOUTS`; the fixed
 `kairos_llm.models.DEFAULT_WORKLOAD_ROUTES` selects `gpt-6-luna` with `low` effort.
 Its container therefore mounts and binds OpenAI + X, not DeepSeek. Aggregator
 and Macro also mount OpenAI; model routing does not grant trading readiness.
+The base Aggregator explicitly requires both Text and Macro context for candidate
+review. This is a strict fail-closed profile setting, not full-path or provider
+acceptance: missing, stale, or unavailable required context must defer review.
 
 The dormant top-level `deepseek_api_key` definition, labelled import support, and
 provisioning inventory are retained solely for legacy compatibility. The existing

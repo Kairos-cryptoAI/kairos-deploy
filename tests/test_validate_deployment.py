@@ -169,6 +169,13 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                     "KAIROS_ENABLED_STRATEGY_IDS": "[]",
                 }
             )
+        if name == "aggregator":
+            environment.update(
+                {
+                    "KAIROS_CANDIDATE_REQUIRE_MACRO_CONTEXT": "true",
+                    "KAIROS_CANDIDATE_REQUIRE_TEXT_CONTEXT": "true",
+                }
+            )
         if name == "risk-manager":
             environment.update(
                 {
@@ -387,6 +394,29 @@ class ComposeValidationTests(unittest.TestCase):
     def test_accepts_hardened_model(self) -> None:
         config, lock = rendered_config()
         self.assertEqual(validate_compose(config, lock), [])
+
+    def test_aggregator_requires_macro_and_text_context(self) -> None:
+        for key, label in (
+            ("KAIROS_CANDIDATE_REQUIRE_MACRO_CONTEXT", "Macro"),
+            ("KAIROS_CANDIDATE_REQUIRE_TEXT_CONTEXT", "Text"),
+        ):
+            with self.subTest(key=key, value="missing"):
+                config, lock = rendered_config()
+                del config["services"]["aggregator"]["environment"][key]
+                errors = validate_compose(config, lock)
+                self.assertIn(
+                    f"aggregator: candidate {label} context must be required",
+                    errors,
+                )
+            for value in ("false", ""):
+                with self.subTest(key=key, value=value):
+                    config, lock = rendered_config()
+                    config["services"]["aggregator"]["environment"][key] = value
+                    errors = validate_compose(config, lock)
+                    self.assertIn(
+                        f"aggregator: candidate {label} context must be required",
+                        errors,
+                    )
 
     def test_text_scouts_current_openai_and_x_scope_keeps_legacy_definition_dormant(
         self,
