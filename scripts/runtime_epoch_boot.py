@@ -1252,6 +1252,64 @@ class BootController(epoch.EpochController):
             elif state != "running":
                 raise epoch.Rejected("BOOT_EXACT_EXISTING_RESOURCE_REQUIRED")
 
+    def wait_for_started_serve(
+        self, *, previous: dict, after: dict, before_resources: dict
+    ) -> dict:
+        status_path = SERVE_WORK / "output-serve/status.json"
+        until = min(self.deadline - 30, time.monotonic() + 180)
+        while time.monotonic() < until:
+            value = read_json(status_path)
+            state = value.get("state")
+            if state == "FAILED_CLOSED":
+                raise epoch.Rejected("BOOT_SERVE_FAILED_CLOSED")
+            if GENERATION in {"r6", "r7", "r7dns", "r7sql"}:
+                if state in {
+                    "WAITING_SOURCE_NONTRADING",
+                    "CATCHING_UP_NONTRADING",
+                }:
+                    lifecycle_validator = (
+                        validate_r6_lifecycle_status
+                        if GENERATION == "r6"
+                        else validate_r7_lifecycle_status
+                    )
+                    lifecycle_validator(value)
+                    time.sleep(2)
+                    continue
+                if state != "RUNNING_NONTRADING":
+                    raise epoch.Rejected("BOOT_SERVE_STATUS_INVALID")
+            if value.get("observed_at_utc") != previous["observed_at_utc"]:
+                if GENERATION == "r6":
+                    validate_r6_lifecycle_status(value)
+                elif GENERATION in {"r7", "r7dns", "r7sql"}:
+                    validate_r7_lifecycle_status(value)
+                epoch.validate_running_status(value, OWNER)
+                if all(
+                    value["watermarks_ms"][s]
+                    > after["anchors"][s]["last_close_time_ms"] + 1
+                    for s in epoch.SYMBOLS
+                ):
+                    final = self.validate_resources(allow_running=True)
+                    if any(
+                        v["state"]["Status"] != "running"
+                        for v in final["views"].values()
+                    ):
+                        raise epoch.Rejected(
+                            "BOOT_ALL_THREE_RESOURCES_MUST_REMAIN_RUNNING"
+                        )
+                    if final["legacy"] != before_resources["legacy"]:
+                        raise epoch.Rejected("BOOT_LEGACY_METADATA_CHANGED")
+                    if final["standby"] != before_resources["standby"]:
+                        raise epoch.Rejected("BOOT_STANDBY_METADATA_CHANGED")
+                    return {
+                        "result": "PASS_NONTRADING_EPOCH_BOOT",
+                        "status": value,
+                        "proofs": self.proofs,
+                        "legacy_unchanged": True,
+                        "trading_started": False,
+                    }
+            time.sleep(2)
+        raise epoch.Rejected("BOOT_FRESH_FIVE_SYMBOL_STATUS_TIMEOUT")
+
     def run_boot(self) -> dict:
         before_resources = self.validate_resources(allow_running=True)
         self.proofs["isolated_standby"] = before_resources["standby"]
@@ -1387,47 +1445,9 @@ class BootController(epoch.EpochController):
         self.proofs["serve_start_intent"] = True
         self.docker(["start", self.names["serve"]])
         self.proofs["serve_started"] = True
-        status_path = SERVE_WORK / "output-serve/status.json"
-        until = min(self.deadline - 30, time.monotonic() + 180)
-        while time.monotonic() < until:
-            value = read_json(status_path)
-            if value.get("state") == "FAILED_CLOSED":
-                raise epoch.Rejected("BOOT_SERVE_FAILED_CLOSED")
-            if GENERATION == "r6" and value.get("state") in {
-                "WAITING_SOURCE_NONTRADING",
-                "CATCHING_UP_NONTRADING",
-            }:
-                validate_r6_lifecycle_status(value)
-                time.sleep(2)
-                continue
-            if value.get("observed_at_utc") != previous["observed_at_utc"]:
-                epoch.validate_running_status(value, OWNER)
-                if all(
-                    value["watermarks_ms"][s]
-                    > after["anchors"][s]["last_close_time_ms"] + 1
-                    for s in epoch.SYMBOLS
-                ):
-                    final = self.validate_resources(allow_running=True)
-                    if any(
-                        v["state"]["Status"] != "running"
-                        for v in final["views"].values()
-                    ):
-                        raise epoch.Rejected(
-                            "BOOT_ALL_THREE_RESOURCES_MUST_REMAIN_RUNNING"
-                        )
-                    if final["legacy"] != before_resources["legacy"]:
-                        raise epoch.Rejected("BOOT_LEGACY_METADATA_CHANGED")
-                    if final["standby"] != before_resources["standby"]:
-                        raise epoch.Rejected("BOOT_STANDBY_METADATA_CHANGED")
-                    return {
-                        "result": "PASS_NONTRADING_EPOCH_BOOT",
-                        "status": value,
-                        "proofs": self.proofs,
-                        "legacy_unchanged": True,
-                        "trading_started": False,
-                    }
-            time.sleep(2)
-        raise epoch.Rejected("BOOT_FRESH_FIVE_SYMBOL_STATUS_TIMEOUT")
+        return self.wait_for_started_serve(
+            previous=previous, after=after, before_resources=before_resources
+        )
 
 
 def main(argv=None) -> int:

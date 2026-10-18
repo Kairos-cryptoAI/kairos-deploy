@@ -8,6 +8,7 @@ import io
 import json
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -31,6 +32,139 @@ def state() -> dict:
 
 
 class BootAdmissionTests(unittest.TestCase):
+    def _boot_wait_fixture(self):
+        controller = boot.BootController.__new__(boot.BootController)
+        controller.deadline = 1000
+        controller.proofs = {}
+        after = {
+            "anchors": {
+                symbol: {"last_close_time_ms": 100}
+                for symbol in epoch.SYMBOLS
+            }
+        }
+        before_resources = {"legacy": {"unchanged": True}, "standby": {"untouched": True}}
+        previous = {"observed_at_utc": "2026-10-18T12:00:00Z"}
+        waiting = {
+            "state": "WAITING_SOURCE_NONTRADING",
+            "owner": boot.OWNER,
+            "observed_at_utc": datetime.now(UTC).isoformat(),
+            "watermarks_ms": {symbol: 1000 for symbol in epoch.SYMBOLS},
+            "pending_outbox": 0,
+            "unresolved_inbox": 0,
+            "uncompleted_publications": 0,
+            "PAPER_QUALIFIED": False,
+            "ALPHA_READY": False,
+            "LIVE_READY": False,
+            "STRATEGY_POLICY": "REJECT_ALL",
+            "source_fresh": False,
+            "trading_started": False,
+            "source_transport": {
+                "timeout_rounds": 1,
+                "recoveries": 0,
+                "consecutive_timeout_rounds": 1,
+            },
+            "source_wait_reason": "OFFICIAL_CLOSED_BAR_FETCH_TIMEOUT",
+        }
+        return controller, previous, after, before_resources, waiting
+
+    def test_serve_wait_deadline_is_finite_for_valid_r7sql_pause(self):
+        controller, previous, after, before_resources, waiting = self._boot_wait_fixture()
+        clock = [0.0]
+
+        def sleep(_seconds):
+            clock[0] += 60.0
+
+        with (
+            mock.patch.object(boot, "GENERATION", "r7sql"),
+            mock.patch.object(boot, "read_json", return_value=waiting) as read_status,
+            mock.patch.object(boot.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(boot.time, "sleep", side_effect=sleep) as wait,
+            self.assertRaisesRegex(epoch.Rejected, "BOOT_FRESH_FIVE_SYMBOL_STATUS_TIMEOUT"),
+        ):
+            controller.wait_for_started_serve(
+                previous=previous, after=after, before_resources=before_resources
+            )
+        self.assertEqual(read_status.call_count, 3)
+        self.assertEqual(wait.call_count, 3)
+
+    def test_serve_wait_ignores_stale_running_then_validates_pause_and_fresh_for_all_r7s(self):
+        for generation in ("r6", "r7", "r7dns", "r7sql"):
+            with self.subTest(generation=generation):
+                controller, previous, after, before_resources, waiting = self._boot_wait_fixture()
+                stale_running = {
+                    "state": "RUNNING_NONTRADING",
+                    "observed_at_utc": previous["observed_at_utc"],
+                }
+                fresh_running = {
+                    **waiting,
+                    "state": "RUNNING_NONTRADING",
+                    "observed_at_utc": datetime.now(UTC).isoformat(),
+                    "source_fresh": True,
+                    "source_transport": {
+                        "timeout_rounds": 0,
+                        "recoveries": 0,
+                        "consecutive_timeout_rounds": 0,
+                    },
+                    "source_wait_reason": None,
+                }
+                final = {
+                    "legacy": before_resources["legacy"],
+                    "standby": before_resources["standby"],
+                    "views": {
+                        name: {"state": {"Status": "running"}}
+                        for name in boot.CONTAINERS
+                    },
+                }
+                controller.validate_resources = mock.Mock(return_value=final)
+                r6_validator = mock.Mock()
+                r7_validator = mock.Mock()
+                with (
+                    mock.patch.object(boot, "GENERATION", generation),
+                    mock.patch.object(
+                        boot,
+                        "read_json",
+                        side_effect=[stale_running, waiting, fresh_running],
+                    ),
+                    mock.patch.object(boot.time, "monotonic", return_value=0.0),
+                    mock.patch.object(boot.time, "sleep"),
+                    mock.patch.object(boot, "validate_r6_lifecycle_status", r6_validator),
+                    mock.patch.object(boot, "validate_r7_lifecycle_status", r7_validator),
+                    mock.patch.object(epoch, "validate_running_status") as strict_running,
+                ):
+                    result = controller.wait_for_started_serve(
+                        previous=previous, after=after, before_resources=before_resources
+                    )
+                self.assertEqual(result["result"], "PASS_NONTRADING_EPOCH_BOOT")
+                validator = r6_validator if generation == "r6" else r7_validator
+                self.assertEqual(
+                    [call.args[0]["state"] for call in validator.call_args_list],
+                    ["WAITING_SOURCE_NONTRADING", "RUNNING_NONTRADING"],
+                )
+                strict_running.assert_called_once_with(fresh_running, boot.OWNER)
+
+    def test_serve_wait_rejects_invalid_pause_and_failed_closed_immediately(self):
+        controller, previous, after, before_resources, waiting = self._boot_wait_fixture()
+        invalid_pause = {**waiting, "pending_outbox": 1}
+        for value, expected in (
+            (invalid_pause, "R6_SOURCE_PAUSE_BOUNDARY_REQUIRED"),
+            ({"state": "FAILED_CLOSED"}, "BOOT_SERVE_FAILED_CLOSED"),
+        ):
+            with self.subTest(expected=expected):
+                read_status = mock.Mock(return_value=value)
+                sleeper = mock.Mock()
+                with (
+                    mock.patch.object(boot, "GENERATION", "r7sql"),
+                    mock.patch.object(boot, "read_json", read_status),
+                    mock.patch.object(boot.time, "monotonic", return_value=0.0),
+                    mock.patch.object(boot.time, "sleep", sleeper),
+                    self.assertRaisesRegex(epoch.Rejected, expected),
+                ):
+                    controller.wait_for_started_serve(
+                        previous=previous, after=after, before_resources=before_resources
+                    )
+                read_status.assert_called_once()
+                sleeper.assert_not_called()
+
     def test_metadata_docker_call_keeps_default_twenty_second_bound(self):
         controller = epoch.EpochController.__new__(epoch.EpochController)
         controller.deadline = time.monotonic() + 120
@@ -492,12 +626,31 @@ class BootAdmissionTests(unittest.TestCase):
                 "observed_at_utc": "2026-10-11T14:00:00Z",
                 "watermarks_ms": {s: end + epoch.MINUTE_MS for s in epoch.SYMBOLS},
             }
+            waiting = {
+                **current,
+                "state": "WAITING_SOURCE_NONTRADING",
+                "observed_at_utc": "2026-10-11T13:59:00Z",
+            }
+            catching_up = {
+                **current,
+                "state": "CATCHING_UP_NONTRADING",
+                "observed_at_utc": "2026-10-11T13:59:30Z",
+            }
+            startup_states = []
+
+            def validate_startup(value, **_kwargs):
+                startup_states.append(value["state"])
+
             with (
                 mock.patch.object(boot, "PARENT", parent),
                 mock.patch.object(
-                    boot, "read_json", side_effect=[previous, {}, current]
+                    boot,
+                    "read_json",
+                    side_effect=[previous, {}, previous, waiting, catching_up, current],
                 ),
+                mock.patch.object(boot, "GENERATION", "r7sql"),
                 mock.patch.object(boot.time, "time", return_value=seconds),
+                mock.patch.object(boot.time, "sleep"),
                 mock.patch.object(
                     boot.subprocess, "run", return_value=mock.Mock(stdout=b"locked")
                 ),
@@ -508,9 +661,21 @@ class BootAdmissionTests(unittest.TestCase):
                     return_value="h" * 64,
                 ),
                 mock.patch.object(epoch, "validate_running_status"),
+                mock.patch.object(
+                    boot, "validate_r7_lifecycle_status", side_effect=validate_startup
+                ),
             ):
                 result = controller.run_boot()
             self.assertEqual(result["result"], "PASS_NONTRADING_EPOCH_BOOT")
+            self.assertEqual(
+                startup_states,
+                [
+                    "RUNNING_NONTRADING",
+                    "WAITING_SOURCE_NONTRADING",
+                    "CATCHING_UP_NONTRADING",
+                    "RUNNING_NONTRADING",
+                ],
+            )
             self.assertEqual(controller.backup_and_verify.call_count, 2)
             self.assertEqual(data_start_seconds, [90, 90])
             restore_volume = controller.names["restore_volume"]
