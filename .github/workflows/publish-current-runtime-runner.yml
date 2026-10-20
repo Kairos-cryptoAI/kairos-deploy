@@ -1,0 +1,163 @@
+name: publish-current-runtime-runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-current-runtime-runner-752c984ca276ccbb
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and transport current migration runner
+    if: github.repository == 'Kairos-cryptoAI/kairos-deploy' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PERSISTENCE_REVISION: 752c984ca276ccbb7fcbd1b60a6c75d95fe6f108
+      DEPLOY_REVISION: 418b0979bd53fcfaa1816392efebcff59162f601
+      SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
+      IMAGE: ghcr.io/kairos-cryptoai/kairos-runtime-current-schema-runner
+      IMAGE_TAG: p752c984-d418b097-run${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out reviewed persistence source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Kairos-cryptoAI/kairos-persistence
+          ref: ${{ env.PERSISTENCE_REVISION }}
+          path: reviewed-persistence
+          persist-credentials: false
+
+      - name: Check out reviewed image recipe
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.DEPLOY_REVISION }}
+          path: reviewed-deploy
+          persist-credentials: false
+
+      - name: Verify source identities and pure receipt tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C reviewed-persistence rev-parse HEAD)" = "$PERSISTENCE_REVISION"
+          test "$(git -C reviewed-deploy rev-parse HEAD)" = "$DEPLOY_REVISION"
+          test -f reviewed-deploy/docker/Dockerfile
+          test -f reviewed-persistence/kairos_persistence/migrations/028_news_processing.sql
+          python3 -m unittest discover -s tests -p test_create_current_runner_receipt.py -v
+
+      - name: Build the reviewed runner locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx build --load --pull \
+            --file reviewed-deploy/docker/Dockerfile \
+            --build-context service=reviewed-persistence \
+            --build-arg PACKAGE_DIR=kairos_persistence \
+            --build-arg SOURCE_REPOSITORY="$SOURCE_REPOSITORY" \
+            --build-arg SOURCE_REVISION="$PERSISTENCE_REVISION" \
+            --tag "$IMAGE:$IMAGE_TAG" \
+            reviewed-deploy
+
+      - name: Verify exact installed migrations and runtime identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --user 10001:10001 \
+            --entrypoint python "$IMAGE:$IMAGE_TAG" -c '
+          import hashlib, importlib.metadata as md, json, platform
+          from importlib.resources import files
+          root = files("kairos_persistence").joinpath("migrations")
+          migrations = {item.name: hashlib.sha256(item.read_bytes()).hexdigest() for item in root.iterdir() if item.name.endswith(".sql")}
+          print(json.dumps({"migrations": migrations, "python": platform.python_version(), "aiohttp": md.version("aiohttp"), "multidict": md.version("multidict")}))
+          ' > "$RUNNER_TEMP/installed-runtime.json"
+          python3 - "$RUNNER_TEMP/installed-runtime.json" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          expected = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path("reviewed-persistence/kairos_persistence/migrations").glob("*.sql")}
+          installed = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if installed["migrations"] != expected or "028_news_processing.sql" not in expected:
+              raise SystemExit("installed migration filename/SHA map differs from reviewed source")
+          if (installed["python"], installed["aiohttp"], installed["multidict"]) != ("3.11.15", "3.14.5", "6.9.1"):
+              raise SystemExit("runtime version qualification mismatch")
+          PY
+          test "$(docker image inspect --format '{{.Config.User}}' "$IMAGE:$IMAGE_TAG")" = '10001:10001'
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' "$IMAGE:$IMAGE_TAG")" = "$SOURCE_REPOSITORY"
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE:$IMAGE_TAG")" = "$PERSISTENCE_REVISION"
+          docker image inspect --format '{{.Id}}' "$IMAGE:$IMAGE_TAG" > "$RUNNER_TEMP/local-image-id.txt"
+
+      - name: Save verified local image archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/current-runner-artifact"
+          docker save --output "$RUNNER_TEMP/current-runner-artifact/current-runtime-runner.docker.tar" "$IMAGE:$IMAGE_TAG"
+
+      - name: Authenticate to GitHub Container Registry
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+
+      - name: Publish unique run tag and capture immutable digest
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$IMAGE_TAG"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s@%s\n' "$IMAGE" "$digest" > "$RUNNER_TEMP/registry-reference.txt"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          docker logout ghcr.io
+
+      - name: Create non-secret archive receipt and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/create_current_runner_receipt.py \
+            --archive "$RUNNER_TEMP/current-runner-artifact/current-runtime-runner.docker.tar" \
+            --output-directory "$RUNNER_TEMP/current-runner-artifact" \
+            --registry-reference "$IMAGE@${{ steps.publish.outputs.digest }}" \
+            --local-image-id "$(cat "$RUNNER_TEMP/local-image-id.txt")" \
+            --source-repository "$SOURCE_REPOSITORY" --source-revision "$PERSISTENCE_REVISION" \
+            --recipe-revision "$DEPLOY_REVISION" --workflow-repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" --workflow-commit "$GITHUB_SHA" \
+            --runtime-json "$RUNNER_TEMP/installed-runtime.json" \
+            --migration-source reviewed-persistence/kairos_persistence/migrations
+
+      - name: Preserve Docker archive and non-secret receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: current-runtime-runner-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/current-runner-artifact/current-runtime-runner.docker.tar
+            ${{ runner.temp }}/current-runner-artifact/receipt.json
+            ${{ runner.temp }}/current-runner-artifact/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+          include-hidden-files: false
+
+      - name: Publish summary
+        shell: bash
+        run: |
+          {
+            echo '## Current runtime migration runner candidate'
+            echo
+            echo "Registry reference: \`$IMAGE@${{ steps.publish.outputs.digest }}\`"
+            echo "Transport: Docker save archive; import preserves the image ID, not the registry manifest bytes."
+            echo 'This artifact is a reviewed-source build candidate, not production qualification or controller wiring.'
+          } >> "$GITHUB_STEP_SUMMARY"
