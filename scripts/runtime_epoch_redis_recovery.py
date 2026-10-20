@@ -47,6 +47,9 @@ CLONE_VOLUME = PREFIX + "-redis-aof-clone"
 CLONE_CONTAINER = PREFIX + "-redisclone"
 MAX_SECONDS = 3600
 MAX_AOF_BYTES = 8 * 1024 * 1024
+MAX_FORENSIC_AOF_BYTES = 32 * 1024 * 1024
+MAX_FORENSIC_AOF_COMMANDS = 200_000
+FORENSIC_AOF_PROFILE = "forensic32m"
 EXPECTED_ROWS = 2220
 EXPECTED_STREAM = 2221
 OPEN_SEGMENT_MANIFEST_SHA256 = (
@@ -220,7 +223,17 @@ def validate_failure_evidence(
     }
 
 
-def validate_copy_proof(value: object, *, source_manifest: dict) -> dict:
+def validate_copy_proof(
+    value: object,
+    *,
+    source_manifest: dict,
+    max_aof_bytes: int = MAX_AOF_BYTES,
+) -> dict:
+    if type(max_aof_bytes) is not int or max_aof_bytes not in {
+        MAX_AOF_BYTES,
+        MAX_FORENSIC_AOF_BYTES,
+    }:
+        reject("REDIS_AOF_PROFILE_INVALID")
     if not isinstance(value, dict) or value.get("state") != "COPY_VERIFIED":
         reject("REDIS_AOF_COPY_DID_NOT_PASS")
     if (
@@ -230,7 +243,7 @@ def validate_copy_proof(value: object, *, source_manifest: dict) -> dict:
         or value.get("snapshot_content_sha256") != source_manifest.get("content_sha256")
         or value.get("file_count") != 4
         or type(value.get("total_bytes")) is not int
-        or not 0 < value["total_bytes"] <= MAX_AOF_BYTES
+        or not 0 < value["total_bytes"] <= max_aof_bytes
     ):
         reject("REDIS_AOF_COPY_MANIFEST_OR_SIZE_CONFLICT")
     return {
@@ -276,7 +289,15 @@ def validate_authoritative_persistence(current: object, expected: object) -> dic
     return current
 
 
-def validate_aof_inventory(value: object, *, worker_proof: dict | None = None) -> dict:
+def validate_aof_inventory(
+    value: object,
+    *,
+    worker_proof: dict | None = None,
+    profile: str = "standard",
+) -> dict:
+    if type(profile) is not str or profile not in aof.FORENSIC_AOF_PROFILES:
+        reject("REDIS_AOF_PROFILE_INVALID")
+    max_aof_bytes, _max_commands = aof.FORENSIC_AOF_PROFILES[profile]
     if not isinstance(value, dict) or value.get("status") != "PASS_AOF_INVENTORY":
         reject("REDIS_AOF_INVENTORY_DID_NOT_PASS")
     counts = value.get("subcommand_counts")
@@ -306,7 +327,7 @@ def validate_aof_inventory(value: object, *, worker_proof: dict | None = None) -
     for field in ("parsed_source_sha256", "publication_message_ids_sha256"):
         if re.fullmatch(r"[0-9a-f]{64}", str(value.get(field, ""))) is None:
             reject("REDIS_AOF_INVENTORY_HASH_REQUIRED")
-    if type(value.get("bytes")) is not int or not 0 < value["bytes"] <= MAX_AOF_BYTES:
+    if type(value.get("bytes")) is not int or not 0 < value["bytes"] <= max_aof_bytes:
         reject("REDIS_AOF_INVENTORY_SIZE_REQUIRED")
     return {
         "status": "PASS_AOF_INVENTORY",
@@ -456,7 +477,12 @@ class RedisAofRecoveryController(boot.BootController):
         self.offline_helper_ids: dict[str, str] = {}
 
     def _clone_primitives(self) -> AofClonePrimitives:
-        """Inject this run's already-admitted I/O into shared AOF primitives."""
+        """Inject this run's already-admitted I/O into shared AOF primitives.
+
+        This historical controller intentionally remains on the standard
+        8 MiB / 50k profile. The larger forensic32m profile is reserved for
+        explicitly constructed, separately admitted clone dependencies.
+        """
         return AofClonePrimitives(
             AofCloneDependencies(
                 owner=OWNER,

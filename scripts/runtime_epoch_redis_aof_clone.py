@@ -36,6 +36,9 @@ class AofCloneDependencies:
     validate_copy_proof: Callable[..., dict]
     validate_aof_inventory: Callable[..., dict]
     reject: Callable[[str], None]
+    # Appended default preserves all existing constructors and their standard
+    # 8 MiB copy / 50k inventory behavior.
+    aof_profile: str = "standard"
 
 
 class AofClonePrimitives:
@@ -43,6 +46,15 @@ class AofClonePrimitives:
 
     def __init__(self, dependencies: AofCloneDependencies) -> None:
         self.d = dependencies
+
+    def _profile_is_bounded(self) -> bool:
+        if type(self.d.aof_profile) is not str or type(self.d.max_aof_bytes) is not int:
+            return False
+        expected = {
+            "standard": 8 * 1024 * 1024,
+            "forensic32m": 32 * 1024 * 1024,
+        }.get(self.d.aof_profile)
+        return expected is not None and self.d.max_aof_bytes == expected
 
     def _owned_labels(self) -> list[str]:
         return [
@@ -136,6 +148,8 @@ class AofClonePrimitives:
         self, volume: str, tag: str, *, cache_proof: bool = False
     ) -> dict:
         d = self.d
+        if not self._profile_is_bounded():
+            d.reject("REDIS_AOF_PROFILE_INVALID")
         if d.cold_snapshot is None:
             d.reject("PINNED_COLD_REDIS_WORKER_REQUIRED")
         name = d.prefix + "-manifest-" + tag + "-" + d.run_id[:8]
@@ -143,6 +157,7 @@ class AofClonePrimitives:
             "manifest-aof-cache" if cache_proof else "manifest-only",
             source=volume,
             script_path=d.cold_snapshot,
+            max_source_bytes=d.max_aof_bytes,
         )
         argv[1:1] = ["--user=999:999"]
         expected = {
@@ -164,11 +179,14 @@ class AofClonePrimitives:
         self, source: str, target: str, tag: str, source_manifest: dict
     ) -> dict:
         d = self.d
+        if not self._profile_is_bounded():
+            d.reject("REDIS_AOF_PROFILE_INVALID")
         if d.cold_snapshot is None:
             d.reject("PINNED_COLD_REDIS_WORKER_REQUIRED")
         name = d.prefix + "-copy-" + tag + "-" + d.run_id[:8]
         argv = d.cold_worker_command(
-            "copy-hash", source=source, target=target, script_path=d.cold_snapshot
+            "copy-hash", source=source, target=target,
+            script_path=d.cold_snapshot, max_source_bytes=d.max_aof_bytes
         )
         argv[1:1] = ["--user=999:999"]
         expected = {
@@ -179,12 +197,16 @@ class AofClonePrimitives:
         self.create_offline_helper(name, argv, expected)
         output = d.docker(["start", "--attach", name], seconds=135)
         raw = self.finish_offline_helper(name, output, status="COPY_VERIFIED")
-        return d.validate_copy_proof(raw, source_manifest=source_manifest)
+        return d.validate_copy_proof(
+            raw, source_manifest=source_manifest, max_aof_bytes=d.max_aof_bytes
+        )
 
     def aof_inventory(
         self, volume: str, tag: str, worker_proof: dict | None = None
     ) -> dict:
         d = self.d
+        if not self._profile_is_bounded():
+            d.reject("REDIS_AOF_PROFILE_INVALID")
         if d.aof_snapshot is None:
             d.reject("PINNED_AOF_INVENTORY_SNAPSHOT_REQUIRED")
         name = d.prefix + "-aof-inventory-" + tag + "-" + d.run_id[:8]
@@ -212,6 +234,8 @@ class AofClonePrimitives:
             "-B",
             "/work/runtime_epoch_redis_aof.py",
             "--aof-inventory",
+            "--profile",
+            d.aof_profile,
         ]
         expected = {
             volume: ("/source", False),
@@ -220,4 +244,6 @@ class AofClonePrimitives:
         self.create_offline_helper(name, args, expected)
         output = d.docker(["start", "--attach", name], seconds=75)
         raw = self.finish_offline_helper(name, output, status="PASS_AOF_INVENTORY")
-        return d.validate_aof_inventory(raw, worker_proof=worker_proof)
+        return d.validate_aof_inventory(
+            raw, worker_proof=worker_proof, profile=d.aof_profile
+        )

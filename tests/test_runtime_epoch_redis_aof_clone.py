@@ -22,6 +22,7 @@ class CloneIoFixture:
         self.helper_id = "a" * 64
         self.removed: list[str] = []
         self.rejects: list[str] = []
+        self.worker_commands: list[tuple[str, dict]] = []
 
     def docker(self, argv: list[str], **kwargs) -> str:
         self.calls.append((argv, kwargs))
@@ -64,11 +65,20 @@ class CloneIoFixture:
     def require_mount_set(self, name: str, expected: dict) -> None:
         self.mounts.append((name, expected))
 
+    def worker_command(self, mode: str, **kwargs) -> list[str]:
+        self.worker_commands.append((mode, kwargs))
+        return ["create", "--mode", mode]
+
     def reject(self, code: str) -> None:
         self.rejects.append(code)
         raise ValueError(code)
 
-    def make(self) -> AofClonePrimitives:
+    def make(
+        self,
+        *,
+        max_aof_bytes: int = 8 * 1024 * 1024,
+        aof_profile: str = "standard",
+    ) -> AofClonePrimitives:
         deps = AofCloneDependencies(
             owner="owner",
             prefix="kairos-epoch-owner",
@@ -77,7 +87,7 @@ class CloneIoFixture:
             runner_image="runner@sha256:" + "b" * 64,
             worker_image="worker@sha256:" + "c" * 64,
             run_id="0123456789abcdef0123456789abcdef",
-            max_aof_bytes=1024,
+            max_aof_bytes=max_aof_bytes,
             cold_snapshot=Path("/private/cold.py"),
             aof_snapshot=Path("/private/aof.py"),
             created=self.created,
@@ -85,21 +95,24 @@ class CloneIoFixture:
             docker=self.docker,
             inspect_container=self.inspect_container,
             require_mount_set=self.require_mount_set,
-            cold_worker_command=lambda mode, **kwargs: ["create", "--mode", mode],
+            cold_worker_command=self.worker_command,
             worker_json=lambda output, *, status: {
                 "status": status,
                 "file_count": 4,
                 "total_bytes": 100,
             },
-            validate_copy_proof=lambda value, *, source_manifest: {
+            validate_copy_proof=lambda value, *, source_manifest, max_aof_bytes: {
                 **value,
                 "source_manifest": source_manifest,
+                "max_aof_bytes": max_aof_bytes,
             },
-            validate_aof_inventory=lambda value, *, worker_proof: {
+            validate_aof_inventory=lambda value, *, worker_proof, profile: {
                 **value,
                 "worker_proof": worker_proof,
+                "profile": profile,
             },
             reject=self.reject,
+            aof_profile=aof_profile,
         )
         return AofClonePrimitives(deps)
 
@@ -161,7 +174,12 @@ class AofClonePrimitiveTests(unittest.TestCase):
 
         self.assertEqual(manifest["file_count"], 4)
         self.assertEqual(copied["source_manifest"], manifest)
+        self.assertEqual(copied["max_aof_bytes"], 8 * 1024 * 1024)
+        self.assertEqual(
+            fixture.worker_commands[-1][1]["max_source_bytes"], 8 * 1024 * 1024
+        )
         self.assertEqual(inventory["worker_proof"], {"ok": True})
+        self.assertEqual(inventory["profile"], "standard")
         self.assertEqual(
             fixture.removed,
             [
@@ -178,6 +196,43 @@ class AofClonePrimitiveTests(unittest.TestCase):
         self.assertIn("--read-only", create_aof)
         self.assertIn("--cap-drop=ALL", create_aof)
         self.assertIn("type=volume,src=backup-volume,dst=/source,readonly", create_aof)
+
+    def test_explicit_forensic_profile_threads_exact_32m_cap_and_name(self) -> None:
+        fixture = CloneIoFixture()
+        primitive = fixture.make(
+            max_aof_bytes=32 * 1024 * 1024, aof_profile="forensic32m"
+        )
+        manifest = primitive.cold_manifest("source-volume", "before")
+        self.assertEqual(
+            fixture.worker_commands[-1][1]["max_source_bytes"], 32 * 1024 * 1024
+        )
+        primitive.aof_inventory("backup-volume", "inventory", worker_proof={"ok": True})
+        create_aof = next(
+            argv
+            for argv, _ in fixture.calls
+            if argv[0] == "create" and "--aof-inventory" in argv
+        )
+        self.assertEqual(
+            create_aof[create_aof.index("--profile") + 1], "forensic32m"
+        )
+
+    def test_profile_cap_mismatch_rejects_before_helper_creation(self) -> None:
+        fixture = CloneIoFixture()
+        primitive = fixture.make(
+            max_aof_bytes=256 * 1024 * 1024, aof_profile="forensic32m"
+        )
+        with self.assertRaisesRegex(ValueError, "REDIS_AOF_PROFILE_INVALID"):
+            primitive.cold_manifest("source-volume", "before")
+        self.assertEqual(fixture.calls, [])
+
+    def test_non_integer_profile_caps_reject_before_helper_creation(self) -> None:
+        for cap in (True, float(8 * 1024 * 1024)):
+            with self.subTest(cap=cap):
+                fixture = CloneIoFixture()
+                primitive = fixture.make(max_aof_bytes=cap)
+                with self.assertRaisesRegex(ValueError, "REDIS_AOF_PROFILE_INVALID"):
+                    primitive.cold_manifest("source-volume", "before")
+                self.assertEqual(fixture.calls, [])
 
     def test_finish_rejects_changed_helper_identity_without_removing_it(self) -> None:
         fixture = CloneIoFixture()

@@ -109,10 +109,6 @@ class RuntimeEpochRedisAofTests(unittest.TestCase):
                 "AOF_UNKNOWN_COMMAND_OR_KEY",
             ),
             (_command("MULTI"), "AOF_TRANSACTION_INVALID"),
-            (
-                _command("MULTI") + _command("SELECT", "0") + _command("EXEC"),
-                "AOF_DB_INVALID",
-            ),
         )
         for data, expected in samples:
             with (
@@ -121,6 +117,33 @@ class RuntimeEpochRedisAofTests(unittest.TestCase):
             ):
                 aof.inventory_aof(self._file(data), OWNER)
             self.assertEqual(str(caught.exception), expected)
+
+    def test_select_zero_is_allowed_inside_multi_but_other_shapes_are_rejected(self) -> None:
+        data = _command("MULTI") + _command("SELECT", "0") + _command("EXEC")
+        self.assertEqual(aof.inventory_bytes(data, OWNER)["dbs"], [0])
+        for select in (_command("SELECT", "1"), _command("SELECT"),
+                       _command("SELECT", "0", "extra")):
+            with self.subTest(select=select), self.assertRaisesRegex(ValueError, "AOF_DB_INVALID"):
+                aof.inventory_bytes(_command("MULTI") + select + _command("EXEC"), OWNER)
+
+    def test_explicit_forensic_profile_has_exact_byte_and_command_ceilings(self) -> None:
+        # A tiny valid command repeated past the legacy command cap stays
+        # rejected by default and is admitted only by the named forensic cap.
+        data = _command("SELECT", "0") * (aof.MAX_COMMANDS + 1)
+        with self.assertRaisesRegex(ValueError, "AOF_LIMIT_EXCEEDED"):
+            aof.inventory_bytes(data, OWNER)
+        self.assertEqual(
+            aof.inventory_bytes(data, OWNER, profile="forensic32m")["command_count"],
+            aof.MAX_COMMANDS + 1,
+        )
+        too_many = _command("SELECT", "0") * 200_001
+        with self.assertRaisesRegex(ValueError, "AOF_LIMIT_EXCEEDED"):
+            aof.inventory_bytes(too_many, OWNER, profile="forensic32m")
+        with self.assertRaisesRegex(ValueError, "AOF_LIMIT_EXCEEDED"):
+            aof.inventory_bytes(b"x" * (32 * 1024 * 1024 + 1), OWNER,
+                                profile="forensic32m")
+        with self.assertRaisesRegex(ValueError, "AOF_PROFILE_INVALID"):
+            aof.inventory_bytes(data, OWNER, profile="unbounded")
 
     def test_rejects_truncated_and_oversized_tokens(self) -> None:
         with self.assertRaisesRegex(ValueError, "AOF_MALFORMED_OR_TRUNCATED"):

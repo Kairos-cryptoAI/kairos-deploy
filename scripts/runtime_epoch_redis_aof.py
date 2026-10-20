@@ -14,12 +14,17 @@ import re
 import stat
 from collections import Counter
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 TOPIC = "kairos.market.closed_bar.v1"
 OWNER = "69893dc7b7c647f49967387e7efca9fb"
 MAX_AOF_BYTES = 8 * 1024 * 1024
 MAX_COMMANDS = 50_000
+FORENSIC_AOF_PROFILES = MappingProxyType({
+    "standard": (MAX_AOF_BYTES, MAX_COMMANDS),
+    "forensic32m": (32 * 1024 * 1024, 200_000),
+})
 MAX_ARRAY_LENGTH = 32
 MAX_TOKEN_BYTES = 128 * 1024
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -79,10 +84,11 @@ def _unsigned(
 
 
 class _RespReader:
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, *, max_commands: int = MAX_COMMANDS):
         self.data = data
         self.offset = 0
         self.commands = 0
+        self.max_commands = max_commands
 
     def _line(self) -> bytes:
         end = self.data.find(b"\r\n", self.offset)
@@ -123,7 +129,7 @@ class _RespReader:
             command.append(self.data[self.offset : end])
             self.offset = end + 2
         self.commands += 1
-        if self.commands > MAX_COMMANDS:
+        if self.commands > self.max_commands:
             _fail("AOF_LIMIT_EXCEEDED")
         return command
 
@@ -190,15 +196,25 @@ def _valid_claim(args: list[bytes]) -> None:
         i += 1 + arity
 
 
-def inventory_aof(path: str | os.PathLike[str], owner: str) -> dict[str, Any]:
+def _profile_limits(profile: str) -> tuple[int, int]:
+    try:
+        return FORENSIC_AOF_PROFILES[profile]
+    except (KeyError, TypeError):
+        _fail("AOF_PROFILE_INVALID")
+
+
+def inventory_aof(
+    path: str | os.PathLike[str], owner: str, *, profile: str = "standard"
+) -> dict[str, Any]:
     """Parse a bounded RESP AOF and return only sanitized structural metadata."""
+    max_aof_bytes, max_commands = _profile_limits(profile)
     owner = _owner(owner)
     candidate = Path(path)
     try:
         if candidate.is_symlink():
             _fail("AOF_FILE_INVALID")
         st = candidate.stat()
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_AOF_BYTES:
+        if not stat.S_ISREG(st.st_mode) or st.st_size > max_aof_bytes:
             _fail(
                 "AOF_FILE_INVALID"
                 if not stat.S_ISREG(st.st_mode)
@@ -208,31 +224,33 @@ def inventory_aof(path: str | os.PathLike[str], owner: str) -> dict[str, Any]:
         fd = os.open(candidate, flags)
         try:
             fst = os.fstat(fd)
-            if not stat.S_ISREG(fst.st_mode) or fst.st_size > MAX_AOF_BYTES:
+            if not stat.S_ISREG(fst.st_mode) or fst.st_size > max_aof_bytes:
                 _fail("AOF_FILE_INVALID")
             with os.fdopen(fd, "rb", closefd=False) as stream:
-                data = stream.read(MAX_AOF_BYTES + 1)
+                data = stream.read(max_aof_bytes + 1)
         finally:
             os.close(fd)
     except _AofError:
         raise
     except (OSError, ValueError):
         _fail("AOF_FILE_INVALID")
-    if len(data) > MAX_AOF_BYTES:
+    if len(data) > max_aof_bytes:
         _fail("AOF_LIMIT_EXCEEDED")
+    return inventory_bytes(data, owner, profile=profile)
 
-    return inventory_bytes(data, owner)
 
-
-def inventory_bytes(data: bytes, owner: str) -> dict[str, Any]:
+def inventory_bytes(
+    data: bytes, owner: str, *, profile: str = "standard"
+) -> dict[str, Any]:
     """Parse already captured AOF bytes with the same strict bounded parser."""
+    max_aof_bytes, max_commands = _profile_limits(profile)
     owner = _owner(owner)
     if not isinstance(data, bytes):
         _fail("AOF_INPUT_INVALID")
-    if len(data) > MAX_AOF_BYTES:
+    if len(data) > max_aof_bytes:
         _fail("AOF_LIMIT_EXCEEDED")
 
-    reader = _RespReader(data)
+    reader = _RespReader(data, max_commands=max_commands)
     counts: Counter[str] = Counter()
     dbs: set[int] = set()
     publication_ids: list[str] = []
@@ -266,8 +284,6 @@ def inventory_bytes(data: bytes, owner: str) -> dict[str, Any]:
             in_multi = False
             counts["exec"] += 1
         elif name == b"SELECT":
-            if in_multi:
-                _fail("AOF_DB_INVALID")
             if len(args) != 1 or args[0] != b"0":
                 _fail("AOF_DB_INVALID")
             dbs.add(0)
@@ -411,11 +427,18 @@ def candidate_acl(original: bytes, owner: str) -> bytes:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--aof-inventory", action="store_true")
+    parser.add_argument(
+        "--profile", choices=tuple(FORENSIC_AOF_PROFILES), default="standard"
+    )
     args = parser.parse_args(argv)
     if not args.aof_inventory:
         parser.error("--aof-inventory is required")
     try:
-        report = inventory_aof("/source/appendonlydir/appendonly.aof.1.incr.aof", OWNER)
+        report = inventory_aof(
+            "/source/appendonlydir/appendonly.aof.1.incr.aof",
+            OWNER,
+            profile=args.profile,
+        )
     except ValueError as exc:
         code = getattr(exc, "code", "AOF_INVENTORY_FAILED")
         print(

@@ -636,11 +636,17 @@ def _worker_command(
     target: str | None = None,
     script_path: Path | None = None,
     historical_rdb_only: bool = False,
+    max_source_bytes: int | None = None,
 ) -> list[str]:
     if type(historical_rdb_only) is not bool:
         raise ColdRedisError("historical RDB worker mode must be a boolean")
     if historical_rdb_only and mode not in {"copy-hash", "manifest-only"}:
         raise ColdRedisError("historical RDB mode is limited to source lineage workers")
+    if max_source_bytes is not None and (
+        type(max_source_bytes) is not int
+        or max_source_bytes not in {8 * 1024 * 1024, 32 * 1024 * 1024}
+    ):
+        raise ColdRedisError("AOF copy size profile is not allowlisted")
     command = [
         "create",
         "--network=none",
@@ -681,6 +687,8 @@ def _worker_command(
     command += [RUNNER_IMAGE, "-B", "/work/cold_redis_acceptance.py", "--worker", mode]
     if historical_rdb_only:
         command.append("--historical-root-rdb-only")
+    if max_source_bytes is not None:
+        command.extend(["--max-source-bytes", str(max_source_bytes)])
     return command
 
 
@@ -770,10 +778,21 @@ def _run_worker(
     return value
 
 
-def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
+def _copy_worker(
+    mode: str,
+    *,
+    historical_rdb_only: bool = False,
+    max_source_bytes: int = MAX_SOURCE_BYTES,
+) -> int:
     """Worker mode runs only in the pinned offline helper image."""
     if type(historical_rdb_only) is not bool:
         raise ColdRedisError("historical RDB worker mode must be a boolean")
+    if type(max_source_bytes) is not int or max_source_bytes not in {
+        MAX_SOURCE_BYTES,
+        8 * 1024 * 1024,
+        32 * 1024 * 1024,
+    }:
+        raise ColdRedisError("AOF copy size profile is not allowlisted")
     stage = "worker_mode"
     try:
         if mode == "prepare-target":
@@ -796,9 +815,9 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
         if mode in {"manifest-only", "manifest-aof-cache"}:
             stage = "manifest_source"
             source = Path("/source")
-            manifest = _manifest_tree(source)
+            manifest = _manifest_tree(source, max_total_bytes=max_source_bytes)
             stage = "manifest_bounds"
-            if manifest["file_count"] < 1 or manifest["total_bytes"] > MAX_SOURCE_BYTES:
+            if manifest["file_count"] < 1 or manifest["total_bytes"] > max_source_bytes:
                 raise ColdRedisError(
                     "source Redis volume is empty or exceeds the copy-size bound"
                 )
@@ -827,11 +846,11 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
             return 2
         stage = "copy_source_manifest"
         source, target = Path("/source"), Path("/data")
-        before = _manifest_tree(source)
+        before = _manifest_tree(source, max_total_bytes=max_source_bytes)
         stage = "copy_persistence_before"
         persistence = _persistence_layout(source, require_root_rdb=historical_rdb_only)
         stage = "copy_bounds"
-        if before["file_count"] < 1 or before["total_bytes"] > MAX_SOURCE_BYTES:
+        if before["file_count"] < 1 or before["total_bytes"] > max_source_bytes:
             raise ColdRedisError(
                 "source Redis volume is empty or exceeds the copy-size bound"
             )
@@ -841,9 +860,9 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
         stage = "copy_tree"
         _copy_tree(source, target)
         stage = "copy_source_manifest_after"
-        after = _manifest_tree(source)
+        after = _manifest_tree(source, max_total_bytes=max_source_bytes)
         stage = "copy_target_manifest"
-        copied = _manifest_tree(target)
+        copied = _manifest_tree(target, max_total_bytes=max_source_bytes)
         stage = "copy_persistence_after"
         if (
             before != after
@@ -898,7 +917,9 @@ def _copy_worker(mode: str, *, historical_rdb_only: bool = False) -> int:
         return 1
 
 
-def _manifest_tree(root: Path) -> dict[str, Any]:
+def _manifest_tree(
+    root: Path, *, max_total_bytes: int = MAX_SOURCE_BYTES
+) -> dict[str, Any]:
     if not root.is_dir() or root.is_symlink():
         raise ColdRedisError("volume root is not a plain directory")
     rows: list[dict[str, Any]] = []
@@ -921,7 +942,7 @@ def _manifest_tree(root: Path) -> dict[str, Any]:
             if path.is_symlink() or not path.is_file():
                 raise ColdRedisError("Redis volume contains a link or special file")
             total += info.st_size
-            if len(rows) >= MAX_SOURCE_FILES or total > MAX_SOURCE_BYTES:
+            if len(rows) >= MAX_SOURCE_FILES or total > max_total_bytes:
                 raise ColdRedisError("Redis volume exceeds its file or size bound")
             digest = hashlib.sha256()
             with _open_noatime(path) as stream:
@@ -2363,6 +2384,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accepted-clone-receipt-sha256")
     parser.add_argument("--native-inspection", type=Path)
     parser.add_argument("--work-root", type=Path, default=ROOT)
+    parser.add_argument("--max-source-bytes", type=int, default=MAX_SOURCE_BYTES)
     parser.add_argument(
         "--worker",
         choices=(
@@ -2378,7 +2400,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.worker == "copy-hash":
         return _run_worker_bounded(
             lambda: _copy_worker(
-                "copy-hash", historical_rdb_only=args.historical_root_rdb_only
+                "copy-hash",
+                historical_rdb_only=args.historical_root_rdb_only,
+                max_source_bytes=args.max_source_bytes,
             ),
             seconds=120,
         )
@@ -2389,7 +2413,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ColdRedisError("epoch cache proof cannot use historical RDB mode")
         return _run_worker_bounded(
             lambda: _copy_worker(
-                args.worker, historical_rdb_only=args.historical_root_rdb_only
+                args.worker,
+                historical_rdb_only=args.historical_root_rdb_only,
+                max_source_bytes=args.max_source_bytes,
             ),
             seconds=60,
         )

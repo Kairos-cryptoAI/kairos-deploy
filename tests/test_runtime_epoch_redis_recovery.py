@@ -70,6 +70,54 @@ def _aof_inventory() -> dict:
 
 
 class RedisAofRecoveryTests(unittest.TestCase):
+    def test_explicit_copy_size_cap_is_allowlisted_not_a_free_integer(self):
+        manifest = {"manifest_sha256": "1" * 64, "content_sha256": "2" * 64}
+        proof = {
+            "state": "COPY_VERIFIED",
+            "source_manifest_sha256": manifest["manifest_sha256"],
+            "source_after_manifest_sha256": manifest["manifest_sha256"],
+            "snapshot_content_sha256": manifest["content_sha256"],
+            "file_count": 4,
+            "total_bytes": 16 * 1024 * 1024,
+        }
+        self.assertEqual(
+            recovery.validate_copy_proof(
+                proof, source_manifest=manifest,
+                max_aof_bytes=recovery.MAX_FORENSIC_AOF_BYTES,
+            )["total_bytes"],
+            16 * 1024 * 1024,
+        )
+        with self.assertRaises(epoch.Rejected):
+            recovery.validate_copy_proof(
+                proof, source_manifest=manifest, max_aof_bytes=256 * 1024 * 1024
+            )
+        for invalid_cap in (True, float(recovery.MAX_AOF_BYTES)):
+            with self.subTest(invalid_cap=invalid_cap), self.assertRaises(epoch.Rejected):
+                recovery.validate_copy_proof(
+                    proof, source_manifest=manifest, max_aof_bytes=invalid_cap
+                )
+        with self.assertRaises(epoch.Rejected):
+            recovery.validate_copy_proof(
+                proof, source_manifest=manifest
+            )
+
+    def test_inventory_size_profile_is_named_and_default_stays_eight_mib(self):
+        inventory = _aof_inventory()
+        inventory["bytes"] = 16 * 1024 * 1024
+        with self.assertRaises(epoch.Rejected):
+            recovery.validate_aof_inventory(inventory)
+        self.assertEqual(
+            recovery.validate_aof_inventory(
+                inventory, profile=recovery.FORENSIC_AOF_PROFILE
+            )["bytes"],
+            16 * 1024 * 1024,
+        )
+
+    def test_malformed_aof_profile_rejects_before_inventory_validation(self):
+        for profile in ([], {}, None, True, 1.0):
+            with self.subTest(profile=profile), self.assertRaises(epoch.Rejected):
+                recovery.validate_aof_inventory({}, profile=profile)
+
     def test_async_root_cache_refresh_does_not_weaken_aof_or_file_inventory(self):
         persistence = {
             "format": "REDIS_MULTIPART_AOF",
