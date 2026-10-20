@@ -290,12 +290,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#0ef9fa71a7485215ab089ef0ede0d31adb8c5849
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#283754059c6566bdeb30d8cf16a5a054cd99bb5d
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 0ef9fa71a7485215ab089ef0ede0d31adb8c5849
+        SOURCE_REVISION: 283754059c6566bdeb30d8cf16a5a054cd99bb5d
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
