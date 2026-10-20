@@ -22,11 +22,16 @@ if __package__:
     from scripts import runtime_epoch_boot as boot
     from scripts import runtime_epoch_controller as epoch
     from scripts import runtime_epoch_redis_aof as aof
+    from scripts.runtime_epoch_redis_aof_clone import (
+        AofCloneDependencies,
+        AofClonePrimitives,
+    )
 else:
     import cold_redis_acceptance as cold
     import runtime_epoch_boot as boot
     import runtime_epoch_controller as epoch
     import runtime_epoch_redis_aof as aof
+    from runtime_epoch_redis_aof_clone import AofCloneDependencies, AofClonePrimitives
 
 OWNER = "69893dc7b7c647f49967387e7efca9fb"
 PREFIX = "kairos-epoch-" + OWNER[:12]
@@ -450,6 +455,33 @@ class RedisAofRecoveryController(boot.BootController):
         self.worker_proof: dict | None = None
         self.offline_helper_ids: dict[str, str] = {}
 
+    def _clone_primitives(self) -> AofClonePrimitives:
+        """Inject this run's already-admitted I/O into shared AOF primitives."""
+        return AofClonePrimitives(
+            AofCloneDependencies(
+                owner=OWNER,
+                prefix=PREFIX,
+                scope_label=epoch.EPOCH_SCOPE,
+                epoch_label=epoch.EPOCH_LABEL,
+                runner_image=cold.RUNNER_IMAGE,
+                worker_image=epoch.WORKER_IMAGE,
+                run_id=self.run_id,
+                max_aof_bytes=MAX_AOF_BYTES,
+                cold_snapshot=self.cold_snapshot,
+                aof_snapshot=self.aof_snapshot,
+                created=self.created,
+                helper_ids=self.offline_helper_ids,
+                docker=self.docker,
+                inspect_container=self.inspect_container,
+                require_mount_set=self.require_mount_set,
+                cold_worker_command=cold._worker_command,
+                worker_json=_worker_json,
+                validate_copy_proof=validate_copy_proof,
+                validate_aof_inventory=validate_aof_inventory,
+                reject=reject,
+            )
+        )
+
     def _assert_absent(self) -> None:
         names = (BACKUP_VOLUME, CLONE_VOLUME)
         for name in names:
@@ -479,175 +511,42 @@ class RedisAofRecoveryController(boot.BootController):
             reject("REDIS_AOF_CLONE_CONTAINER_MUST_BE_ABSENT")
 
     def _owned_labels(self) -> list[str]:
-        return [
-            "--label",
-            epoch.EPOCH_LABEL + "=" + OWNER,
-            "--label",
-            "com.kairos.runtime-epoch.scope=" + epoch.EPOCH_SCOPE,
-        ]
+        # Kept as a compatibility seam for callers/tests; implementation lives
+        # in the dependency-injected shared primitive.
+        return self._clone_primitives()._owned_labels()
 
     def _create_offline_helper(
         self, name: str, argv: list[str], expected_mounts: dict
     ) -> dict:
-        if not name.startswith(PREFIX + "-") or name in self.created:
-            reject("UNIQUE_PRIVATE_OFFLINE_HELPER_REQUIRED")
-        argv = [argv[0], "--name", name, *self._owned_labels(), *argv[1:]]
-        self.docker(argv)
-        self.created.append(name)
-        view = self.inspect_container(name)
-        if (
-            not isinstance(view.get("id"), str)
-            or re.fullmatch(r"[0-9a-f]{64}", view["id"]) is None
-        ):
-            reject("OFFLINE_HELPER_CONTAINER_ID_REQUIRED")
-        self.offline_helper_ids[name] = view["id"]
-        labels = view.get("labels") or {}
-        if (
-            view.get("name") != "/" + name
-            or view.get("network") != "none"
-            or view.get("ports")
-            or view.get("readonly") is not True
-            or view.get("privileged")
-            or view.get("caps") != ["ALL"]
-            or view.get("image")
-            not in {
-                cold.RUNNER_IMAGE,
-                cold.RUNNER_IMAGE.split("@", 1)[-1],
-                "sha256:" + cold.RUNNER_IMAGE.rsplit("sha256:", 1)[-1],
-            }
-            or labels.get(epoch.EPOCH_LABEL) != OWNER
-            or labels.get("com.kairos.runtime-epoch.scope") != epoch.EPOCH_SCOPE
-            or view.get("memory") != 512 * 1024**2
-            or view.get("swap") != 512 * 1024**2
-            or view.get("cpus") != 1_000_000_000
-            or self.docker(
-                ["inspect", "--format", "{{json .Config.User}}", name]
-            ).strip('"')
-            != "999:999"
-            or json.loads(
-                self.docker(
-                    ["inspect", "--format", "{{json .HostConfig.SecurityOpt}}", name]
-                )
-            )
-            != ["no-new-privileges:true"]
-            or json.loads(
-                self.docker(
-                    ["inspect", "--format", "{{json .HostConfig.CapAdd}}", name]
-                )
-            )
-            not in (None, [])
-            or json.loads(
-                self.docker(["inspect", "--format", "{{json .HostConfig.Tmpfs}}", name])
-            )
-            != {"/tmp": "rw,noexec,nosuid,nodev,size=32m"}
-        ):
-            reject("OFFLINE_HELPER_SANDBOX_REQUIRED")
-        self.require_mount_set(name, expected_mounts)
-        return view
+        return self._clone_primitives().create_offline_helper(
+            name, argv, expected_mounts
+        )
 
     def _finish_offline_helper(self, name: str, output: str, *, status: str) -> dict:
-        value = _worker_json(output, status=status)
-        view = self.inspect_container(name)
-        labels = view.get("labels") or {}
-        if (
-            view.get("id") != self.offline_helper_ids.get(name)
-            or labels.get(epoch.EPOCH_LABEL) != OWNER
-            or labels.get("com.kairos.runtime-epoch.scope") != epoch.EPOCH_SCOPE
-            or (view.get("state") or {}).get("Status") != "exited"
-            or (view.get("state") or {}).get("ExitCode") != 0
-        ):
-            reject("OFFLINE_HELPER_EXIT_STATUS_REQUIRED")
-        self.docker(["rm", name])
-        self.created.remove(name)
-        self.offline_helper_ids.pop(name, None)
-        return value
+        return self._clone_primitives().finish_offline_helper(
+            name, output, status=status
+        )
 
     def cold_manifest(
         self, volume: str, tag: str, *, cache_proof: bool = False
     ) -> dict:
-        if self.cold_snapshot is None:
-            reject("PINNED_COLD_REDIS_WORKER_REQUIRED")
-        name = PREFIX + "-manifest-" + tag + "-" + self.run_id[:8]
-        argv = cold._worker_command(
-            "manifest-aof-cache" if cache_proof else "manifest-only",
-            source=volume,
-            script_path=self.cold_snapshot,
+        return self._clone_primitives().cold_manifest(
+            volume, tag, cache_proof=cache_proof
         )
-        argv[1:1] = ["--user=999:999"]
-        expected = {
-            volume: ("/source", False),
-            str(self.cold_snapshot): ("/work/cold_redis_acceptance.py", False),
-        }
-        self._create_offline_helper(name, argv, expected)
-        output = self.docker(["start", "--attach", name], seconds=75)
-        value = self._finish_offline_helper(name, output, status="COPY_VERIFIED")
-        if (
-            value.get("file_count") != 4
-            or type(value.get("total_bytes")) is not int
-            or not 0 < value["total_bytes"] <= MAX_AOF_BYTES
-        ):
-            reject("REDIS_AOF_SOURCE_MANIFEST_BOUNDS_REQUIRED")
-        return value
 
     def copy_volume(
         self, source: str, target: str, tag: str, source_manifest: dict
     ) -> dict:
-        if self.cold_snapshot is None:
-            reject("PINNED_COLD_REDIS_WORKER_REQUIRED")
-        name = PREFIX + "-copy-" + tag + "-" + self.run_id[:8]
-        argv = cold._worker_command(
-            "copy-hash", source=source, target=target, script_path=self.cold_snapshot
+        return self._clone_primitives().copy_volume(
+            source, target, tag, source_manifest
         )
-        argv[1:1] = ["--user=999:999"]
-        expected = {
-            source: ("/source", False),
-            target: ("/data", True),
-            str(self.cold_snapshot): ("/work/cold_redis_acceptance.py", False),
-        }
-        self._create_offline_helper(name, argv, expected)
-        output = self.docker(["start", "--attach", name], seconds=135)
-        raw = self._finish_offline_helper(name, output, status="COPY_VERIFIED")
-        return validate_copy_proof(raw, source_manifest=source_manifest)
 
     def aof_inventory(
         self, volume: str, tag: str, worker_proof: dict | None = None
     ) -> dict:
-        if self.aof_snapshot is None:
-            reject("PINNED_AOF_INVENTORY_SNAPSHOT_REQUIRED")
-        name = PREFIX + "-aof-inventory-" + tag + "-" + self.run_id[:8]
-        args = [
-            "create",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges:true",
-            "--memory=512m",
-            "--memory-swap=512m",
-            "--cpus=1",
-            "--pids-limit=64",
-            "--user=999:999",
-            "--pull=never",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=32m",
-            "--mount",
-            f"type=volume,src={volume},dst=/source,readonly",
-            "--mount",
-            f"type=bind,src={self.aof_snapshot},dst=/work/runtime_epoch_redis_aof.py,readonly",
-            "--entrypoint",
-            "python",
-            epoch.WORKER_IMAGE,
-            "-B",
-            "/work/runtime_epoch_redis_aof.py",
-            "--aof-inventory",
-        ]
-        expected = {
-            volume: ("/source", False),
-            str(self.aof_snapshot): ("/work/runtime_epoch_redis_aof.py", False),
-        }
-        self._create_offline_helper(name, args, expected)
-        output = self.docker(["start", "--attach", name], seconds=75)
-        raw = self._finish_offline_helper(name, output, status="PASS_AOF_INVENTORY")
-        return validate_aof_inventory(raw, worker_proof=worker_proof)
+        return self._clone_primitives().aof_inventory(
+            volume, tag, worker_proof=worker_proof
+        )
 
     def _clone_container_absent(self) -> None:
         output = self.docker(
