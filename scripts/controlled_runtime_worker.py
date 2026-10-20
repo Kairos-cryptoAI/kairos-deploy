@@ -301,7 +301,7 @@ def validate_plan(plan: dict[str, Any], *, database: str, primary: bool) -> None
     if (
         not isinstance(revisions, dict)
         or set(revisions) != {"kairos-core", "kairos-persistence"}
-        or revisions.get("kairos-core") != "37165e3078b53364513f876f4243357ba19a19ba"
+        or revisions.get("kairos-core") != "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9"
     ):
         raise WorkerError("expected package revision manifest differs")
     if any(

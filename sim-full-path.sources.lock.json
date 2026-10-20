@@ -15,19 +15,19 @@
   "dependencies": {
     "kairos-core": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
-      "revision": "37165e3078b53364513f876f4243357ba19a19ba"
+      "revision": "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9"
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
-      "revision": "2d88a351fc045de5b58bbf6acae209341096a850"
+      "revision": "752c984ca276ccbb7fcbd1b60a6c75d95fe6f108"
     },
     "kairos-strategy-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-strategy-engine",
-      "revision": "72a3fcfc86f92a825acb56431ca21a3b8a65c229"
+      "revision": "9d369b815cb090a67e94bf3dfe943210235b86eb"
     },
     "kairos-router": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-router",
-      "revision": "604828c53a7f24c8ade8b2f4c3b1cb773016c3c2"
+      "revision": "a37d146bd581c63bb8d10e0835a6abb41c677ad1"
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
@@ -35,15 +35,15 @@
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",
-      "revision": "8e0250304e6794443093b9af89aaa0a488473430"
+      "revision": "2a666ea4e664d984f7bead217cba71cfa14be7fe"
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "fe4941df9d0aa58c00b64fad7ba958a0fca48c34"
+      "revision": "31be85e233d68932252f02723eb46745415466dd"
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "d2244dcd1f14d678dae5c16b51d698820922dc36"
+      "revision": "764b3c7dd870ae932c1e03423512c31bf83b6174"
     }
   },
   "infrastructure": {
