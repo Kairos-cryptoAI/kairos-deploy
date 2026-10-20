@@ -2083,14 +2083,81 @@ async def redis_retry_pause(stop: asyncio.Event, seconds: float) -> None:
     raise asyncio.CancelledError
 
 
-async def runtime_redis_call(operation, stop: asyncio.Event, telemetry: dict):
+def redis_error_class(error: BaseException) -> str:
+    """Return only a bounded exception class name, never driver text."""
+    name = type(error).__name__
+    return name if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name) else "OtherError"
+
+
+def record_redis_failure(
+    telemetry: dict,
+    *,
+    stage: str,
+    started_at: float,
+    error_class: str,
+    attempts: int,
+) -> dict:
+    """Keep one sanitized failure record; never retain exception or payload data."""
+    record = {
+        "stage": stage,
+        "elapsed_ms": min(
+            86_400_000, max(0, int((time.monotonic() - started_at) * 1000))
+        ),
+        "error_class": error_class,
+        "attempts": attempts,
+    }
+    telemetry["last_failure"] = record
+    return record
+
+
+def sanitized_redis_failure(value) -> dict | None:
+    if not isinstance(value, dict) or set(value) != {
+        "stage",
+        "elapsed_ms",
+        "error_class",
+        "attempts",
+    }:
+        return None
+    if value["stage"] not in {
+        "ensure_group",
+        "pending_read",
+        "reclaim",
+        "new_message_read",
+        "ack",
+    }:
+        return None
+    if (
+        type(value["elapsed_ms"]) is not int
+        or not 0 <= value["elapsed_ms"] <= 86_400_000
+        or type(value["attempts"]) is not int
+        or not 1 <= value["attempts"] <= RUNTIME_REDIS_ATTEMPTS
+        or not isinstance(value["error_class"], str)
+        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", value["error_class"])
+    ):
+        return None
+    return dict(value)
+
+
+def redis_epoch_error(reason: str, telemetry: dict) -> EpochError:
+    error = EpochError(reason)
+    record = sanitized_redis_failure(telemetry.get("last_failure"))
+    if record is not None:
+        error.redis_transport = record
+    return error
+
+
+async def runtime_redis_call(
+    operation, stop: asyncio.Event, telemetry: dict, *, stage: str
+):
     """Bounded replay for idempotent operations only (never a new stream read)."""
+    started_at = time.monotonic()
     for attempt in range(RUNTIME_REDIS_ATTEMPTS):
         if stop.is_set():
             raise asyncio.CancelledError
         try:
             async with asyncio.timeout(RUNTIME_REDIS_COMMAND_SECONDS):
                 result = await operation()
+            telemetry.pop("last_failure", None)
             if attempt:
                 telemetry["recoveries"] += 1
             return result
@@ -2098,8 +2165,17 @@ async def runtime_redis_call(operation, stop: asyncio.Event, telemetry: dict):
             if not redis_transport_failure(error):
                 raise
             telemetry["transport_failures"] += 1
+            record_redis_failure(
+                telemetry,
+                stage=stage,
+                started_at=started_at,
+                error_class=redis_error_class(error),
+                attempts=attempt + 1,
+            )
             if attempt == RUNTIME_REDIS_ATTEMPTS - 1:
-                raise EpochError("REDIS_TRANSPORT_RETRY_EXHAUSTED") from error
+                raise redis_epoch_error(
+                    "REDIS_TRANSPORT_RETRY_EXHAUSTED", telemetry
+                ) from error
             await redis_retry_pause(stop, RUNTIME_REDIS_BACKOFF_SECONDS[attempt])
     raise AssertionError("unreachable bounded Redis retry")
 
@@ -2157,22 +2233,55 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
             group = group or "bars"
             consumer = f"{consumer or 'consumer'}-{self._instance_id}"
             await runtime_redis_call(
-                lambda: self._ensure_group(topic, group), stop, telemetry
+                lambda: self._ensure_group(topic, group),
+                stop,
+                telemetry,
+                stage="ensure_group",
             )
             last_reclaim = 0.0
             replay_pending = False
             failures = 0
             recovery_deadline = None
+            recovery_started_at = None
             recovery_pending = False
+            operation_stage = "pending_read"
             while not stop.is_set():
                 try:
+                    operation_stage = (
+                        "pending_read"
+                        if replay_pending
+                        else "reclaim"
+                        if time.monotonic() - last_reclaim >= reclaim_every_s
+                        else "new_message_read"
+                    )
                     remaining = RUNTIME_REDIS_COMMAND_SECONDS
                     if recovery_deadline is not None:
                         remaining = min(remaining, recovery_deadline - time.monotonic())
                         if remaining <= 0:
-                            raise EpochError("REDIS_RECOVERY_DEADLINE_EXCEEDED")
+                            last_failure = sanitized_redis_failure(
+                                telemetry.get("last_failure")
+                            )
+                            record_redis_failure(
+                                telemetry,
+                                stage=operation_stage,
+                                started_at=(
+                                    recovery_started_at
+                                    if recovery_started_at is not None
+                                    else time.monotonic()
+                                ),
+                                error_class=(
+                                    last_failure["error_class"]
+                                    if last_failure
+                                    else "RecoveryDeadlineExceeded"
+                                ),
+                                attempts=failures,
+                            )
+                            raise redis_epoch_error(
+                                "REDIS_RECOVERY_DEADLINE_EXCEEDED", telemetry
+                            )
                     async with asyncio.timeout(remaining):
                         if replay_pending:
+                            operation_stage = "pending_read"
                             response = await self._redis.xreadgroup(
                                 group, consumer, {topic: "0"}, count=16
                             )
@@ -2180,6 +2289,8 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                             # but drain completion still waits for an empty PEL
                             # and a successful new-message read below.
                             failures, recovery_deadline = 0, None
+                            recovery_started_at = None
+                            telemetry.pop("last_failure", None)
                             recovery_pending = True
                             replay_rows = [
                                 row for _stream, rows in response or [] for row in rows
@@ -2188,6 +2299,7 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                             replay_rows = []
                             now = time.monotonic()
                             if now - last_reclaim >= reclaim_every_s:
+                                operation_stage = "reclaim"
                                 reclaimed = await self._reclaim_stale(
                                     topic, group, consumer, min_idle_ms=reclaim_idle_ms
                                 )
@@ -2223,10 +2335,31 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                             meta={"group": group, "reclaimed": True},
                         )
                     remaining = RUNTIME_REDIS_COMMAND_SECONDS
+                    operation_stage = "new_message_read"
                     if recovery_deadline is not None:
                         remaining = min(remaining, recovery_deadline - time.monotonic())
                         if remaining <= 0:
-                            raise EpochError("REDIS_RECOVERY_DEADLINE_EXCEEDED")
+                            last_failure = sanitized_redis_failure(
+                                telemetry.get("last_failure")
+                            )
+                            record_redis_failure(
+                                telemetry,
+                                stage=operation_stage,
+                                started_at=(
+                                    recovery_started_at
+                                    if recovery_started_at is not None
+                                    else time.monotonic()
+                                ),
+                                error_class=(
+                                    last_failure["error_class"]
+                                    if last_failure
+                                    else "RecoveryDeadlineExceeded"
+                                ),
+                                attempts=failures,
+                            )
+                            raise redis_epoch_error(
+                                "REDIS_RECOVERY_DEADLINE_EXCEEDED", telemetry
+                            )
                     async with asyncio.timeout(remaining):
                         response = await self._redis.xreadgroup(
                             group, consumer, {topic: ">"}, count=16, block=block_ms
@@ -2235,6 +2368,8 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                         telemetry["recoveries"] += 1
                     recovery_pending = False
                     failures, recovery_deadline = 0, None
+                    recovery_started_at = None
+                    telemetry.pop("last_failure", None)
                     for _stream, rows in response or []:
                         for message_id, fields in rows:
                             if not fields or set(fields) != {"data"}:
@@ -2251,13 +2386,34 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
                     failures += 1
                     telemetry["transport_failures"] += 1
                     if failures >= RUNTIME_REDIS_ATTEMPTS:
-                        raise EpochError("REDIS_TRANSPORT_RETRY_EXHAUSTED") from error
+                        record_redis_failure(
+                            telemetry,
+                            stage=operation_stage,
+                            started_at=(
+                                recovery_started_at
+                                if recovery_started_at is not None
+                                else time.monotonic()
+                            ),
+                            error_class=redis_error_class(error),
+                            attempts=failures,
+                        )
+                        raise redis_epoch_error(
+                            "REDIS_TRANSPORT_RETRY_EXHAUSTED", telemetry
+                        ) from error
                     if recovery_deadline is None:
+                        recovery_started_at = time.monotonic()
                         recovery_deadline = (
-                            time.monotonic()
+                            recovery_started_at
                             + RUNTIME_REDIS_RECOVERY_SECONDS
                             - RUNTIME_REDIS_COMMAND_SECONDS
                         )
+                    record_redis_failure(
+                        telemetry,
+                        stage=operation_stage,
+                        started_at=recovery_started_at,
+                        error_class=redis_error_class(error),
+                        attempts=failures,
+                    )
                     replay_pending = True
                     await redis_retry_pause(
                         stop, RUNTIME_REDIS_BACKOFF_SECONDS[failures - 1]
@@ -2267,7 +2423,10 @@ def create_runtime_transport(url: str, stop: asyncio.Event, telemetry: dict):
             if topic != TOPIC or (group or envelope.meta.get("group")) != "bars":
                 raise EpochError("FIXED_NONTRADING_REDIS_ACK_REQUIRED")
             await runtime_redis_call(
-                lambda: self._redis.xack(topic, "bars", envelope.id), stop, telemetry
+                lambda: self._redis.xack(topic, "bars", envelope.id),
+                stop,
+                telemetry,
+                stage="ack",
             )
 
     return EpochRedisTransport()
@@ -2813,6 +2972,16 @@ def main(argv=None) -> int:
                 "error_type": type(exc).__name__,
                 "reason": reason,
                 "failure_locations": failure_locations(exc),
+                **(
+                    {"redis_transport_failure": redis_failure}
+                    if (
+                        redis_failure := sanitized_redis_failure(
+                            getattr(exc, "redis_transport", None)
+                        )
+                    )
+                    is not None
+                    else {}
+                ),
                 "observed_at_utc": datetime.now(UTC).isoformat(),
                 "trading_started": False,
             },

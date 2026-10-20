@@ -4,6 +4,7 @@ import asyncio
 import json
 import ssl
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -92,6 +93,7 @@ class FakeRedis:
         self.reads = []
         self.pending = {}
         self.failures = []
+        self.failures_by_cursor = {}
         self.lost_reply = False
         self.lost_reply_after_replay = False
         self.ack_lost = False
@@ -104,6 +106,9 @@ class FakeRedis:
     async def xreadgroup(self, group, consumer, streams, **_kwargs):
         cursor = streams[worker.TOPIC]
         self.reads.append((group, consumer, cursor))
+        cursor_failures = self.failures_by_cursor.get(cursor, [])
+        if cursor_failures:
+            raise cursor_failures.pop(0)
         if self.failures:
             raise self.failures.pop(0)
         if cursor == "0":
@@ -247,6 +252,141 @@ class EpochTransportTests(unittest.IsolatedAsyncioTestCase):
         await transport.close()
         self.assertEqual(fake.acks, ["1-0"])
         self.assertFalse(fake.pending)
+
+    async def test_deadline_expiry_reports_sanitized_pending_read_context(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.failures = [RedisTimeoutError("private-one"), ConnectionError("private-two")]
+        transport = self.make_transport(fake, stop, telemetry)
+        clock = {"now": 0.0}
+
+        async def advance_retry(_stop, _seconds):
+            clock["now"] += 10.0
+
+        with (
+            mock.patch.object(
+                worker,
+                "time",
+                types.SimpleNamespace(monotonic=lambda: clock["now"]),
+            ),
+            mock.patch.object(worker, "redis_retry_pause", advance_retry),
+        ):
+            with self.assertRaisesRegex(
+                worker.EpochError, "REDIS_RECOVERY_DEADLINE_EXCEEDED"
+            ) as raised:
+                await anext(transport.subscribe(worker.TOPIC, group="bars"))
+
+        self.assertEqual([row[2] for row in fake.reads], [">", "0"])
+        self.assertEqual(
+            raised.exception.redis_transport,
+            {
+                "stage": "pending_read",
+                "elapsed_ms": 20_000,
+                "error_class": "ConnectionError",
+                "attempts": 2,
+            },
+        )
+        self.assertNotIn("private", repr(raised.exception.redis_transport))
+
+    def test_main_status_includes_only_validated_redis_failure_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = worker.Path(directory)
+            config = root / "config.json"
+            config.write_text("{}", encoding="utf-8")
+            error = worker.EpochError("REDIS_RECOVERY_DEADLINE_EXCEEDED")
+            error.redis_transport = {
+                "stage": "pending_read",
+                "elapsed_ms": 20_000,
+                "error_class": "RecoveryDeadlineExceeded",
+                "attempts": 2,
+            }
+            with mock.patch.object(
+                worker, "dispatch", new=mock.AsyncMock(side_effect=error)
+            ):
+                self.assertEqual(
+                    worker.main(
+                        [
+                            "--mode",
+                            "serve",
+                            "--config",
+                            str(config),
+                            "--output",
+                            str(root / "output"),
+                        ]
+                    ),
+                    1,
+                )
+            status = json.loads((root / "output" / "status.json").read_text())
+            self.assertEqual(
+                status["redis_transport_failure"], error.redis_transport
+            )
+            self.assertIsNone(
+                worker.sanitized_redis_failure(
+                    {**error.redis_transport, "message": "private-value"}
+                )
+            )
+            self.assertNotIn("private", json.dumps(status))
+
+    async def test_reclaim_failure_context_is_sanitized_and_cancellation_stays_control_flow(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.failures = [RedisTimeoutError("private-initial-read")]
+        transport = self.make_transport(fake, stop, telemetry)
+        transport._reclaim_stale = mock.AsyncMock(
+            side_effect=ConnectionError("private-reclaim-detail")
+        )
+        pauses = {"count": 0}
+        clock = {"now": 0.0}
+
+        async def request_stop(event, _seconds):
+            pauses["count"] += 1
+            if pauses["count"] == 2:
+                event.set()
+                raise asyncio.CancelledError
+            clock["now"] = 10.0
+
+        with (
+            mock.patch.object(
+                worker,
+                "time",
+                types.SimpleNamespace(monotonic=lambda: clock["now"]),
+            ),
+            mock.patch.object(worker, "redis_retry_pause", request_stop),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await anext(
+                    transport.subscribe(
+                        worker.TOPIC, group="bars", reclaim_every_s=10.0
+                    )
+                )
+
+        self.assertEqual(telemetry["last_failure"]["stage"], "reclaim")
+        self.assertEqual(telemetry["last_failure"]["error_class"], "ConnectionError")
+        self.assertEqual(telemetry["last_failure"]["attempts"], 1)
+        self.assertNotIn("private-reclaim-detail", repr(telemetry["last_failure"]))
+
+    async def test_new_message_read_failure_is_separately_attributed_after_empty_pel(self):
+        fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
+        fake.failures_by_cursor[">"] = [
+            RedisTimeoutError("private-initial"),
+            ConnectionError("private-new-read"),
+        ]
+        transport = self.make_transport(fake, stop, telemetry)
+        pauses = {"count": 0}
+
+        async def request_stop(event, _seconds):
+            pauses["count"] += 1
+            if pauses["count"] == 2:
+                event.set()
+                raise asyncio.CancelledError
+
+        with mock.patch.object(worker, "redis_retry_pause", request_stop):
+            with self.assertRaises(asyncio.CancelledError):
+                await anext(transport.subscribe(worker.TOPIC, group="bars"))
+
+        self.assertEqual([row[2] for row in fake.reads], [">", "0", ">"])
+        self.assertEqual(telemetry["last_failure"]["stage"], "new_message_read")
+        self.assertEqual(telemetry["last_failure"]["error_class"], "ConnectionError")
+        self.assertEqual(telemetry["last_failure"]["attempts"], 1)
+        self.assertNotIn("private-new-read", repr(telemetry["last_failure"]))
 
     async def test_transport_exhaustion_is_bounded_and_never_acknowledges(self):
         fake, stop, telemetry = FakeRedis(), asyncio.Event(), {}
