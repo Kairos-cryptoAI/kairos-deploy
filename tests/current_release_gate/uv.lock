@@ -5,7 +5,7 @@ requires-python = "==3.11.*"
 [manifest]
 overrides = [
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=d52fd9734a27f76f8e2bdbf053d477b8e04b81c9" },
-    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=f786eb41ad88788d6c0156b4d330981f80c07a7d" },
+    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=5a6ef0cd7e68c922840b4852334015be88501747" },
     { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=752c984ca276ccbb7fcbd1b60a6c75d95fe6f108" },
 ]
 
@@ -341,7 +341,7 @@ requires-dist = [
     { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=2a666ea4e664d984f7bead217cba71cfa14be7fe" },
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=d52fd9734a27f76f8e2bdbf053d477b8e04b81c9" },
     { name = "kairos-execution-engine", git = "https://github.com/Kairos-cryptoAI/kairos-execution-engine.git?rev=764b3c7dd870ae932c1e03423512c31bf83b6174" },
-    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=f786eb41ad88788d6c0156b4d330981f80c07a7d" },
+    { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=5a6ef0cd7e68c922840b4852334015be88501747" },
     { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=752c984ca276ccbb7fcbd1b60a6c75d95fe6f108" },
     { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=31be85e233d68932252f02723eb46745415466dd" },
     { name = "kairos-router", git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=a37d146bd581c63bb8d10e0835a6abb41c677ad1" },
@@ -368,7 +368,7 @@ dependencies = [
 [[package]]
 name = "kairos-llm"
 version = "0.1.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=f786eb41ad88788d6c0156b4d330981f80c07a7d#f786eb41ad88788d6c0156b4d330981f80c07a7d" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=5a6ef0cd7e68c922840b4852334015be88501747#5a6ef0cd7e68c922840b4852334015be88501747" }
 dependencies = [
     { name = "aiohttp" },
     { name = "kairos-core" },

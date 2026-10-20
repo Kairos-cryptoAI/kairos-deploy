@@ -24,7 +24,7 @@ PINS = {
     "kairos-persistence": "752c984ca276ccbb7fcbd1b60a6c75d95fe6f108",
     "kairos-strategy-engine": "9d369b815cb090a67e94bf3dfe943210235b86eb",
     "kairos-router": "a37d146bd581c63bb8d10e0835a6abb41c677ad1",
-    "kairos-llm": "f786eb41ad88788d6c0156b4d330981f80c07a7d",
+    "kairos-llm": "5a6ef0cd7e68c922840b4852334015be88501747",
     "kairos-aggregator": "2a666ea4e664d984f7bead217cba71cfa14be7fe",
     "kairos-risk-manager": "31be85e233d68932252f02723eb46745415466dd",
     "kairos-execution-engine": "764b3c7dd870ae932c1e03423512c31bf83b6174",

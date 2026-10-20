@@ -6,7 +6,7 @@
   },
   "dependencies": {
     "kairos-core": "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9",
-    "kairos-llm": "f786eb41ad88788d6c0156b4d330981f80c07a7d",
+    "kairos-llm": "5a6ef0cd7e68c922840b4852334015be88501747",
     "kairos-persistence": "752c984ca276ccbb7fcbd1b60a6c75d95fe6f108"
   },
   "infrastructure": {

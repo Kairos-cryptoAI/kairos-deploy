@@ -31,7 +31,7 @@
     },
     "kairos-llm": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-llm",
-      "revision": "f786eb41ad88788d6c0156b4d330981f80c07a7d"
+      "revision": "5a6ef0cd7e68c922840b4852334015be88501747"
     },
     "kairos-aggregator": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-aggregator",

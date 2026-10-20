@@ -21,14 +21,14 @@ package = false
 required-version = "==0.12.3"
 override-dependencies = [
   "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@d52fd9734a27f76f8e2bdbf053d477b8e04b81c9",
-  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@f786eb41ad88788d6c0156b4d330981f80c07a7d",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@5a6ef0cd7e68c922840b4852334015be88501747",
   "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@752c984ca276ccbb7fcbd1b60a6c75d95fe6f108",
 ]
 
 [tool.uv.sources]
 kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9" }
 kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "752c984ca276ccbb7fcbd1b60a6c75d95fe6f108" }
-kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "f786eb41ad88788d6c0156b4d330981f80c07a7d" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "5a6ef0cd7e68c922840b4852334015be88501747" }
 kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "e1cc87967a5e55d317d775ff62e299afdf95cf4b" }
 kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "5902ac2c8f1ab438736d0e02bee9f3cda55040ba" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "a37d146bd581c63bb8d10e0835a6abb41c677ad1" }
