@@ -8,7 +8,9 @@ from pathlib import Path
 from scripts.validate_deployment import (
     APP_SERVICES,
     EXPECTED_REPOSITORIES,
+    SYNTHETIC_PROCESSING_SCOPE_SHA256,
     SOURCE_SERVICES,
+    parse_dotenv,
     validate_compose,
     validate_environment,
     validate_source_lock,
@@ -22,6 +24,7 @@ class EnvironmentValidationTests(unittest.TestCase):
             "POSTGRES_USER": "kairos",
             "POSTGRES_DB": "kairos",
             "GRAFANA_ADMIN_USER": "kairos-admin",
+            "KAIROS_PROCESSING_SCOPE_SHA256": "1" * 64,
         }
         self.assertEqual(validate_environment(environment), [])
 
@@ -37,6 +40,28 @@ class EnvironmentValidationTests(unittest.TestCase):
         errors = validate_environment(environment)
         self.assertTrue(any("must not be stored" in error for error in errors))
         self.assertTrue(any("retired" in error for error in errors))
+
+    def test_processing_scope_requires_operator_provisioned_lowercase_sha256(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        example_path = root / ".env.example"
+        example = example_path.read_text(encoding="utf-8")
+        self.assertIn("Synthetic render/CI fixture only", example)
+        self.assertIn(SYNTHETIC_PROCESSING_SCOPE_SHA256, example)
+        example_errors = validate_environment(parse_dotenv(example_path))
+        self.assertTrue(any("synthetic CI fixture" in error for error in example_errors))
+        for value in ("", "abc", "A" * 64, "g" * 64):
+            with self.subTest(value=value):
+                environment = {
+                    "KAIROS_SECRETS_DIR": "./secrets",
+                    "POSTGRES_USER": "kairos",
+                    "POSTGRES_DB": "kairos",
+                    "GRAFANA_ADMIN_USER": "kairos-admin",
+                    "KAIROS_PROCESSING_SCOPE_SHA256": value,
+                }
+                errors = validate_environment(environment)
+                self.assertTrue(
+                    any("KAIROS_PROCESSING_SCOPE_SHA256" in error for error in errors)
+                )
 
 
 def source_lock(revision: str = "a" * 40) -> dict[str, object]:
@@ -135,6 +160,7 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
             "KAIROS_LOG_LEVEL": "INFO",
             "KAIROS_LOG_JSON": "true",
             "KAIROS_BUS_BACKEND": "redis",
+            "KAIROS_PERSISTENCE_MIGRATION_PROFILE": "controlled-runtime",
             "KAIROS_TRADING_SYMBOLS": '["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]',
             "KAIROS_SECRET_BINDINGS": (
                 "KAIROS_REDIS_URL=/run/secrets/redis_url,"
@@ -160,6 +186,7 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                     "KAIROS_X_MONTHLY_BUDGET_MICROUSD": "2000000",
                     "KAIROS_X_POST_READ_UNIT_COST_MICROUSD": "5000",
                     "KAIROS_X_USER_READ_UNIT_COST_MICROUSD": "10000",
+                    "KAIROS_PROCESSING_SCOPE_SHA256": "a" * 64,
                 }
             )
         if name == "strategy-engine":
@@ -394,6 +421,52 @@ class ComposeValidationTests(unittest.TestCase):
     def test_accepts_hardened_model(self) -> None:
         config, lock = rendered_config()
         self.assertEqual(validate_compose(config, lock), [])
+
+    def test_all_shared_database_services_require_controlled_runtime_profile(self) -> None:
+        for name in SOURCE_SERVICES:
+            with self.subTest(service=name):
+                config, lock = rendered_config()
+                environment = config["services"][name]["environment"]
+                self.assertEqual(
+                    environment["KAIROS_PERSISTENCE_MIGRATION_PROFILE"],
+                    "controlled-runtime",
+                )
+                environment["KAIROS_PERSISTENCE_MIGRATION_PROFILE"] = "runtime"
+                errors = validate_compose(config, lock)
+                self.assertIn(
+                    f"{name}: shared database requires the controlled-runtime profile",
+                    errors,
+                )
+
+    def test_text_processing_scope_rejects_missing_empty_or_malformed_values(self) -> None:
+        for value in (None, "", "abc", "A" * 64, "g" * 64):
+            with self.subTest(value=value):
+                config, lock = rendered_config()
+                text_environment = config["services"]["text-scouts"]["environment"]
+                if value is None:
+                    del text_environment["KAIROS_PROCESSING_SCOPE_SHA256"]
+                else:
+                    text_environment["KAIROS_PROCESSING_SCOPE_SHA256"] = value
+                errors = validate_compose(config, lock)
+                self.assertIn(
+                    "text-scouts: operator-provisioned processing scope must be a lowercase SHA-256",
+                    errors,
+                )
+
+    def test_synthetic_processing_scope_is_ci_only_opt_in(self) -> None:
+        config, lock = rendered_config()
+        config["services"]["text-scouts"]["environment"][
+            "KAIROS_PROCESSING_SCOPE_SHA256"
+        ] = SYNTHETIC_PROCESSING_SCOPE_SHA256
+
+        errors = validate_compose(config, lock)
+        self.assertIn(
+            "text-scouts: synthetic CI processing scope is not deployment authority",
+            errors,
+        )
+        self.assertEqual(
+            validate_compose(config, lock, allow_example_values=True), []
+        )
 
     def test_aggregator_requires_macro_and_text_context(self) -> None:
         for key, label in (

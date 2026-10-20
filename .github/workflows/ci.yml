@@ -100,13 +100,13 @@ jobs:
       - name: Render Compose configuration
         run: docker compose --env-file .env.example -f docker-compose.yml config --format json > compose.json
       - name: Validate rendered Compose security
-        run: python scripts/validate_deployment.py --compose-json compose.json
+        run: python scripts/validate_deployment.py --compose-json compose.json --allow-example-values
       - name: Validate Compose model
         run: docker compose --env-file .env.example -f docker-compose.yml config --quiet
       - name: Validate fail-closed LIVE overlay
         run: |
           docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.live.yml config --format json > compose-live.json
-          python scripts/validate_deployment.py --compose-json compose-live.json --live
+          python scripts/validate_deployment.py --compose-json compose-live.json --live --allow-example-values
       - name: Validate isolated EVEDEX DEV PAPER topology
         run: |
           docker compose --profile canary --env-file .env.paper.example -f docker-compose.paper.yml config --format json > compose-paper.json

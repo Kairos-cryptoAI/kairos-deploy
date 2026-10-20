@@ -49,6 +49,7 @@ RUNTIME_PROFILE = LEGACY_MIGRATIONS + (
     "016_global_canary_session_guard.sql",
     "018_offline_outbox_reconciliation.sql",
     "026_operator_control.sql",
+    "028_news_processing.sql",
 )
 NEW_TABLES = (
     "campaign_source_budgets",
@@ -56,6 +57,7 @@ NEW_TABLES = (
     "operator_control_commands",
     "operator_control_dispatch_claims",
     "operator_controls",
+    "news_processing",
     "paper_canary_attempts",
     "paper_canary_database_identity",
     "paper_canary_dispatch_claims",
@@ -299,7 +301,7 @@ def validate_plan(plan: dict[str, Any], *, database: str, primary: bool) -> None
     if (
         not isinstance(revisions, dict)
         or set(revisions) != {"kairos-core", "kairos-persistence"}
-        or revisions.get("kairos-core") != "6937eb4773fc00afaf5ba4e020b28b689f48e377"
+        or revisions.get("kairos-core") != "37165e3078b53364513f876f4243357ba19a19ba"
     ):
         raise WorkerError("expected package revision manifest differs")
     if any(

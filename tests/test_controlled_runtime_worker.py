@@ -41,7 +41,7 @@ def _plan(*, primary_authorized: bool = False) -> dict:
         "accepted_legacy_sequences": sequences,
         "accepted_migrations": list(worker.LEGACY_MIGRATIONS),
         "package_revisions": {
-            "kairos-core": "6937eb4773fc00afaf5ba4e020b28b689f48e377",
+            "kairos-core": "37165e3078b53364513f876f4243357ba19a19ba",
             "kairos-persistence": "f" * 40,
         },
         "primary_authorized": primary_authorized,

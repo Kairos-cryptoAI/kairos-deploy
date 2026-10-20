@@ -20,21 +20,21 @@ dependencies = [
 package = false
 required-version = "==0.12.3"
 override-dependencies = [
-  "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@6937eb4773fc00afaf5ba4e020b28b689f48e377",
-  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@c2207a5bd8bbf39e7d5728f95e52c96a47eca344",
-  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@ea0c73395352f71da196270fe16659f1f0298a52",
+  "kairos-core @ git+https://github.com/Kairos-cryptoAI/kairos-core.git@37165e3078b53364513f876f4243357ba19a19ba",
+  "kairos-llm @ git+https://github.com/Kairos-cryptoAI/kairos-llm.git@f786eb41ad88788d6c0156b4d330981f80c07a7d",
+  "kairos-persistence @ git+https://github.com/Kairos-cryptoAI/kairos-persistence.git@2d88a351fc045de5b58bbf6acae209341096a850",
 ]
 
 [tool.uv.sources]
-kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "6937eb4773fc00afaf5ba4e020b28b689f48e377" }
-kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "ea0c73395352f71da196270fe16659f1f0298a52" }
-kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "c2207a5bd8bbf39e7d5728f95e52c96a47eca344" }
-kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "cdc6197880b7260f30430b7b30b5be644cf08db4" }
-kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "516da27e8c223fcb8f282cf6a4d00bebfd1aea0e" }
-kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "bb3eb590d50386e3af7f12882ff600c6aaf9442c" }
-kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "4c1325ca8803a6f06443cbb73e7209a55f29bc1c" }
-kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "908809200a49ec8091ce9f4d6208f461d2ee43c7" }
-kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "977f71c18354279c432856fdc0c1858b5606c49d" }
+kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "37165e3078b53364513f876f4243357ba19a19ba" }
+kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "2d88a351fc045de5b58bbf6acae209341096a850" }
+kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "f786eb41ad88788d6c0156b4d330981f80c07a7d" }
+kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "3ae1570f5ecda94f8055c2b8f424563b996809e1" }
+kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "7979138d1df1f164cc4ca584c4786e93ddf4656c" }
+kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "604828c53a7f24c8ade8b2f4c3b1cb773016c3c2" }
+kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "8e0250304e6794443093b9af89aaa0a488473430" }
+kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "fe4941df9d0aa58c00b64fad7ba958a0fca48c34" }
+kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "72a3fcfc86f92a825acb56431ca21a3b8a65c229" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

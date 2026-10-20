@@ -45,6 +45,8 @@ EXPECTED_REPOSITORIES = {
     "ops-exporter": "https://github.com/Kairos-cryptoAI/kairos-persistence",
 }
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+SYNTHETIC_PROCESSING_SCOPE_SHA256 = "0" * 64
 IMAGE_PATTERN = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 EXPECTED_REDIS_IMAGE = (
     "redis:8.2.8-alpine3.22@"
@@ -88,6 +90,7 @@ BASE_COMMON_ENVIRONMENT_KEYS = {
     "KAIROS_LOG_LEVEL",
     "KAIROS_LOG_JSON",
     "KAIROS_BUS_BACKEND",
+    "KAIROS_PERSISTENCE_MIGRATION_PROFILE",
     "KAIROS_SECRET_BINDINGS",
     "KAIROS_TRADING_SYMBOLS",
 }
@@ -100,6 +103,7 @@ BASE_SOURCE_ENVIRONMENT_KEYS = {
     },
     "text-scouts": {
         *BASE_COMMON_ENVIRONMENT_KEYS,
+        "KAIROS_PROCESSING_SCOPE_SHA256",
         "KAIROS_REDDIT_USER_AGENT",
         "KAIROS_X_MONTHLY_BUDGET_MICROUSD",
         "KAIROS_X_POST_READ_UNIT_COST_MICROUSD",
@@ -316,7 +320,11 @@ def _validate_source_service(
 
 
 def validate_compose(
-    config: dict[str, Any], lock: dict[str, Any], *, live: bool = False
+    config: dict[str, Any],
+    lock: dict[str, Any],
+    *,
+    live: bool = False,
+    allow_example_values: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     if config.get("name") != "kairos":
@@ -420,8 +428,17 @@ def validate_compose(
         common_environment = service.get("environment", {}) or {}
         if str(common_environment.get("KAIROS_BUS_BACKEND", "")).casefold() != "redis":
             errors.append(f"{name}: durable runtime requires the Redis bus backend")
+        if common_environment.get("KAIROS_PERSISTENCE_MIGRATION_PROFILE") != "controlled-runtime":
+            errors.append(f"{name}: shared database requires the controlled-runtime profile")
         if not _is_true(common_environment.get("KAIROS_LOG_JSON")):
             errors.append(f"{name}: structured JSON logs must remain enabled")
+
+    text_environment = services.get("text-scouts", {}).get("environment", {}) or {}
+    processing_scope = str(text_environment.get("KAIROS_PROCESSING_SCOPE_SHA256", ""))
+    if not SHA256_PATTERN.fullmatch(processing_scope):
+        errors.append("text-scouts: operator-provisioned processing scope must be a lowercase SHA-256")
+    elif processing_scope == SYNTHETIC_PROCESSING_SCOPE_SHA256 and not allow_example_values:
+        errors.append("text-scouts: synthetic CI processing scope is not deployment authority")
 
     execution = services.get("execution-engine", {}) or {}
     execution_env = execution.get("environment", {}) or {}
@@ -726,6 +743,7 @@ def validate_environment(environment: dict[str, str]) -> list[str]:
     errors: list[str] = []
     required = {
         "KAIROS_SECRETS_DIR",
+        "KAIROS_PROCESSING_SCOPE_SHA256",
         "POSTGRES_USER",
         "POSTGRES_DB",
         "GRAFANA_ADMIN_USER",
@@ -733,6 +751,11 @@ def validate_environment(environment: dict[str, str]) -> list[str]:
     for name in sorted(required):
         if not environment.get(name):
             errors.append(f"{name} must be set")
+    processing_scope = environment.get("KAIROS_PROCESSING_SCOPE_SHA256", "")
+    if processing_scope and not SHA256_PATTERN.fullmatch(processing_scope):
+        errors.append("KAIROS_PROCESSING_SCOPE_SHA256 must be a lowercase SHA-256")
+    elif processing_scope == SYNTHETIC_PROCESSING_SCOPE_SHA256:
+        errors.append("KAIROS_PROCESSING_SCOPE_SHA256 synthetic CI fixture is not deployment authority")
     for name in sorted(FORBIDDEN_SECRET_ENV & set(environment)):
         errors.append(f"{name} must not be stored in the Compose interpolation file")
     if "KAIROS_DRY_RUN" in environment:
@@ -863,13 +886,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--verify-remote", action="store_true")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--allow-example-values",
+        action="store_true",
+        help="allow the exact synthetic processing-scope fixture used only by static CI renders",
+    )
     args = parser.parse_args(argv)
     try:
         lock = load_json(args.source_lock)
         errors = validate_source_lock(lock)
         if args.compose_json:
             errors.extend(
-                validate_compose(load_json(args.compose_json), lock, live=args.live)
+                validate_compose(
+                    load_json(args.compose_json),
+                    lock,
+                    live=args.live,
+                    allow_example_values=args.allow_example_values,
+                )
             )
         if args.env_file:
             errors.extend(validate_environment(parse_dotenv(args.env_file)))

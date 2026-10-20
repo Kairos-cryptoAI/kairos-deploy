@@ -135,10 +135,12 @@ does not restart consumers, and cannot change PAPER, alpha, or LIVE readiness.
 | Ops exporter | Read-only durable state and Redis health metrics | Internal; optional verified loopback |
 | Prometheus/Grafana | Alerts and dashboards | Internal; optional verified loopback |
 
-Every application service mounts authenticated Redis and PostgreSQL URLs as Docker
-secret files. It waits for both stores, migrates the same durable schema, records inbound
-processing, commits state and outbound messages atomically, and only then acknowledges
-the Redis delivery. Execution additionally journals venue mutations before submission and
+Every shared-database service mounts authenticated Redis and PostgreSQL URLs as Docker
+secret files and explicitly selects the `controlled-runtime` persistence profile. Startup
+verifies the exact pre-provisioned schema and operator grants without applying DDL; a
+missing, extra, or mismatched migration fails closed. Durable services record inbound
+processing, commit state and outbound messages atomically, and only then acknowledge the
+Redis delivery. Execution additionally journals venue mutations before submission and
 reconciles unresolved effects before accepting new risk.
 
 The immutable source inventory is [`sources.lock.json`](sources.lock.json). CI verifies
@@ -150,6 +152,17 @@ entry point before building each image.
 `.env` contains only non-secret Compose interpolation. Secret values are one-value files
 under the ignored `secrets/` directory and are loaded by the container entrypoint without
 appearing in `docker inspect` environment metadata.
+
+Text Scouts also requires an operator-provisioned, public lowercase SHA-256 in
+`KAIROS_PROCESSING_SCOPE_SHA256`. Keep it stable for the same service, deployment, feed set,
+and source-account identity; it defines the durable no-resend namespace and must not be
+derived from credentials or generated at service startup. Compose refuses an unset or empty
+value; deployment/runtime validation rejects malformed values. `.env.example` contains an
+all-zero synthetic value solely so CI can render the model. CI opts into that exact fixture
+only for static Compose validation; normal deployment validation rejects it. Replace it
+with the approved operator value in `.env` before validating or launching the deployment.
+This hash is scope metadata, not a provider credential and not separate permission to
+publish or trade.
 
 The current base LLM routes are OpenAI-only. Text Scouts constructs the central
 gateway with default settings and requests `LLMWorkload.TEXT_SCOUTS`; the fixed
@@ -172,6 +185,7 @@ provider override requires separately reviewed routing and exact secret-scope ch
 ```powershell
 Set-Location D:\Kairos\kairos-deploy
 Copy-Item .env.example .env
+# Replace the explicitly synthetic KAIROS_PROCESSING_SCOPE_SHA256 fixture before validation.
 python scripts\provision_secrets.py --initialize-infrastructure
 python scripts\provision_secrets.py --prompt openai_api_key --prompt x_bearer_token
 # Legacy provisioning inventory only; not a current runtime provider.
