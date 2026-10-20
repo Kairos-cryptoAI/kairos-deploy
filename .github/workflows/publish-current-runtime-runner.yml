@@ -158,6 +158,6 @@ jobs:
             echo '## Current runtime migration runner candidate'
             echo
             echo "Registry reference: \`$IMAGE@${{ steps.publish.outputs.digest }}\`"
-            echo "Transport: Docker save archive; import preserves the image ID, not the registry manifest bytes."
+            echo 'Transport: Docker save archive; local_image_id is the config digest. For OCI-layout archives the receipt separately records the archive manifest digest; registry manifest bytes are not asserted to be preserved by archive import.'
             echo 'This artifact is a reviewed-source build candidate, not production qualification or controller wiring.'
           } >> "$GITHUB_STEP_SUMMARY"

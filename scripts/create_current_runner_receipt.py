@@ -1,4 +1,9 @@
-"""Create a non-secret receipt for a verified current-runner Docker archive."""
+"""Create a non-secret receipt for a verified current-runner Docker archive.
+
+This module performs no Docker, registry, or host operations. `local_image_id`
+retains its established meaning: the SHA-256 of
+the image config bytes (Docker image/config ID), not a registry manifest.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +11,15 @@ import argparse
 import hashlib
 import json
 import re
+import tarfile
 from pathlib import Path
+from typing import Any
 
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+OCI_MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json"
+OCI_CONFIG_TYPE = "application/vnd.oci.image.config.v1+json"
 
 
 def sha256(path: Path) -> str:
@@ -19,6 +28,123 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _json_bytes(raw: bytes, description: str) -> Any:
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{description} is invalid JSON") from exc
+
+
+def _descriptor_digest(descriptor: Any, *, media_type: str, description: str) -> tuple[str, int]:
+    if not isinstance(descriptor, dict):
+        raise ValueError(f"{description} descriptor must be an object")
+    digest = descriptor.get("digest")
+    size = descriptor.get("size")
+    if (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            or descriptor.get("mediaType") != media_type
+            or not isinstance(size, int) or isinstance(size, bool) or size < 0):
+        raise ValueError(f"{description} descriptor identity is invalid")
+    return digest, size
+
+
+def _archive_identity(archive: Path, expected_local_image_id: str) -> dict[str, str] | None:
+    """Validate an OCI archive or a single-image Docker-save archive.
+
+    Presence of either OCI marker claims OCI layout. Such archives fail closed
+    if incomplete or corrupt. Archives without either marker must have the
+    standard `manifest.json` + content-addressed config shape of Docker save.
+    A `None` result means valid legacy Docker save, not an unchecked file.
+    """
+    try:
+        tf = tarfile.open(archive, mode="r:*")
+    except tarfile.TarError as exc:
+        raise ValueError("archive is not a readable Docker/OCI tar archive") from exc
+
+    with tf:
+        members = tf.getmembers()
+        by_name: dict[str, list[tarfile.TarInfo]] = {}
+        for member in members:
+            by_name.setdefault(member.name, []).append(member)
+        has_index = "index.json" in by_name
+        has_layout = "oci-layout" in by_name
+
+        def read_member(name: str, max_size: int) -> bytes:
+            found = by_name.get(name, [])
+            if len(found) != 1:
+                raise ValueError(f"archive member missing or duplicated: {name}")
+            member = found[0]
+            if not member.isfile() or member.size < 0 or member.size > max_size:
+                raise ValueError(f"archive member type/size is invalid: {name}")
+            body = tf.extractfile(member)
+            if body is None:
+                raise ValueError(f"archive member unreadable: {name}")
+            raw = body.read(max_size + 1)
+            if len(raw) != member.size:
+                raise ValueError(f"archive member byte count mismatch: {name}")
+            return raw
+
+        if has_index or has_layout:
+            if not (has_index and has_layout):
+                raise ValueError("archive claims OCI layout but is missing index/layout metadata")
+            layout = _json_bytes(read_member("oci-layout", 4096), "OCI layout")
+            if not isinstance(layout, dict) or layout.get("imageLayoutVersion") != "1.0.0":
+                raise ValueError("OCI layout version is unsupported")
+
+            index = _json_bytes(read_member("index.json", 1024 * 1024), "OCI index")
+            descriptors = index.get("manifests") if isinstance(index, dict) else None
+            if (not isinstance(index, dict) or index.get("schemaVersion") != 2
+                    or not isinstance(descriptors, list) or len(descriptors) != 1):
+                raise ValueError("OCI index must contain exactly one manifest descriptor")
+            manifest_digest, manifest_size = _descriptor_digest(
+                descriptors[0], media_type=OCI_MANIFEST_TYPE, description="OCI manifest"
+            )
+            manifest_path = "blobs/sha256/" + manifest_digest.removeprefix("sha256:")
+            manifest_raw = read_member(manifest_path, 4 * 1024 * 1024)
+            if len(manifest_raw) != manifest_size or hashlib.sha256(manifest_raw).hexdigest() != manifest_digest[7:]:
+                raise ValueError("OCI manifest descriptor does not match raw bytes/size")
+
+            manifest = _json_bytes(manifest_raw, "OCI manifest")
+            if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+                raise ValueError("OCI manifest schema is invalid")
+            config_digest, config_size = _descriptor_digest(
+                manifest.get("config"), media_type=OCI_CONFIG_TYPE, description="OCI config"
+            )
+            config_path = "blobs/sha256/" + config_digest.removeprefix("sha256:")
+            config_raw = read_member(config_path, 16 * 1024 * 1024)
+            if len(config_raw) != config_size or hashlib.sha256(config_raw).hexdigest() != config_digest[7:]:
+                raise ValueError("OCI config descriptor does not match raw bytes/size")
+            image_config = _json_bytes(config_raw, "OCI image config")
+            if not isinstance(image_config, dict):
+                raise ValueError("OCI image config must be an object")
+            if config_digest != expected_local_image_id:
+                raise ValueError("OCI config digest differs from local image ID")
+            return {
+                "format": "oci-layout",
+                "manifest_digest": manifest_digest,
+                "config_digest": config_digest,
+            }
+
+        # Explicit legacy Docker-save path: manifest.json is the marker, and
+        # its config filename/content must identify the supplied local image ID.
+        docker_manifest = _json_bytes(read_member("manifest.json", 1024 * 1024), "Docker save manifest")
+        if not isinstance(docker_manifest, list) or len(docker_manifest) != 1:
+            raise ValueError("legacy Docker-save archive must contain exactly one image")
+        image = docker_manifest[0]
+        if not isinstance(image, dict):
+            raise ValueError("Docker save image entry is invalid")
+        config_name = image.get("Config")
+        expected_name = expected_local_image_id.removeprefix("sha256:") + ".json"
+        if config_name != expected_name:
+            raise ValueError("Docker save config filename differs from local image ID")
+        config_raw = read_member(config_name, 16 * 1024 * 1024)
+        if hashlib.sha256(config_raw).hexdigest() != expected_local_image_id.removeprefix("sha256:"):
+            raise ValueError("Docker save config bytes differ from local image ID")
+        config = _json_bytes(config_raw, "Docker save image config")
+        if not isinstance(config, dict):
+            raise ValueError("Docker save image config must be an object")
+        return None
 
 
 def build_receipt(args: argparse.Namespace) -> dict[str, object]:
@@ -49,11 +175,13 @@ def build_receipt(args: argparse.Namespace) -> dict[str, object]:
     size = args.archive.stat().st_size
     if size <= 0:
         raise ValueError("archive is empty")
+    archive_identity = _archive_identity(args.archive, args.local_image_id)
 
-    return {
+    receipt: dict[str, object] = {
         "schema_version": 1,
         "transport_kind": "docker-save-archive",
         "registry_reference": args.registry_reference,
+        # Historical schema semantics retained: this is the local image config digest.
         "local_image_id": args.local_image_id,
         "archive": {"filename": args.archive.name, "sha256": sha256(args.archive), "size_bytes": size},
         "source": {"repository": args.source_repository, "revision": args.source_revision},
@@ -61,8 +189,16 @@ def build_receipt(args: argparse.Namespace) -> dict[str, object]:
         "workflow": {"repository": args.workflow_repository, "run_id": args.workflow_run_id, "commit": args.workflow_commit},
         "runtime": {"python": runtime["python"], "aiohttp": runtime["aiohttp"], "multidict": runtime["multidict"]},
         "migrations": dict(sorted(expected.items())),
-        "limitations": ["Docker archive transport retains the local image ID, not the registry manifest bytes.", "Candidate artifact is not production qualification and is not wired to controllers."],
+        "limitations": [
+            "local_image_id identifies the image config digest; it is not a registry manifest digest.",
+            "Registry manifest bytes are not asserted to be preserved by Docker archive transport.",
+            "Candidate artifact is not production qualification and is not wired to controllers.",
+        ],
     }
+    if archive_identity is not None:
+        # Additive only. Historical schema_version and local_image_id meanings do not change.
+        receipt["archive_identity"] = archive_identity
+    return receipt
 
 
 def write_outputs(args: argparse.Namespace) -> None:
