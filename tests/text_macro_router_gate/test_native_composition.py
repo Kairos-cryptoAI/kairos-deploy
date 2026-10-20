@@ -62,6 +62,9 @@ from native_policy import CLASSIFICATION, DATABASE_ENV, REDIS_ENV, require_targe
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.native_composition]
 
+# Stable synthetic scope bound to this native test target, never a deployment identity.
+NATIVE_PROCESSING_SCOPE_SHA256 = "dc43e9b2554acf0428d8decf1d2276e112bbd9dff6799400ca8bb2b42dcc4233"
+
 
 class CommittedAckLoss(RuntimeError):
     """Fixture fault after real PostgreSQL inbox/output commit."""
@@ -389,6 +392,7 @@ async def runtime_url_fixture(owner, database_url):
     await owner.pool.execute(
         f"GRANT INSERT,UPDATE,DELETE ON event_audit,message_inbox,message_outbox TO {runtime}"
     )
+    await owner.pool.execute(f"GRANT INSERT,UPDATE ON news_processing TO {runtime}")
     await owner.pool.execute(f"GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {runtime}")
     await owner.pool.execute(
         f"GRANT INSERT ON operator_control_admissions,operator_control_dispatch_claims TO {runtime}"
@@ -523,6 +527,7 @@ async def test_real_producers_router_review_risk_durable_replay_on_disposable_pg
                         enable_gdelt=False,
                         enable_rss=False,
                         relevance_threshold=0,
+                        processing_scope_sha256=NATIVE_PROCESSING_SCOPE_SHA256,
                     ),
                     bus=text_bus,
                     gateway=gateway,
