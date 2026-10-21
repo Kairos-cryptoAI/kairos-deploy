@@ -14,6 +14,7 @@ dependencies = [
   "kairos-strategy-engine==0.2.12",
   "pytest==9.1.1",
   "pytest-asyncio==1.4.0",
+  "certifi>=2026.10.19",
 ]
 
 [tool.uv]
