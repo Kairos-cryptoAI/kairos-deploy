@@ -269,11 +269,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#67a45465776e0231b8a29a16acedd68dd167fee9
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#4cb86b84ff0d62f309fca5f67643dbbc3404ada8
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: 67a45465776e0231b8a29a16acedd68dd167fee9
+        SOURCE_REVISION: 4cb86b84ff0d62f309fca5f67643dbbc3404ada8
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment

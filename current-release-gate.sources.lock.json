@@ -15,7 +15,7 @@
   "dependencies": {
     "kairos-core": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-core",
-      "revision": "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9"
+      "revision": "ff3af7592cbd47be985d794d8d9903aaa8e5df07"
     },
     "kairos-persistence": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-persistence",
@@ -39,7 +39,7 @@
     },
     "kairos-risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "67a45465776e0231b8a29a16acedd68dd167fee9"
+      "revision": "4cb86b84ff0d62f309fca5f67643dbbc3404ada8"
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",

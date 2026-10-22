@@ -6,7 +6,7 @@
     "node": "22"
   },
   "dependencies": {
-    "kairos-core": "d52fd9734a27f76f8e2bdbf053d477b8e04b81c9",
+    "kairos-core": "ff3af7592cbd47be985d794d8d9903aaa8e5df07",
     "kairos-persistence": "752c984ca276ccbb7fcbd1b60a6c75d95fe6f108"
   },
   "infrastructure": {
@@ -31,13 +31,13 @@
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "67a45465776e0231b8a29a16acedd68dd167fee9",
+      "revision": "4cb86b84ff0d62f309fca5f67643dbbc3404ada8",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "canary-controller": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "67a45465776e0231b8a29a16acedd68dd167fee9",
+      "revision": "4cb86b84ff0d62f309fca5f67643dbbc3404ada8",
       "package_dir": "kairos_risk",
       "command": "kairos-paper-canary"
     },
