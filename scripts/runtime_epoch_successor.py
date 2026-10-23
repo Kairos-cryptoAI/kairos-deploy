@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -38,6 +39,14 @@ ACCEPTED_SOURCE_PROFILE = "historical-18-migration-nontrading-baseline"
 EXPECTED_HISTORY_ROWS = 173_164
 EXPECTED_HISTORY_LAST_OPEN_MS = 1_789_832_580_000
 EXPECTED_CATCHUP_CAP = 150_000
+DEDICATED_SUBNET = ipaddress.ip_network("10.254.251.48/28")
+KNOWN_FAILED_OWNER = "4c71362d73764ca7ad73fc4de09d0836"
+KNOWN_FAILED_RUN = "run-" + KNOWN_FAILED_OWNER
+KNOWN_FAILED_EVIDENCE_SHA256 = {
+    "runtime-epoch-failure.json": "eeb74594972d054f090a4ee2ef5d92d0bc8ee604b4d046c2413bf03c58e13fd0",
+    "first-cli-failure.json": "6d38632ee58e94b3b53737dfd0e100363bce806c7abeab6be14a532a9aeaedfc",
+    "cli-003.stderr": "5eb7d21f7cd1846897f5056aa18de5d58dbc4524e27f6bd2e5ef5416f22cf086",
+}
 SOURCE_REPOSITORIES = (
     (Path("D:/Kairos/kairos-core"), epoch.CORE_REVISION),
     (Path("D:/Kairos/kairos-persistence"), epoch.PERSISTENCE_REVISION),
@@ -313,11 +322,305 @@ def validate_expected_revision(value: str) -> None:
         raise SuccessorRejected("EXACT_SIGNED_DEPLOY_REVISION_REQUIRED")
 
 
-def validate_successor_root_is_create_only(root: Path) -> None:
+def validate_successor_root_is_create_only(root: Path) -> Path | None:
+    root = epoch.fresh.safe(root)
     if root.is_symlink():
         raise SuccessorRejected("SUCCESSOR_ROOT_SYMLINK_REJECTED")
-    if root.exists() and any(root.iterdir()):
-        raise SuccessorRejected("SUCCESSOR_ROOT_NOT_EMPTY_NO_BLIND_RETRY")
+    if not root.exists():
+        return None
+    if not root.is_dir():
+        raise SuccessorRejected("SUCCESSOR_ROOT_DIRECTORY_REQUIRED")
+    children = list(root.iterdir())
+    if not children:
+        return None
+    return validate_known_failed_predecessor(root)
+
+
+def _bounded_sha256(path: Path, *, maximum_bytes: int = 512 * 1024) -> str:
+    path = epoch.fresh.safe(path)
+    if path.is_symlink() or not path.is_file():
+        raise SuccessorRejected("KNOWN_FAILURE_EVIDENCE_FILE_REQUIRED")
+    try:
+        size = path.stat().st_size
+        if size < 0 or size > maximum_bytes:
+            raise SuccessorRejected("KNOWN_FAILURE_EVIDENCE_SIZE_REJECTED")
+        digest = hashlib.sha256()
+        read = 0
+        with path.open("rb") as source:
+            while True:
+                chunk = source.read(64 * 1024)
+                if not chunk:
+                    break
+                read += len(chunk)
+                if read > maximum_bytes:
+                    raise SuccessorRejected("KNOWN_FAILURE_EVIDENCE_SIZE_REJECTED")
+                digest.update(chunk)
+        if read != size:
+            raise SuccessorRejected("KNOWN_FAILURE_EVIDENCE_CHANGED_DURING_READ")
+        return digest.hexdigest()
+    except SuccessorRejected:
+        raise
+    except Exception:
+        raise SuccessorRejected("KNOWN_FAILURE_EVIDENCE_UNREADABLE") from None
+
+
+def validate_known_failed_predecessor(root: Path) -> Path:
+    """Admit only the one pinned, pre-creation failure; never adopt its owner."""
+    root = epoch.fresh.safe(root)
+    if root.is_symlink() or not root.is_dir():
+        raise SuccessorRejected("SUCCESSOR_ROOT_DIRECTORY_REQUIRED")
+    children = list(root.iterdir())
+    if len(children) != 1 or children[0].name != KNOWN_FAILED_RUN:
+        raise SuccessorRejected("SUCCESSOR_ROOT_NOT_EXACT_KNOWN_FAILURE")
+    failed_run = epoch.fresh.safe(children[0])
+    if failed_run.is_symlink() or not failed_run.is_dir():
+        raise SuccessorRejected("KNOWN_FAILED_RUN_DIRECTORY_REQUIRED")
+    for filename, expected_hash in KNOWN_FAILED_EVIDENCE_SHA256.items():
+        if _bounded_sha256(failed_run / filename) != expected_hash:
+            raise SuccessorRejected("KNOWN_FAILED_EVIDENCE_HASH_MISMATCH")
+    # Parse only the safe fixed fields of the two sanitized JSON receipts. The
+    # stderr artifact is hashed only; it is never decoded, printed, or logged.
+    try:
+        failure_path = epoch.fresh.safe(failed_run / "runtime-epoch-failure.json")
+        cli_failure_path = epoch.fresh.safe(failed_run / "first-cli-failure.json")
+        failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        cli_failure = json.loads(cli_failure_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise SuccessorRejected("KNOWN_FAILED_RECEIPT_UNREADABLE") from None
+    operation = cli_failure.get("operation") if isinstance(cli_failure, dict) else None
+    if (
+        not isinstance(failure, dict)
+        or failure.get("result") != "FAILED_CLOSED"
+        or failure.get("owner") != KNOWN_FAILED_OWNER
+        or failure.get("phase") != "ADMISSION"
+        or failure.get("error_category") != "BOUNDED_DOCKER_OPERATION_FAILED_GATEERROR"
+        or failure.get("created_resources") != []
+        or failure.get("preserved_forensics") is not True
+        or failure.get("active_lease_preserved") is not True
+        or failure.get("trading_started") is not False
+        or not isinstance(cli_failure, dict)
+        or cli_failure.get("category") != "NATIVE_DOCKER_OPERATION_FAILED"
+        or not isinstance(operation, dict)
+        or operation.get("sequence") != 3
+        or operation.get("exit_code") != 1
+        or operation.get("timed_out") is not False
+        or operation.get("overflow") is not False
+        or operation.get("cli_tree_proven") is not True
+        or operation.get("operation_category") != "DOCKER_OTHER"
+    ):
+        raise SuccessorRejected("KNOWN_FAILED_PREDECESSOR_PROFILE_MISMATCH")
+    for filename, expected_hash in KNOWN_FAILED_EVIDENCE_SHA256.items():
+        if _bounded_sha256(failed_run / filename) != expected_hash:
+            raise SuccessorRejected("KNOWN_FAILED_EVIDENCE_CHANGED_DURING_READ")
+    return failed_run
+
+
+def validate_no_resources_for_owner(
+    containers: list[str], volumes: list[str], networks: list[str]
+) -> None:
+    if containers or volumes or networks:
+        raise SuccessorRejected("KNOWN_FAILED_OWNER_RESOURCES_PRESENT")
+
+
+def assert_no_resources_for_owner(owner: str) -> None:
+    epoch.owner_name(owner)
+    inventories = []
+    commands = (
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "label=" + epoch.EPOCH_LABEL + "=" + owner,
+            "--format",
+            "{{.ID}}",
+        ],
+        [
+            "docker",
+            "volume",
+            "ls",
+            "--filter",
+            "label=" + epoch.EPOCH_LABEL + "=" + owner,
+            "--format",
+            "{{.Name}}",
+        ],
+        [
+            "docker",
+            "network",
+            "ls",
+            "--filter",
+            "label=" + epoch.EPOCH_LABEL + "=" + owner,
+            "--format",
+            "{{.ID}}",
+        ],
+    )
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                check=False,
+                shell=False,
+                env=epoch.fresh.supervisor_environment(),
+            )
+        except Exception:
+            raise SuccessorRejected("KNOWN_FAILED_OWNER_INVENTORY_FAILED") from None
+        if result.returncode or len(result.stdout) > 64 * 1024:
+            raise SuccessorRejected("KNOWN_FAILED_OWNER_INVENTORY_FAILED")
+        try:
+            rows = result.stdout.decode("ascii", "strict").splitlines()
+        except UnicodeError:
+            raise SuccessorRejected("KNOWN_FAILED_OWNER_INVENTORY_MALFORMED") from None
+        inventories.append(rows)
+    validate_no_resources_for_owner(*inventories)
+
+
+def _parse_network(value: object) -> ipaddress.IPv4Network | ipaddress.IPv6Network:
+    if not isinstance(value, str) or not value or "/" not in value:
+        raise SuccessorRejected("NETWORK_SUBNET_INVENTORY_MALFORMED")
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        raise SuccessorRejected("NETWORK_SUBNET_INVENTORY_MALFORMED") from None
+
+
+def validate_subnet_available(
+    subnet: ipaddress.IPv4Network,
+    docker_subnets: list[str],
+    host_routes: list[str],
+) -> None:
+    if not isinstance(subnet, ipaddress.IPv4Network):
+        raise SuccessorRejected("SUCCESSOR_IPV4_SUBNET_REQUIRED")
+    for candidate in docker_subnets:
+        network = _parse_network(candidate)
+        if network.version == 4 and network.overlaps(subnet):
+            raise SuccessorRejected("SUCCESSOR_SUBNET_DOCKER_COLLISION")
+    for candidate in host_routes:
+        if candidate == "0.0.0.0/0":
+            continue
+        network = _parse_network(candidate)
+        if network.version != 4:
+            raise SuccessorRejected("HOST_ROUTE_INVENTORY_MALFORMED")
+        if network.overlaps(subnet):
+            raise SuccessorRejected("SUCCESSOR_SUBNET_HOST_ROUTE_COLLISION")
+
+
+def _docker_ipv4_subnets() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["docker", "network", "ls", "--quiet"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+            shell=False,
+            env=epoch.fresh.supervisor_environment(),
+        )
+    except Exception:
+        raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_FAILED") from None
+    if result.returncode or len(result.stdout) > 64 * 1024:
+        raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_FAILED")
+    try:
+        ids = result.stdout.decode("ascii", "strict").splitlines()
+    except UnicodeError:
+        raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_MALFORMED") from None
+    if (
+        not ids
+        or len(ids) > 256
+        or any(not re.fullmatch(r"[0-9a-f]{12,64}", item) for item in ids)
+    ):
+        raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_MALFORMED")
+    subnets: list[str] = []
+    inventory_deadline = time.monotonic() + 60
+    for network_id in ids:
+        remaining = inventory_deadline - time.monotonic()
+        if remaining <= 0:
+            raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_TIMEOUT")
+        try:
+            detail = subprocess.run(
+                [
+                    "docker",
+                    "network",
+                    "inspect",
+                    "--format",
+                    "{{json .IPAM.Config}}",
+                    network_id,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=min(10, remaining),
+                check=False,
+                shell=False,
+                env=epoch.fresh.supervisor_environment(),
+            )
+        except Exception:
+            raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_FAILED") from None
+        if detail.returncode or len(detail.stdout) > 64 * 1024:
+            raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_FAILED")
+        try:
+            config = json.loads(detail.stdout.decode("ascii", "strict"))
+        except (UnicodeError, json.JSONDecodeError):
+            raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_MALFORMED") from None
+        if config is None:
+            continue
+        if not isinstance(config, list):
+            raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_MALFORMED")
+        for item in config:
+            if not isinstance(item, dict) or not isinstance(item.get("Subnet"), str):
+                raise SuccessorRejected("DOCKER_NETWORK_INVENTORY_MALFORMED")
+            _parse_network(item["Subnet"])
+            subnets.append(item["Subnet"])
+    return subnets
+
+
+def _host_ipv4_routes() -> list[str]:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$routes = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop |
+  Select-Object -ExpandProperty DestinationPrefix)
+$payload = [pscustomobject]@{ inventory_completed=$true; prefixes=@($routes) }
+ConvertTo-Json -InputObject $payload -Compress -Depth 3
+"""
+    try:
+        result = subprocess.run(
+            [str(epoch.PS), "-NoProfile", "-NonInteractive", "-Command", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            shell=False,
+            env=epoch.fresh.supervisor_environment(),
+        )
+    except Exception:
+        raise SuccessorRejected("HOST_ROUTE_INVENTORY_FAILED") from None
+    if result.returncode or len(result.stdout) > 64 * 1024:
+        raise SuccessorRejected("HOST_ROUTE_INVENTORY_FAILED")
+    try:
+        payload = json.loads(result.stdout.decode("ascii", "strict"))
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"inventory_completed", "prefixes"}
+            or payload["inventory_completed"] is not True
+            or not isinstance(payload["prefixes"], list)
+            or not payload["prefixes"]
+            or not all(isinstance(item, str) for item in payload["prefixes"])
+        ):
+            raise ValueError
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        raise SuccessorRejected("HOST_ROUTE_INVENTORY_MALFORMED") from None
+    return payload["prefixes"]
+
+
+def assert_successor_subnet_available() -> None:
+    validate_subnet_available(
+        DEDICATED_SUBNET, _docker_ipv4_subnets(), _host_ipv4_routes()
+    )
 
 
 def snapshot_historical_lease(path: Path) -> dict[str, object]:
@@ -523,6 +826,49 @@ def private_work_path(owner: str) -> Path:
 class RetainOwnedClonesController(epoch.EpochController):
     """Preserve stopped, owner-labelled source/restore clones for forensics."""
 
+    def create_network(self) -> None:
+        assert_successor_subnet_available()
+        self.docker(
+            [
+                "network",
+                "create",
+                "--driver",
+                "bridge",
+                "--subnet=" + str(DEDICATED_SUBNET),
+                "--label",
+                epoch.EPOCH_LABEL + "=" + self.owner,
+                "--label",
+                "com.kairos.runtime-epoch.scope=" + epoch.EPOCH_SCOPE,
+                self.names["network"],
+            ]
+        )
+        self.created.append(self.names["network"])
+        network = json.loads(
+            self.docker(
+                ["network", "inspect", "--format", "{{json .}}", self.names["network"]]
+            )
+        )
+        labels = network.get("Labels") or {}
+        config = (network.get("IPAM") or {}).get("Config")
+        if (
+            not isinstance(config, list)
+            or len(config) != 1
+            or not isinstance(config[0], dict)
+            or not isinstance(config[0].get("Subnet"), str)
+        ):
+            raise epoch.Rejected("PRIVATE_EPOCH_PINNED_SUBNET_METADATA_REQUIRED")
+        observed_subnets = [config[0]["Subnet"]]
+        if (
+            network.get("Name") != self.names["network"]
+            or network.get("Driver") != "bridge"
+            or network.get("Internal") is not False
+            or labels.get(epoch.EPOCH_LABEL) != self.owner
+            or labels.get("com.kairos.runtime-epoch.scope") != epoch.EPOCH_SCOPE
+            or network.get("Containers")
+            or observed_subnets != [str(DEDICATED_SUBNET)]
+        ):
+            raise epoch.Rejected("PRIVATE_EPOCH_PINNED_SUBNET_EGRESS_BRIDGE_REQUIRED")
+
     def remove_owned_clone(self, container: str, volume: str) -> None:
         if container not in {self.names["source_pg"], self.names["restore_pg"]}:
             raise epoch.Rejected("SUCCESSOR_CLONE_IDENTITY_REQUIRED")
@@ -574,6 +920,14 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     assert_no_active_epochs()
     preserved_before = capture_preserved_old_containers()
     historical_lease_before = snapshot_historical_lease(epoch.ACTIVE_LEASE)
+    predecessor = validate_successor_root_is_create_only(
+        epoch.fresh.safe(SUCCESSOR_ROOT)
+    )
+    if predecessor is not None:
+        assert_no_resources_for_owner(KNOWN_FAILED_OWNER)
+    # Catch ordinary IPAM/route exhaustion before allocating a successor run
+    # directory, so a preflight refusal does not create a retry candidate.
+    assert_successor_subnet_available()
     owner = uuid.uuid4().hex
     work = _create_private_work(owner)
     secrets_map = {

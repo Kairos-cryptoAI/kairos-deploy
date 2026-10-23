@@ -11,6 +11,46 @@ from unittest.mock import Mock, patch
 from scripts import runtime_epoch_successor as successor
 
 
+def _known_failed_receipts(run: Path) -> None:
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "runtime-epoch-failure.json").write_text(
+        json.dumps(
+            {
+                "result": "FAILED_CLOSED",
+                "owner": successor.KNOWN_FAILED_OWNER,
+                "phase": "ADMISSION",
+                "error_category": "BOUNDED_DOCKER_OPERATION_FAILED_GATEERROR",
+                "created_resources": [],
+                "preserved_forensics": True,
+                "active_lease_preserved": True,
+                "trading_started": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "first-cli-failure.json").write_text(
+        json.dumps(
+            {
+                "category": "NATIVE_DOCKER_OPERATION_FAILED",
+                "operation": {
+                    "sequence": 3,
+                    "exit_code": 1,
+                    "timed_out": False,
+                    "overflow": False,
+                    "cli_tree_proven": True,
+                    "operation_category": "DOCKER_OTHER",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "cli-003.stderr").write_bytes(b"hashed-only")
+
+
+def _pin_known_failed_hashes(path: Path) -> str:
+    return successor.KNOWN_FAILED_EVIDENCE_SHA256[path.name]
+
+
 class SuccessorAdmissionTests(unittest.TestCase):
     def test_baseline_is_explicit_and_not_production_qualification(self):
         baseline = successor.accepted_baseline_projection()
@@ -185,9 +225,187 @@ class SuccessorAdmissionTests(unittest.TestCase):
                 (root / "run-old").mkdir()
                 with self.assertRaisesRegex(
                     successor.SuccessorRejected,
-                    "SUCCESSOR_ROOT_NOT_EMPTY_NO_BLIND_RETRY",
+                    "SUCCESSOR_ROOT_NOT_EXACT_KNOWN_FAILURE",
                 ):
                     successor.validate_successor_root_is_create_only(root)
+
+    def test_one_exact_known_precreation_failure_is_accepted_and_retained(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "successor"
+            root.mkdir()
+            run = root / successor.KNOWN_FAILED_RUN
+            _known_failed_receipts(run)
+            with patch.object(
+                successor, "_bounded_sha256", side_effect=_pin_known_failed_hashes
+            ):
+                self.assertEqual(
+                    successor.validate_successor_root_is_create_only(root), run
+                )
+                self.assertEqual(successor.validate_known_failed_predecessor(root), run)
+            self.assertTrue((run / "cli-003.stderr").exists())
+
+    def test_known_predecessor_evidence_mutation_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "successor"
+            root.mkdir()
+            _known_failed_receipts(root / successor.KNOWN_FAILED_RUN)
+            with patch.object(successor, "_bounded_sha256", return_value="0" * 64):
+                with self.assertRaisesRegex(
+                    successor.SuccessorRejected, "KNOWN_FAILED_EVIDENCE_HASH_MISMATCH"
+                ):
+                    successor.validate_known_failed_predecessor(root)
+
+    def test_second_or_unknown_successor_run_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "successor"
+            root.mkdir()
+            _known_failed_receipts(root / successor.KNOWN_FAILED_RUN)
+            (root / "run-new-attempt").mkdir()
+            with patch.object(
+                successor, "_bounded_sha256", side_effect=_pin_known_failed_hashes
+            ):
+                with self.assertRaisesRegex(
+                    successor.SuccessorRejected,
+                    "SUCCESSOR_ROOT_NOT_EXACT_KNOWN_FAILURE",
+                ):
+                    successor.validate_successor_root_is_create_only(root)
+
+    def test_any_old_owner_labeled_resource_blocks_retry(self):
+        successor.validate_no_resources_for_owner([], [], [])
+        with self.assertRaisesRegex(
+            successor.SuccessorRejected, "KNOWN_FAILED_OWNER_RESOURCES_PRESENT"
+        ):
+            successor.validate_no_resources_for_owner(["container-id"], [], [])
+        with self.assertRaisesRegex(
+            successor.SuccessorRejected, "KNOWN_FAILED_OWNER_RESOURCES_PRESENT"
+        ):
+            successor.validate_no_resources_for_owner([], ["volume"], [])
+        with self.assertRaisesRegex(
+            successor.SuccessorRejected, "KNOWN_FAILED_OWNER_RESOURCES_PRESENT"
+        ):
+            successor.validate_no_resources_for_owner([], [], ["network"])
+
+    def test_retry_resource_inventory_is_read_only_and_requires_all_empty(self):
+        owner = successor.KNOWN_FAILED_OWNER
+        empty_results = [Mock(returncode=0, stdout=b"")] * 3
+        with patch.object(
+            successor.subprocess, "run", side_effect=empty_results
+        ) as run:
+            successor.assert_no_resources_for_owner(owner)
+        self.assertEqual(run.call_count, 3)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertIn("--filter", command)
+            self.assertIn("label=" + successor.epoch.EPOCH_LABEL + "=" + owner, command)
+            self.assertNotIn("create", command)
+            self.assertNotIn("rm", command)
+
+        partial = [
+            Mock(returncode=0, stdout=b"old-resource\n"),
+            Mock(returncode=0, stdout=b""),
+            Mock(returncode=0, stdout=b""),
+        ]
+        with patch.object(successor.subprocess, "run", side_effect=partial):
+            with self.assertRaisesRegex(
+                successor.SuccessorRejected, "KNOWN_FAILED_OWNER_RESOURCES_PRESENT"
+            ):
+                successor.assert_no_resources_for_owner(owner)
+
+    def test_subnet_docker_and_host_route_collision_gates(self):
+        target = successor.DEDICATED_SUBNET
+        successor.validate_subnet_available(target, ["10.254.251.0/28"], ["0.0.0.0/0"])
+        with self.assertRaisesRegex(
+            successor.SuccessorRejected, "SUCCESSOR_SUBNET_DOCKER_COLLISION"
+        ):
+            successor.validate_subnet_available(target, ["10.254.251.32/27"], [])
+        with self.assertRaisesRegex(
+            successor.SuccessorRejected, "SUCCESSOR_SUBNET_HOST_ROUTE_COLLISION"
+        ):
+            successor.validate_subnet_available(target, [], ["10.254.251.48/28"])
+
+    def test_subnet_inventory_malformed_or_unknown_refuses(self):
+        for docker_subnets, routes in (
+            (["not-a-cidr"], []),
+            ([], ["unknown"]),
+            ([], ["2001:db8::/32"]),
+        ):
+            with self.subTest(docker_subnets=docker_subnets, routes=routes):
+                with self.assertRaisesRegex(
+                    successor.SuccessorRejected,
+                    "NETWORK_SUBNET_INVENTORY_MALFORMED|HOST_ROUTE_INVENTORY_MALFORMED",
+                ):
+                    successor.validate_subnet_available(
+                        successor.DEDICATED_SUBNET, docker_subnets, routes
+                    )
+
+    def test_docker_network_inspection_rejects_malformed_ipam(self):
+        results = [
+            Mock(returncode=0, stdout=b"0123456789ab\n"),
+            Mock(returncode=0, stdout=b'[{"Subnet":"not-a-prefix"}]'),
+        ]
+        with patch.object(successor.subprocess, "run", side_effect=results):
+            with self.assertRaisesRegex(
+                successor.SuccessorRejected, "NETWORK_SUBNET_INVENTORY_MALFORMED"
+            ):
+                successor._docker_ipv4_subnets()
+        empty = Mock(returncode=0, stdout=b"")
+        with patch.object(successor.subprocess, "run", return_value=empty):
+            with self.assertRaisesRegex(
+                successor.SuccessorRejected, "DOCKER_NETWORK_INVENTORY_MALFORMED"
+            ):
+                successor._docker_ipv4_subnets()
+
+    def test_host_route_inventory_requires_complete_json_and_accepts_only_default(self):
+        result = Mock(
+            returncode=0,
+            stdout=b'{"inventory_completed":true,"prefixes":["0.0.0.0/0"]}',
+        )
+        with patch.object(successor.subprocess, "run", return_value=result):
+            routes = successor._host_ipv4_routes()
+        self.assertEqual(routes, ["0.0.0.0/0"])
+        successor.validate_subnet_available(successor.DEDICATED_SUBNET, [], routes)
+        malformed = Mock(returncode=0, stdout=b'{"prefixes":["0.0.0.0/0"]}')
+        with patch.object(successor.subprocess, "run", return_value=malformed):
+            with self.assertRaisesRegex(
+                successor.SuccessorRejected, "HOST_ROUTE_INVENTORY_MALFORMED"
+            ):
+                successor._host_ipv4_routes()
+        empty = Mock(
+            returncode=0,
+            stdout=b'{"inventory_completed":true,"prefixes":[]}',
+        )
+        with patch.object(successor.subprocess, "run", return_value=empty):
+            with self.assertRaisesRegex(
+                successor.SuccessorRejected, "HOST_ROUTE_INVENTORY_MALFORMED"
+            ):
+                successor._host_ipv4_routes()
+
+    def test_successor_bridge_uses_exact_new_subnet_and_verifies_owner(self):
+        controller = object.__new__(successor.RetainOwnedClonesController)
+        owner = "d" * 32
+        network_name = "kairos-epoch-dddddddddddd-network"
+        controller.owner = owner
+        controller.names = {"network": network_name}
+        controller.created = []
+        network = {
+            "Name": network_name,
+            "Driver": "bridge",
+            "Internal": False,
+            "Labels": {
+                successor.epoch.EPOCH_LABEL: owner,
+                "com.kairos.runtime-epoch.scope": successor.epoch.EPOCH_SCOPE,
+            },
+            "Containers": {},
+            "IPAM": {"Config": [{"Subnet": str(successor.DEDICATED_SUBNET)}]},
+        }
+        controller.docker = Mock(side_effect=["network-id", json.dumps(network)])
+        with patch.object(successor, "assert_successor_subnet_available") as preflight:
+            controller.create_network()
+        preflight.assert_called_once_with()
+        create_args = controller.docker.call_args_list[0].args[0]
+        self.assertIn("--subnet=" + str(successor.DEDICATED_SUBNET), create_args)
+        self.assertNotIn("--publish", create_args)
+        self.assertEqual(controller.created, [network_name])
 
     def test_historical_lease_is_hashed_preserved_and_never_adopted(self):
         with tempfile.TemporaryDirectory() as temporary:
