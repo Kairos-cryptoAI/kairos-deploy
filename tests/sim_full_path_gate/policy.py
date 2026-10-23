@@ -26,8 +26,8 @@ PINS = {
     "kairos-router": "e7c7ddd71125abff0e5d5af0b116301bc3921890",
     "kairos-llm": "f67ca208d65c430d93dd6e5e242797191b4017f2",
     "kairos-aggregator": "edff2f56a7de4c7065d8d86d2ce2a8997d1b3133",
-    "kairos-risk-manager": "4eb6de55ee68d742b2583932c2e0d8f98b65949d",
-    "kairos-execution-engine": "d544ae9d9ac4eaa1670f02c7772899c42946756c",
+    "kairos-risk-manager": "251c45cea63edb6b08f36e3cd94102c2f45957d2",
+    "kairos-execution-engine": "fcdf2d57128627f2b3c1230616f7029ca6b67755",
 }
 MODULES = {
     "kairos-core": "kairos_core",
