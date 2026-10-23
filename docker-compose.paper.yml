@@ -231,12 +231,12 @@ services:
       dockerfile: docker/Dockerfile.paper-execution
       pull: true
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#fdc7a46609d81081fe3f7c268010f05f6c0749b5
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#9f89d971c584f6ff0328ac4d1bf8893029c96f41
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: fdc7a46609d81081fe3f7c268010f05f6c0749b5
+        SOURCE_REVISION: 9f89d971c584f6ff0328ac4d1bf8893029c96f41
     command: ["kairos-execution-engine"]
     environment:
       <<: *paper-environment
