@@ -31,19 +31,19 @@
     },
     "risk-manager": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "251c45cea63edb6b08f36e3cd94102c2f45957d2",
+      "revision": "ef4365979069c601101b6f3a3560afa9bd67777f",
       "package_dir": "kairos_risk",
       "command": "kairos-risk-manager"
     },
     "canary-controller": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-risk-manager",
-      "revision": "251c45cea63edb6b08f36e3cd94102c2f45957d2",
+      "revision": "ef4365979069c601101b6f3a3560afa9bd67777f",
       "package_dir": "kairos_risk",
       "command": "kairos-paper-canary"
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "fcdf2d57128627f2b3c1230616f7029ca6b67755",
+      "revision": "53dc2d9bd73652907c6d8c197d9321ebc23fdd9f",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"

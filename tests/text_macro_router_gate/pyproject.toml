@@ -34,7 +34,7 @@ kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-sco
 kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "91af931a21d956d2b7b310d4d85456254da59c03" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "e7c7ddd71125abff0e5d5af0b116301bc3921890" }
 kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "edff2f56a7de4c7065d8d86d2ce2a8997d1b3133" }
-kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "251c45cea63edb6b08f36e3cd94102c2f45957d2" }
+kairos-risk-manager = { git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git", rev = "ef4365979069c601101b6f3a3560afa9bd67777f" }
 kairos-strategy-engine = { git = "https://github.com/Kairos-cryptoAI/kairos-strategy-engine.git", rev = "30d1315fdcd96b277a87cb59c1819c476344a83c" }
 
 [tool.pytest.ini_options]
