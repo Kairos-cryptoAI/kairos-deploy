@@ -126,6 +126,14 @@ PowerShell executable: elevated Windows does not inherit Codex's bundled PATH.
 Its child environment also pins the public GPG verifier and minimal `.EXE`
 command resolution; no credentials or general user environment are inherited.
 The machine/user PATH and execution policies are not changed.
+The public receipt verifier uses one newly created temporary cwd, a relative
+`trusted.gpg` resource and `GNUPGHOME=.` for both GPG processes. This avoids
+MSYS interpreting Windows drive letters as resource URLs, without using the
+user keyring, retrieving keys, changing trust pins, or bypassing `VALIDSIG`.
+Each read-only owner admission has a separate create-only `inspection-UUID`
+CLI evidence directory. It never reuses the completed native run's numbered
+CLI files. Runtime snapshots, native receipts and data remain unchanged;
+inspection metadata is not a runtime-recovery or full-host acceptance pass.
 
 ## Claim limits
 

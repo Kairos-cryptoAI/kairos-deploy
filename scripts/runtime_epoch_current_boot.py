@@ -96,9 +96,11 @@ def verify_receipt_signature(
     }:
         raise CurrentBootRejected("TRUSTED_RECEIPT_SIGNER_PIN_REQUIRED")
     with tempfile.TemporaryDirectory(prefix="kairos-current-boot-gpg-") as directory:
-        keyring = Path(directory) / "trusted.gpg"
+        # Git's MSYS GPG treats drive-letter keyring/home arguments as URLs.
+        # Resolve this relative resource only inside our new private cwd.
+        keyring = "trusted.gpg"
         env = epoch.fresh.supervisor_environment()
-        env["GNUPGHOME"] = directory
+        env["GNUPGHOME"] = "."
         imported = subprocess.run(
             [
                 str(GPG),
@@ -107,14 +109,15 @@ def verify_receipt_signature(
                 "--no-auto-key-retrieve",
                 "--no-default-keyring",
                 "--keyring",
-                str(keyring),
+                keyring,
                 "--import",
-                str(TRUSTED_SIGNER),
+                TRUSTED_SIGNER.as_posix(),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
+            cwd=directory,
             timeout=20,
             check=False,
             shell=False,
@@ -125,14 +128,15 @@ def verify_receipt_signature(
                 "--status-fd",
                 "1",
                 "--keyring",
-                str(keyring),
-                str(signature),
-                str(receipt),
+                keyring,
+                signature.as_posix(),
+                receipt.as_posix(),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=env,
+            cwd=directory,
             timeout=20,
             check=False,
             shell=False,
@@ -386,12 +390,21 @@ class CurrentEpochBootAdapter:
         runtime_work = self.owner_work / "runtime-wheelhouse"
         if epoch._sha(Path(profile["wheelhouse"]) / "manifest.json") != profile["wheel_manifest_sha256"]:
             raise CurrentBootRejected("SIGNED_CURRENT_ARTIFACT_FINGERPRINT_CHANGED")
+        # A fresh controller starts its CLI evidence sequence at one. Never
+        # collide with the completed native run or another read-only plan.
+        inspection_work = self.owner_work / ("inspection-" + uuid.uuid4().hex)
+        epoch._private_directory(inspection_work)
+        epoch.fresh.save(inspection_work / "inspection-binding.json", {
+            "schema": "kairos.current-owner-inspection.v1",
+            "owner": owner, "receipt_sha256": expected_sha256,
+            "runtime_mutations": False, "trading_started": False,
+        })
         controller = current.CurrentEpochController(
             owner,
             expected_revision=profile["deploy_revision"],
             wheelhouse=Path(profile["wheelhouse"]),
             deadline=time.monotonic() + epoch.MAX_SECONDS,
-            workdir=self.owner_work,
+            workdir=inspection_work,
             build_profile=details["build"],
             subnet=ipaddress.ip_network(profile["subnet"], strict=True),
         )
