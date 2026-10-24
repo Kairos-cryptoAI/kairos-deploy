@@ -1014,23 +1014,18 @@ class CurrentEpochBootAdapter:
         )
 
     def _wait_advanced_status(self, previous: dict) -> dict:
-        deadline = time.monotonic() + STATUS_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            if self.status_path.is_file() and not self.status_path.is_symlink():
-                try:
-                    status = read_bounded_json(self.status_path, 32_768)
-                    if status.get("state") == "FAILED_CLOSED":
-                        raise CurrentBootRejected("CURRENT_SERVE_FAILED_CLOSED")
-                    if status.get("observed_at_utc") != previous.get("observed_at_utc"):
-                        validated = validate_status_profile(status, self.owner, previous=previous)
-                        view = self.controller.inspect_container(self.names["serve"])
-                        if (view.get("state") or {}).get("Status") != "running":
-                            raise CurrentBootRejected("CURRENT_SERVE_NOT_RUNNING")
-                        return validated
-                except (OSError, json.JSONDecodeError):
-                    pass
-            time.sleep(2)
-        raise CurrentBootRejected("CURRENT_SERVE_FRESH_ADVANCED_STATUS_REQUIRED")
+        def require_running():
+            self._verify_container_by_id(self.names["serve"], self.container_ids[self.names["serve"]])
+            view = self.controller.inspect_container(self.container_ids[self.names["serve"]])
+            if (view.get("state") or {}).get("Status") != "running":
+                raise CurrentBootRejected("CURRENT_SERVE_NOT_RUNNING")
+
+        try:
+            status = current.wait_for_advanced_status(self.status_path, self.owner, previous,
+                deadline=time.monotonic() + STATUS_WAIT_SECONDS, running_check=require_running)
+        except current.CurrentEpochRejected as exc:
+            raise CurrentBootRejected(str(exc)) from None
+        return validate_status_profile(status, self.owner, previous=previous)
 
     @classmethod
     def from_inputs(cls, receipt_path: Path, expected_sha256: str, signature_path: Path):

@@ -20,6 +20,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 if __package__:
@@ -61,6 +62,69 @@ PROFILE_KEYS = {
 
 class CurrentEpochRejected(RuntimeError):
     """Sanitized current-profile admission failure."""
+
+
+def validate_pending_status(value: dict, owner: str) -> None:
+    """Validate a bounded CURRENT startup observation, never a healthy pass."""
+    if (
+        not isinstance(value, dict)
+        or value.get("owner") != owner
+        or value.get("state") not in {"CATCHING_UP_NONTRADING", "WAITING_SOURCE_NONTRADING"}
+        or value.get("schema_profile") != "current-controlled-v1"
+        or value.get("schema_migration_count") != 19
+        or value.get("schema_public_table_count") != 33
+        or value.get("trading_started") is not False
+        or any(value.get(key) is not False for key in ("PAPER_QUALIFIED", "ALPHA_READY", "LIVE_READY"))
+        or value.get("STRATEGY_POLICY") != "REJECT_ALL"
+        or any(type(value.get(key)) is not int or value[key] < 0 for key in (
+            "pending_outbox", "unresolved_inbox", "uncompleted_publications", "cycles"
+        ))
+    ):
+        raise CurrentEpochRejected("CURRENT_STARTUP_OBSERVATION_REQUIRED")
+    watermarks = value.get("watermarks_ms")
+    if (not isinstance(watermarks, dict) or set(watermarks) != set(epoch.SYMBOLS)
+            or any(type(item) is not int or item <= 0 for item in watermarks.values())):
+        raise CurrentEpochRejected("CURRENT_STARTUP_WATERMARKS_REQUIRED")
+    try:
+        observed = datetime.fromisoformat(value["observed_at_utc"].replace("Z", "+00:00"))
+        age = (datetime.now(UTC) - observed).total_seconds()
+    except (KeyError, AttributeError, TypeError, ValueError):
+        raise CurrentEpochRejected("CURRENT_STARTUP_TIMESTAMP_REQUIRED") from None
+    if age < -5 or age > 120:
+        raise CurrentEpochRejected("CURRENT_STARTUP_FRESHNESS_REQUIRED")
+
+
+def wait_for_advanced_status(status_path: Path, owner: str, first: dict, *, deadline: float, running_check) -> dict:
+    """Wait through explicit nonhealthy startup states, then apply native gates."""
+    while time.monotonic() < deadline:
+        if status_path.is_file() and not status_path.is_symlink():
+            try:
+                if status_path.stat().st_size > 32768:
+                    raise CurrentEpochRejected("CURRENT_STATUS_BOUND_EXCEEDED")
+                with status_path.open("rb") as stream:
+                    raw = stream.read(32769)
+                if len(raw) > 32768:
+                    raise CurrentEpochRejected("CURRENT_STATUS_BOUND_EXCEEDED")
+                status = json.loads(raw)
+                if not isinstance(status, dict):
+                    raise CurrentEpochRejected("CURRENT_STATUS_OBJECT_REQUIRED")
+                if status.get("observed_at_utc") != first.get("observed_at_utc"):
+                    running_check()
+                    if (status.get("schema_profile") != "current-controlled-v1"
+                            or status.get("schema_migration_count") != 19
+                            or status.get("schema_public_table_count") != 33
+                            or status.get("trading_started") is not False):
+                        raise CurrentEpochRejected("CURRENT_STATUS_SCHEMA_REQUIRED")
+                    if status.get("state") in {"CATCHING_UP_NONTRADING", "WAITING_SOURCE_NONTRADING"}:
+                        validate_pending_status(status, owner)
+                    else:
+                        epoch.validate_running_status(status, owner)
+                        if all(status["watermarks_ms"][s] > first["watermarks_ms"][s] for s in epoch.SYMBOLS):
+                            return epoch.validate_running_status(status, owner, previous=first)
+            except (OSError, json.JSONDecodeError):
+                pass
+        time.sleep(2)
+    raise CurrentEpochRejected("CURRENT_SERVE_FRESH_ADVANCED_STATUS_REQUIRED")
 
 
 def unique_object(pairs):
@@ -399,6 +463,34 @@ class CurrentEpochController(previous.RetainOwnedClonesController):
         if self.build_profile is None:
             raise CurrentEpochRejected("CURRENT_BUILD_PROFILE_REQUIRED")
         self.subnet = subnet
+
+    def restart_serve_and_validate(self, status_path: Path, first: dict) -> dict:
+        """CURRENT-only restart; historical controller semantics are unchanged."""
+        epoch.validate_running_status(first, self.owner)
+        if status_path != self.work / "output-serve" / "status.json":
+            raise CurrentEpochRejected("EXACT_CURRENT_SERVE_STATUS_PATH_REQUIRED")
+        before = self.inspect_container(self.names["serve"])
+        identifier = before.get("id")
+        if (not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier)
+                or before.get("labels", {}).get(epoch.EPOCH_LABEL) != self.owner
+                or before.get("image") != self.worker_image
+                or before.get("state", {}).get("Status") != "running"):
+            raise CurrentEpochRejected("EXACT_RUNNING_CURRENT_SERVE_REQUIRED")
+        self.docker(["stop", "--time=15", identifier], seconds=25)
+        stopped = self.inspect_container(identifier)
+        if stopped.get("id") != identifier or stopped.get("state", {}).get("Status") != "exited":
+            raise CurrentEpochRejected("CURRENT_SERVE_STOP_NOT_VERIFIED")
+        self.docker(["start", identifier])
+
+        def require_running():
+            view = self.inspect_container(identifier)
+            if (view.get("id") != identifier or view.get("labels", {}).get(epoch.EPOCH_LABEL) != self.owner
+                    or view.get("image") != self.worker_image
+                    or view.get("state", {}).get("Status") != "running"):
+                raise CurrentEpochRejected("CURRENT_SERVE_RESTART_NOT_RUNNING")
+
+        return wait_for_advanced_status(status_path, self.owner, first,
+            deadline=min(time.monotonic() + 180, self.deadline - 15), running_check=require_running)
 
     def create_network(self) -> None:
         previous.validate_subnet_available(

@@ -65,6 +65,14 @@ status. Its two uniquely named restore clones are retained stopped. Failure
 cleanup may stop only exact recorded, still-verified owned IDs; failed creation
 or name collision never authorizes stopping the colliding resource.
 
+CURRENT restart and boot polling tolerate only explicitly recognized, fresh,
+owner/profile-matching `CATCHING_UP_NONTRADING` and `WAITING_SOURCE_NONTRADING`
+startup observations within their existing finite deadlines. These are never
+healthy evidence. Success still requires native `RUNNING_NONTRADING`, zero
+pending/unresolved/uncompleted messages and natural progress of all five
+watermarks. Unknown, failed, stale, foreign or trading-enabled states refuse.
+The historical controller's restart behavior is unchanged.
+
 `Install-CurrentRuntimeBootTask.ps1` is also plan-only unless `-Execute` is
 supplied. It installs only after read-only admission proves the new owner is
 healthy. It creates a new exact-owner task and create-only public binding,
