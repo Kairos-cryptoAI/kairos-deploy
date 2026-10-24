@@ -72,6 +72,14 @@ healthy evidence. Success still requires native `RUNNING_NONTRADING`, zero
 pending/unresolved/uncompleted messages and natural progress of all five
 watermarks. Unknown, failed, stale, foreign or trading-enabled states refuse.
 The historical controller's restart behavior is unchanged.
+Every CURRENT database has its own migration-generated identity row. Boot
+admission binds its full digest to the exact owner/database/current-schema
+`verify-restore` proof in the trusted, signed native runtime receipt, rather
+than reusing the historical continuation's UUID/timestamp digest. Both state
+checks and both restored comparisons must retain that identity. CURRENT boot
+seeds include the identity and exact schema metadata; only already-verified
+CLI owner/mode/database metadata is projected away before strict seed checks.
+The historical default's identity constant and seed shape remain unchanged.
 CURRENT full-table integrity hashes use an explicit maximum 120-second SQL
 query budget on both sides of restore comparison. The historical default,
 ordinary runtime SQL deadlines, complete hashes, read-only transactions, and

@@ -20,9 +20,11 @@ from pathlib import Path
 if __package__:
     from scripts import runtime_epoch_controller as epoch
     from scripts import runtime_epoch_current as current
+    from scripts import runtime_epoch_worker as worker
 else:
     import runtime_epoch_controller as epoch
     import runtime_epoch_current as current
+    import runtime_epoch_worker as worker
 
 SCHEMA_PROFILE = "current-controlled-v1"
 MIGRATION_COUNT = 19
@@ -175,6 +177,50 @@ def require_host_acceptance(report_path: Path, owner: str, receipt_sha256: str, 
         raise CurrentBootRejected("EXACT_SIGNED_NONTRADING_HOST_ACCEPTANCE_REQUIRED")
 
 
+def database_identity_from_restore_proof(proofs: dict, owner: str) -> dict:
+    proof = proofs.get("verify-restore")
+    expected_tables = set(worker.schema_profile(SCHEMA_PROFILE)["public_tables"])
+    if (not isinstance(proof, dict) or proof.get("owner") != owner
+            or proof.get("mode") != "verify-restore"
+            or proof.get("new_epoch_database") != "kairos_epoch_" + owner[:12]
+            or proof.get("state") != "PASS_ISOLATED_EPOCH_RESTORE"
+            or proof.get("schema_profile") != SCHEMA_PROFILE
+            or proof.get("schema_migration_count") != MIGRATION_COUNT
+            or proof.get("schema_public_table_count") != PUBLIC_TABLE_COUNT
+            or proof.get("matched_public_tables") != PUBLIC_TABLE_COUNT
+            or not isinstance(proof.get("tables"), dict) or set(proof["tables"]) != expected_tables):
+        raise CurrentBootRejected("SIGNED_OWNED_CURRENT_RESTORE_PROOF_REQUIRED")
+    if (any(not isinstance(row, dict) or set(row) != {"count", "sha256"}
+            or type(row.get("count")) is not int or row["count"] < 0
+            or re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) is None
+            for row in proof["tables"].values())
+            or proof["tables"]["schema_migrations"]["count"] != MIGRATION_COUNT):
+        raise CurrentBootRejected("EXACT_SIGNED_CURRENT_RESTORE_TABLE_DIGESTS_REQUIRED")
+    try:
+        value = worker.validate_database_identity_digest(proof["tables"]["paper_canary_database_identity"])
+    except worker.EpochError:
+        raise CurrentBootRejected("SIGNED_CURRENT_DATABASE_IDENTITY_REQUIRED") from None
+    return dict(value)
+
+
+def boot_seed_from_receipt(receipt: dict, owner: str, expected_identity: dict) -> dict:
+    """Preserve state values while removing only already-verified CLI metadata."""
+    if (receipt.get("owner") != owner or receipt.get("mode") != "boot-state"
+            or receipt.get("new_epoch_database") != "kairos_epoch_" + owner[:12]):
+        raise CurrentBootRejected("OWNED_CURRENT_BOOT_STATE_RECEIPT_REQUIRED")
+    result = {key: value for key, value in receipt.items() if key not in {"owner", "mode", "new_epoch_database"}}
+    if result.get("database_identity") != expected_identity:
+        raise CurrentBootRejected("SIGNED_CURRENT_DATABASE_IDENTITY_CHANGED")
+    token = worker.schema_profile_context(SCHEMA_PROFILE)
+    try:
+        worker.validate_boot_seed(result, owner, "kairos_epoch_" + owner[:12])
+    except worker.EpochError:
+        raise CurrentBootRejected("EXACT_CURRENT_BOOT_STATE_SEED_REQUIRED") from None
+    finally:
+        worker.reset_schema_profile_context(token)
+    return result
+
+
 def validate_current_receipt(
     receipt: dict, receipt_path: Path, expected_sha256: str
 ) -> tuple[str, dict, dict, Path]:
@@ -236,10 +282,12 @@ def validate_current_receipt(
         "quant_snapshot_sha256",
         "serve_restart_status",
         "audit_backup_sha256",
+        "verify-restore",
     }.issubset(proofs):
         raise CurrentBootRejected("CURRENT_SOURCE_FINGERPRINT_RECEIPTS_REQUIRED")
     baseline = proofs["serve_restart_status"]
     validate_signed_status_baseline(baseline, owner)
+    database_identity_from_restore_proof(proofs, owner)
     return owner, profile, {"runner": runner, "build": build, "proofs": proofs}, work
 
 
@@ -357,6 +405,7 @@ class CurrentEpochBootAdapter:
         self.receipt = receipt
         self.receipt_sha256 = expected_sha256
         self.proofs = details["proofs"]
+        self.database_identity = database_identity_from_restore_proof(self.proofs, owner)
         self.status_path = self.owner_work / "output-serve" / "status.json"
         self.private_path = self.owner_work / "epoch-private.json"
         self.names = epoch.resource_names(owner)
@@ -776,9 +825,10 @@ class CurrentEpochBootAdapter:
                 "pg_host": self.names["target_pg"],
                 "redis_host": self.names["redis"],
             }
-            state = c.phase(
-                "boot-state", {**common, "admin_password": self.private["admin_password"]}, suffix=boot_id
-            )
+            state = boot_seed_from_receipt(c.phase(
+                "boot-state", {**common, "admin_password": self.private["admin_password"],
+                               "database_identity": self.database_identity}, suffix=boot_id
+            ), self.owner, self.database_identity)
             self._verify_profile_receipt(c.proofs["boot-state"])
             retained_restores.append(
                 self._backup_restore(c, work, common, state, boot_id + "-01")
@@ -795,11 +845,13 @@ class CurrentEpochBootAdapter:
                 },
                 suffix=boot_id,
             )
-            updated = c.phase(
-                "boot-state", {**common, "admin_password": self.private["admin_password"]}, suffix=boot_id + "-post"
-            )
+            updated = boot_seed_from_receipt(c.phase(
+                "boot-state", {**common, "admin_password": self.private["admin_password"],
+                               "database_identity": self.database_identity}, suffix=boot_id + "-post"
+            ), self.owner, self.database_identity)
             if (
                 updated["original_prefix"] != state["original_prefix"]
+                or updated["database_identity"] != state["database_identity"]
                 or updated["queue"] != state["queue"]
                 or updated["tables"]["message_outbox"] != state["tables"]["message_outbox"]
                 or updated["tables"]["message_inbox"] != state["tables"]["message_inbox"]

@@ -100,6 +100,8 @@ class WorkerConfigTests(unittest.TestCase):
         state["schema_profile"] = "current-controlled-v1"
         state["schema_migration_count"] = 19
         state["schema_public_table_count"] = 33
+        state["database_identity"] = dict(state["tables"]["paper_canary_database_identity"])
+        state["tables"]["schema_migrations"]["count"] = 19
         token = worker.schema_profile_context("current-controlled-v1")
         try:
             worker.validate_boot_seed(state, OWNER, DB)

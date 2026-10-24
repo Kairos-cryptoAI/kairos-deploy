@@ -333,6 +333,10 @@ def validate_config(value: dict, mode: str) -> None:
         raise EpochError("EPOCH_OWNER_REQUIRED")
     if value.get("database") != "kairos_epoch_" + owner[:12]:
         raise EpochError("NEW_EPOCH_DATABASE_REQUIRED")
+    if mode == "boot-state" and schema_profile()["identity"] == "current-controlled-v1":
+        if set(value) != {"owner", "database", "pg_host", "redis_host", "admin_password", "database_identity"}:
+            raise EpochError("CURRENT_BOOT_DATABASE_IDENTITY_REQUIRED")
+        validate_database_identity_digest(value.get("database_identity"))
     for key in ("pg_host", "redis_host"):
         if not re.fullmatch(
             r"kairos-epoch-" + owner[:12] + r"-[a-z]+", value.get(key, "")
@@ -842,8 +846,21 @@ BOOT_ADVISORY_LOCKS = (
 )
 
 
-def validate_boot_database_identity(tables: dict) -> None:
-    if tables.get("paper_canary_database_identity") != BOOT_DATABASE_IDENTITY:
+def validate_database_identity_digest(value: object) -> dict:
+    if (not isinstance(value, dict) or set(value) != {"count", "sha256"}
+            or type(value.get("count")) is not int or value["count"] != 1
+            or re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256", ""))) is None):
+        raise EpochError("EXACT_DATABASE_IDENTITY_DIGEST_REQUIRED")
+    return value
+
+
+def validate_boot_database_identity(tables: dict, expected_identity: dict | None = None) -> None:
+    if schema_profile()["identity"] == "current-controlled-v1":
+        expected = validate_database_identity_digest(expected_identity)
+        validate_database_identity_digest(tables.get("paper_canary_database_identity"))
+    else:
+        expected = BOOT_DATABASE_IDENTITY
+    if tables.get("paper_canary_database_identity") != expected:
         raise EpochError("BOOT_MIGRATION_DATABASE_IDENTITY_CONFLICT")
 
 
@@ -865,6 +882,7 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
             "schema_profile",
             "schema_migration_count",
             "schema_public_table_count",
+            "database_identity",
         }
     if (
         not isinstance(value, dict)
@@ -883,6 +901,8 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
         value.get("schema_profile") != selected["identity"]
         or value.get("schema_migration_count") != len(selected["migrations"])
         or value.get("schema_public_table_count") != len(selected["public_tables"])
+        or not isinstance(value["tables"].get("schema_migrations"), dict)
+        or value["tables"].get("schema_migrations", {}).get("count") != len(selected["migrations"])
     ):
         raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
     if any(
@@ -899,7 +919,7 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
         if table not in BOOT_ALLOWED_NONEMPTY_TABLES
     ):
         raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
-    validate_boot_database_identity(value["tables"])
+    validate_boot_database_identity(value["tables"], value.get("database_identity"))
     if (
         value["original_prefix"]
         != {
@@ -1090,7 +1110,7 @@ async def boot_history_snapshot(connection) -> dict:
     }
 
 
-async def boot_state_snapshot(connection, owner: str) -> dict:
+async def boot_state_snapshot(connection, owner: str, expected_identity: dict | None = None) -> dict:
     """Full read-only state proof for safe restart/restore admission."""
     from controlled_runtime_worker import Budget
 
@@ -1114,7 +1134,7 @@ async def boot_state_snapshot(connection, owner: str) -> dict:
             if table not in BOOT_ALLOWED_NONEMPTY_TABLES
         ):
             raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
-        validate_boot_database_identity(table_digests)
+        validate_boot_database_identity(table_digests, expected_identity)
         queue = await boot_queue_state(connection, owner)
         history = await boot_history_snapshot(connection)
         if table_digests["event_audit"] != history["audit"]:
@@ -1141,6 +1161,9 @@ async def boot_state_snapshot(connection, owner: str) -> dict:
             "queue": queue,
             "trading_started": False,
         }
+        if schema_profile()["identity"] == "current-controlled-v1":
+            result.update(schema_profile_report())
+            result["database_identity"] = dict(table_digests["paper_canary_database_identity"])
         validate_boot_seed(result, owner, "kairos_epoch_" + owner[:12])
         return result
 
@@ -1276,6 +1299,8 @@ async def history_state(config: dict) -> dict:
 async def boot_state(config: dict) -> dict:
     connection = await connect(config, "kairos")
     try:
+        if schema_profile()["identity"] == "current-controlled-v1":
+            return await boot_state_snapshot(connection, config["owner"], config.get("database_identity"))
         return await boot_state_snapshot(connection, config["owner"])
     finally:
         await connection.close()
@@ -1291,9 +1316,11 @@ async def boot_verify_restore(config: dict) -> dict:
         command_timeout=120,
     )
     try:
+        identity = config["expected_seed"].get("database_identity")
+        args = (identity,) if schema_profile()["identity"] == "current-controlled-v1" else ()
         first, second = await asyncio.gather(
-            boot_state_snapshot(original, config["owner"]),
-            boot_state_snapshot(restored, config["owner"]),
+            boot_state_snapshot(original, config["owner"], *args),
+            boot_state_snapshot(restored, config["owner"], *args),
         )
         if first != config["expected_seed"] or second != first:
             raise EpochError("EPOCH_BOOT_RESTORE_FULL_STATE_CONFLICT")

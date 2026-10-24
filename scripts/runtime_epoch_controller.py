@@ -396,6 +396,13 @@ def validate_worker_config(
             "redis_consumer_password",
         },
     }
+    if schema_profile == "current-controlled-v1" and mode == "boot-state":
+        fields[mode] |= {"database_identity"}
+        identity = value.get("database_identity") if isinstance(value, dict) else None
+        if (not isinstance(identity, dict) or set(identity) != {"count", "sha256"}
+                or type(identity.get("count")) is not int or identity["count"] != 1
+                or re.fullmatch(r"[0-9a-f]{64}", str(identity.get("sha256", ""))) is None):
+            raise Rejected("CURRENT_BOOT_DATABASE_IDENTITY_REQUIRED")
     if mode not in fields or not isinstance(value, dict) or set(value) != fields[mode]:
         raise Rejected("EXACT_WORKER_CONFIG_FIELDS_REQUIRED")
     if re.fullmatch(r"[0-9a-f]{32}", str(value.get("owner", ""))) is None:
@@ -1085,7 +1092,7 @@ def validate_running_status(
         raise Rejected("NONTRADING_SERVE_HEALTH_BOUNDARY_REQUIRED")
     try:
         observed = datetime.fromisoformat(
-            value["observed_at_utc"].replace("Z", "+00:00")  # noqa: FURB162 - normalize UTC Z explicitly
+            value["observed_at_utc"].replace("Z", "+00:00")  # Normalize UTC Z explicitly.
         )
         age = (
             datetime.now(UTC)
@@ -1106,7 +1113,7 @@ def validate_running_status(
             raise Rejected("SERVE_RESTART_WATERMARK_ADVANCE_REQUIRED")
         try:
             old_time = datetime.fromisoformat(
-                previous["observed_at_utc"].replace("Z", "+00:00")  # noqa: FURB162 - normalize UTC Z explicitly
+                previous["observed_at_utc"].replace("Z", "+00:00")  # Normalize UTC Z explicitly.
             )
         except (KeyError, AttributeError, TypeError, ValueError):
             raise Rejected("PREVIOUS_SERVE_TIMESTAMP_REQUIRED") from None
