@@ -574,6 +574,15 @@ async def connect(config: dict, role: str):
     return await asyncpg.connect(dsn(config, role), timeout=15, command_timeout=30)
 
 
+async def epoch_table_digest(connection, table: str, budget):
+    """CURRENT full-table integrity reads have a bounded, explicit SQL budget."""
+    from controlled_runtime_worker import _table_digest
+
+    if schema_profile()["identity"] == "current-controlled-v1":
+        return await _table_digest(connection, table, budget, query_timeout=120)
+    return await _table_digest(connection, table, budget)
+
+
 async def verify_schema(connection, *, source: bool = False) -> None:
     actual = tuple(
         r["version"]
@@ -1032,10 +1041,10 @@ def validate_boot_stream_rows(
 
 async def boot_history_snapshot(connection) -> dict:
     """History-role projection used around data-only recovery (no inbox grant)."""
-    from controlled_runtime_worker import Budget, _table_digest
+    from controlled_runtime_worker import Budget
 
-    audit = await _table_digest(connection, "event_audit", Budget())
-    outbox = await _table_digest(connection, "message_outbox", Budget())
+    audit = await epoch_table_digest(connection, "event_audit", Budget())
+    outbox = await epoch_table_digest(connection, "message_outbox", Budget())
     prefix = await connection.fetchrow(
         """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest
              FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha
@@ -1083,7 +1092,7 @@ async def boot_history_snapshot(connection) -> dict:
 
 async def boot_state_snapshot(connection, owner: str) -> dict:
     """Full read-only state proof for safe restart/restore admission."""
-    from controlled_runtime_worker import Budget, _table_digest
+    from controlled_runtime_worker import Budget
 
     await verify_schema(connection)
     await validate_no_epoch_workers(connection)
@@ -1097,7 +1106,7 @@ async def boot_state_snapshot(connection, owner: str) -> dict:
         validate_epoch_table_inventory(tables)
         budget = Budget()
         table_digests = {
-            table: await _table_digest(connection, table, budget) for table in tables
+            table: await epoch_table_digest(connection, table, budget) for table in tables
         }
         if any(
             table_digests[table]["count"] != 0
@@ -1202,7 +1211,7 @@ def validate_history_state(value: dict) -> None:
 
 async def history_state(config: dict) -> dict:
     """Read only the owned epoch and prove the immutable original row prefix."""
-    from controlled_runtime_worker import Budget, _table_digest
+    from controlled_runtime_worker import Budget
 
     connection = await connect(config, "kairos")
     try:
@@ -1215,7 +1224,7 @@ async def history_state(config: dict) -> dict:
                 )
             ]
             validate_epoch_table_inventory(tables)
-            audit = await _table_digest(connection, "event_audit", Budget())
+            audit = await epoch_table_digest(connection, "event_audit", Budget())
             prefix = await connection.fetchrow(
                 """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r""",
                 ORIGINAL_PREFIX_LAST_OPEN_MS,
@@ -1481,7 +1490,7 @@ async def boot_catchup(config: dict, output: Path) -> dict:
 
 async def verify_restore(config: dict) -> dict:
     import asyncpg
-    from controlled_runtime_worker import Budget, _table_digest
+    from controlled_runtime_worker import Budget
 
     if (
         config.get("restore_host")
@@ -1510,7 +1519,7 @@ async def verify_restore(config: dict) -> dict:
             validate_epoch_table_inventory(tables)
             budget = Budget()
             for table in tables:
-                result[table] = await _table_digest(connection, table, budget)
+                result[table] = await epoch_table_digest(connection, table, budget)
             validate_expected_audit_digest(
                 config["expected_seed"], result["event_audit"]
             )

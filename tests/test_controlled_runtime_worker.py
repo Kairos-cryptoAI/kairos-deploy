@@ -451,6 +451,22 @@ class RestoredPrimaryVerificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("string_agg(row_sha,'' ORDER BY row_sha)", connection.query)
         self.assertEqual((budget.rows, budget.bytes), (3, 30))
 
+    async def test_full_table_digest_explicit_timeout_is_bounded_without_changing_sql(self) -> None:
+        class Connection:
+            kwargs = None
+
+            async def fetchval(self, query, table, **kwargs):
+                self.kwargs = kwargs
+                return json.dumps({"table": table, "count": 3, "bytes": 30, "sha256": "a" * 64})
+
+        connection = Connection()
+        result = await worker._table_digest(connection, "message_outbox", worker.Budget(), query_timeout=120)
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(connection.kwargs, {"timeout": 120})
+        for timeout in (True, 0, -1, 121, float("inf")):
+            with self.subTest(timeout=timeout), self.assertRaises(worker.WorkerError):
+                await worker._table_digest(connection, "message_outbox", worker.Budget(), query_timeout=timeout)
+
     async def test_permission_probe_requires_actual_runtime_session_and_denies_five_paths(
         self,
     ) -> None:

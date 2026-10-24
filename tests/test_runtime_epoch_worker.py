@@ -37,6 +37,21 @@ def _catchup_config(**changes):
 
 
 class WorkerConfigTests(unittest.TestCase):
+    def test_only_current_full_table_integrity_queries_use_the_explicit_budget(self):
+        helper = types.ModuleType("controlled_runtime_worker")
+        helper._table_digest = mock.AsyncMock(return_value={"count": 1, "sha256": "a" * 64})
+        connection, budget = object(), object()
+        with mock.patch.dict(sys.modules, {"controlled_runtime_worker": helper}):
+            asyncio.run(worker.epoch_table_digest(connection, "event_audit", budget))
+            helper._table_digest.assert_awaited_once_with(connection, "event_audit", budget)
+            helper._table_digest.reset_mock()
+            token = worker.schema_profile_context("current-controlled-v1")
+            try:
+                asyncio.run(worker.epoch_table_digest(connection, "event_audit", budget))
+            finally:
+                worker.reset_schema_profile_context(token)
+            helper._table_digest.assert_awaited_once_with(connection, "event_audit", budget, query_timeout=120)
+
     def test_schema_profiles_are_explicit_immutable_and_historical_by_default(self):
         self.assertEqual(worker.schema_profile()["identity"], "historical-default")
         historical = worker.schema_profile("historical-default")

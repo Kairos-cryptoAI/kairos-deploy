@@ -428,7 +428,9 @@ class Budget:
         return raw
 
 
-async def _table_digest(connection: Any, table: str, budget: Budget) -> dict[str, Any]:
+async def _table_digest(
+    connection: Any, table: str, budget: Budget, *, query_timeout: float | None = None
+) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", table):
         raise WorkerError("invalid table identifier")
     query = (
@@ -437,7 +439,12 @@ async def _table_digest(connection: Any, table: str, budget: Budget) -> dict[str
         "FROM (WITH row_hashes AS MATERIALIZED (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS row_sha, octet_length(to_jsonb(t)::text) AS row_bytes "
         'FROM public."' + table + '" t) SELECT row_sha,row_bytes FROM row_hashes) r'
     )
-    raw = await connection.fetchval(query, table)
+    if query_timeout is None:
+        raw = await connection.fetchval(query, table)
+    else:
+        if type(query_timeout) not in (int, float) or not 0 < query_timeout <= 120:
+            raise WorkerError("full-table digest query timeout exceeds its fixed bound")
+        raw = await connection.fetchval(query, table, timeout=query_timeout)
     try:
         result = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, json.JSONDecodeError):

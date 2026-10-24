@@ -72,6 +72,11 @@ healthy evidence. Success still requires native `RUNNING_NONTRADING`, zero
 pending/unresolved/uncompleted messages and natural progress of all five
 watermarks. Unknown, failed, stale, foreign or trading-enabled states refuse.
 The historical controller's restart behavior is unchanged.
+CURRENT full-table integrity hashes use an explicit maximum 120-second SQL
+query budget on both sides of restore comparison. The historical default,
+ordinary runtime SQL deadlines, complete hashes, read-only transactions, and
+the one-million-row/one-GiB/300-second snapshot bounds remain unchanged. A
+timeout is a failed verification, never a retry or an assumed integrity pass.
 
 `Install-CurrentRuntimeBootTask.ps1` is also plan-only unless `-Execute` is
 supplied. It installs only after read-only admission proves the new owner is
