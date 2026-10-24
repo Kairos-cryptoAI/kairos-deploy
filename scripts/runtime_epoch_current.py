@@ -668,6 +668,20 @@ def execute(profile_path: Path) -> dict:
         previous.verify_old_container_preservation(old_before)
         previous.validate_historical_lease_unchanged(epoch.ACTIVE_LEASE, lease_before)
         status = read_public_json(work / "output-serve/status.json")
+        if status.get("state") in {"CATCHING_UP_NONTRADING", "WAITING_SOURCE_NONTRADING"}:
+            validate_pending_status(status, owner)
+            serve_id = controller.inspect_container(controller.names["serve"]).get("id")
+
+            def require_running():
+                view = controller.inspect_container(controller.names["serve"])
+                if (view.get("id") != serve_id
+                        or view.get("labels", {}).get(epoch.EPOCH_LABEL) != owner
+                        or view.get("state", {}).get("Status") != "running"):
+                    raise CurrentEpochRejected("EXACT_CURRENT_SERVE_REQUIRED")
+
+            status = wait_for_advanced_status(work / "output-serve/status.json", owner,
+                result["proofs"]["serve_restart_status"],
+                deadline=min(time.monotonic() + 180, controller.deadline - 15), running_check=require_running)
         epoch.validate_running_status(status, owner)
         if (
             status.get("schema_profile") != profile.schema_profile
