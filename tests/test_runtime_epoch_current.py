@@ -279,8 +279,11 @@ class CurrentProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             shell = current.Path(temporary) / "pwsh.exe"
             shell.write_bytes(b"synthetic path-selection fixture; never executed")
+            gpg = current.Path(temporary) / "gpg.exe"
+            gpg.write_bytes(b"synthetic public-verifier fixture; never executed")
             with (
                 patch.object(current, "RELEASE_POWERSHELL", shell),
+                patch.object(current, "RELEASE_GPG", gpg),
                 patch.object(current.previous, "_run_git", side_effect=git_output),
                 patch.object(current.previous, "_verify_signed_commit"),
                 patch.object(current, "verify_runner_recipe"),
@@ -299,10 +302,19 @@ class CurrentProfileTests(unittest.TestCase):
                     run.call_args.kwargs["env"]["PATH"],
                     str(current.epoch.GIT.parent) + current.os.pathsep + "unchanged-parent-path",
                 )
+                self.assertEqual(run.call_args.kwargs["env"]["PATHEXT"], ".EXE")
+                self.assertEqual(run.call_args.kwargs["env"]["KAIROS_GPG_PROGRAM"], str(gpg))
                 shell.unlink()
                 run.reset_mock()
                 with self.assertRaisesRegex(
                     current.CurrentEpochRejected, "EXACT_RELEASE_POWERSHELL_REQUIRED"
+                ):
+                    current.verify_clean_signed_sources(self.value)
+                run.assert_not_called()
+                shell.write_bytes(b"synthetic shell path fixture")
+                gpg.unlink()
+                with self.assertRaisesRegex(
+                    current.CurrentEpochRejected, "EXACT_RELEASE_GPG_REQUIRED"
                 ):
                     current.verify_clean_signed_sources(self.value)
                 run.assert_not_called()

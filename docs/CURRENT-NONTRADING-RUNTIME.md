@@ -94,6 +94,8 @@ retained, never overwritten. The gate pins the exact report path in the task
 binding and verifies its owner, native receipt, source revision and trusted
 signature. Release verification uses this computer's explicitly provisioned
 PowerShell executable: elevated Windows does not inherit Codex's bundled PATH.
+Its child environment also pins the public GPG verifier and minimal `.EXE`
+command resolution; no credentials or general user environment are inherited.
 The machine/user PATH and execution policies are not changed.
 
 ## Claim limits
