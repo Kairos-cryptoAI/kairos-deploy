@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import hashlib
 import importlib
 import json
@@ -21,6 +22,7 @@ from builtins import ExceptionGroup
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import quote
 
 TOPIC = "kairos.market.closed_bar.v1"
@@ -85,6 +87,84 @@ CONTROLLED_RUNTIME_PUBLIC_TABLES = (
     "source_cursors",
     "source_usage_reservations",
 )
+CURRENT_CONTROLLED_RUNTIME_PUBLIC_TABLES = tuple(
+    sorted((*CONTROLLED_RUNTIME_PUBLIC_TABLES, "news_processing"))
+)
+HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS = (
+    "001_audit_and_idempotency.sql",
+    "002_durable_runtime.sql",
+    "003_execution_effect_journal.sql",
+    "004_execution_recovery_delay.sql",
+    "005_source_state_and_usage.sql",
+    "006_paper_trade_lifecycle.sql",
+    "007_execution_runtime_health.sql",
+    "008_public_execution_events.sql",
+    "009_paper_canary_arms.sql",
+    "010_runtime_compensation_reserve.sql",
+    "011_execution_mutation_budget.sql",
+    "012_outbox_producer_order.sql",
+    "013_campaign_source_budgets.sql",
+    "014_bounded_canary_sessions.sql",
+    "015_canary_dispatch_claims.sql",
+    "016_global_canary_session_guard.sql",
+    "018_offline_outbox_reconciliation.sql",
+    "026_operator_control.sql",
+)
+CURRENT_CONTROLLED_RUNTIME_MIGRATIONS = (
+    *HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS,
+    "028_news_processing.sql",
+)
+SCHEMA_PROFILES = MappingProxyType(
+    {
+        "historical-default": MappingProxyType(
+            {
+                "identity": "historical-default",
+                "migrations": HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS,
+                "public_tables": CONTROLLED_RUNTIME_PUBLIC_TABLES,
+            }
+        ),
+        "current-controlled-v1": MappingProxyType(
+            {
+                "identity": "current-controlled-v1",
+                "migrations": CURRENT_CONTROLLED_RUNTIME_MIGRATIONS,
+                "public_tables": CURRENT_CONTROLLED_RUNTIME_PUBLIC_TABLES,
+            }
+        ),
+    }
+)
+_ACTIVE_SCHEMA_PROFILE = contextvars.ContextVar(
+    "runtime_epoch_schema_profile", default="historical-default"
+)
+
+
+def schema_profile(profile: str | None = None):
+    """Return an immutable schema profile; historical remains the default."""
+    selected = _ACTIVE_SCHEMA_PROFILE.get() if profile is None else profile
+    try:
+        return SCHEMA_PROFILES[selected]
+    except KeyError as exc:
+        raise EpochError("UNKNOWN_SCHEMA_PROFILE") from exc
+
+
+def schema_profile_context(profile: str):
+    """Select an immutable per-process profile without changing module globals."""
+    schema_profile(profile)
+    return _ACTIVE_SCHEMA_PROFILE.set(profile)
+
+
+def reset_schema_profile_context(token) -> None:
+    _ACTIVE_SCHEMA_PROFILE.reset(token)
+
+
+def schema_profile_report() -> dict:
+    selected = schema_profile()
+    if selected["identity"] == "historical-default":
+        return {}
+    return {
+        "schema_profile": selected["identity"],
+        "schema_migration_count": len(selected["migrations"]),
+        "schema_public_table_count": len(selected["public_tables"]),
+    }
 # Keep the source scan narrow: the materialized CTE contains only grouping and
 # primary-key columns, while the five selected payloads are joined by audit PK.
 ANCHORS_SQL = """
@@ -431,6 +511,7 @@ def validate_config(value: dict, mode: str) -> None:
 
 
 def write_status(path: Path, value: dict, *, immutable: bool = False) -> None:
+    value = {**value, **schema_profile_report()}
     encoded = json.dumps(
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
@@ -459,13 +540,24 @@ def dsn(config: dict, role: str) -> str:
     return f"postgresql://{role}:{quote(config[key], safe='')}@{config['pg_host']}:5432/{config['database']}"
 
 
-def is_reviewed_boot_restore_host(owner: object, host: object) -> bool:
+def is_reviewed_boot_restore_host(
+    owner: object, host: object, *, profile: str | None = None
+) -> bool:
     """Fresh clone names for reviewed operations on the one admitted epoch.
 
     This admits no resource by itself: the operator must still prove absence,
     ownership, mounts and an exact independently restored database snapshot.
     Retained failed clones therefore never need to be removed or overwritten.
     """
+    if schema_profile(profile)["identity"] == "current-controlled-v1":
+        return (
+            isinstance(owner, str)
+            and re.fullmatch(r"[0-9a-f]{32}", owner) is not None
+            and isinstance(host, str)
+            and re.fullmatch(
+                r"kairos-epoch-" + owner[:12] + r"-restore-current-[0-9a-f]{14}", host
+            ) is not None
+        )
     return (
         owner == "69893dc7b7c647f49967387e7efca9fb"
         and isinstance(host, str)
@@ -482,16 +574,19 @@ async def connect(config: dict, role: str):
     return await asyncpg.connect(dsn(config, role), timeout=15, command_timeout=30)
 
 
-async def verify_schema(connection) -> None:
-    from kairos_persistence.database import Database, MigrationProfile
-
+async def verify_schema(connection, *, source: bool = False) -> None:
     actual = tuple(
         r["version"]
         for r in await connection.fetch(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
     )
-    expected = Database.migration_names(MigrationProfile.CONTROLLED_RUNTIME)
+    selected = schema_profile()
+    expected = (
+        HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS
+        if source and selected["identity"] == "current-controlled-v1"
+        else selected["migrations"]
+    )
     if actual != expected:
         raise EpochError("EXACT_CONTROLLED_SCHEMA_REQUIRED")
 
@@ -563,7 +658,7 @@ async def prepare(config: dict) -> dict:
         await database.close()
     source = await source_connection(config, admin=True)
     try:
-        await verify_schema(source)
+        await verify_schema(source, source=True)
         await create_role(source, "kairos_epoch_source", config["source_password"])
         await source.execute(
             f"GRANT CONNECT ON DATABASE {config['source_database']} TO kairos_epoch_source; GRANT USAGE ON SCHEMA public TO kairos_epoch_source; GRANT SELECT ON schema_migrations,event_audit,message_outbox TO kairos_epoch_source; ALTER ROLE kairos_epoch_source SET default_transaction_read_only=on"
@@ -629,7 +724,7 @@ async def seed(config: dict) -> dict:
     source = await source_connection(config)
     target = await connect(config, "kairos_epoch_history")
     try:
-        await verify_schema(source)
+        await verify_schema(source, source=True)
         await verify_schema(target)
         last = int(datetime(2026, 9, 19, 15, 43, tzinfo=UTC).timestamp() * 1000)
         expected_anchors = {
@@ -711,7 +806,7 @@ def validate_history_snapshot(
 
 
 def validate_epoch_table_inventory(tables: list[str]) -> None:
-    if tuple(tables) != CONTROLLED_RUNTIME_PUBLIC_TABLES:
+    if tuple(tables) != schema_profile()["public_tables"]:
         raise EpochError("EXACT_EPOCH_TABLE_INVENTORY_REQUIRED")
 
 
@@ -745,27 +840,40 @@ def validate_boot_database_identity(tables: dict) -> None:
 
 def validate_boot_seed(value: dict, owner: str, database: str) -> None:
     """Require the byte-for-byte boot-state result, not a partial expectation."""
+    expected_fields = {
+        "state",
+        "matched_public_tables",
+        "tables",
+        "sequences",
+        "anchors",
+        "original_prefix",
+        "queue",
+        "trading_started",
+    }
+    selected = schema_profile()
+    if selected["identity"] == "current-controlled-v1":
+        expected_fields |= {
+            "schema_profile",
+            "schema_migration_count",
+            "schema_public_table_count",
+        }
     if (
         not isinstance(value, dict)
-        or set(value)
-        != {
-            "state",
-            "matched_public_tables",
-            "tables",
-            "sequences",
-            "anchors",
-            "original_prefix",
-            "queue",
-            "trading_started",
-        }
+        or set(value) != expected_fields
         or value.get("state") != "PASS_BOOT_STATE"
-        or value.get("matched_public_tables") != len(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        or value.get("matched_public_tables") != len(selected["public_tables"])
         or value.get("trading_started") is not False
-        or set(value.get("tables", {})) != set(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        or set(value.get("tables", {})) != set(selected["public_tables"])
         or not isinstance(value.get("sequences"), dict)
         or not isinstance(value.get("queue"), dict)
         or not isinstance(value.get("anchors"), dict)
         or not isinstance(value.get("original_prefix"), dict)
+    ):
+        raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
+    if selected["identity"] == "current-controlled-v1" and (
+        value.get("schema_profile") != selected["identity"]
+        or value.get("schema_migration_count") != len(selected["migrations"])
+        or value.get("schema_public_table_count") != len(selected["public_tables"])
     ):
         raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
     if any(
@@ -778,7 +886,7 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
         raise EpochError("EXACT_BOOT_STATE_EXPECTATION_REQUIRED")
     if any(
         value["tables"][table]["count"] != 0
-        for table in CONTROLLED_RUNTIME_PUBLIC_TABLES
+        for table in schema_profile()["public_tables"]
         if table not in BOOT_ALLOWED_NONEMPTY_TABLES
     ):
         raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
@@ -1061,7 +1169,7 @@ def validate_expected_audit_digest(expected_seed: dict, audit: dict) -> None:
 def validate_history_state(value: dict) -> None:
     prefix = value.get("original_prefix")
     if (
-        value.get("matched_public_tables") != len(CONTROLLED_RUNTIME_PUBLIC_TABLES)
+        value.get("matched_public_tables") != len(schema_profile()["public_tables"])
         or prefix
         != {
             "rows": ORIGINAL_PREFIX_ROWS,
@@ -1182,7 +1290,7 @@ async def boot_verify_restore(config: dict) -> dict:
             raise EpochError("EPOCH_BOOT_RESTORE_FULL_STATE_CONFLICT")
         return {
             "state": "PASS_BOOT_ISOLATED_RESTORE",
-            "matched_public_tables": len(CONTROLLED_RUNTIME_PUBLIC_TABLES),
+            "matched_public_tables": len(schema_profile()["public_tables"]),
             "tables": first["tables"],
             "sequences": first["sequences"],
             "anchors": first["anchors"],
@@ -1453,7 +1561,7 @@ async def verify_restore(config: dict) -> dict:
             raise EpochError("EPOCH_RESTORE_FULL_HISTORY_CONFLICT")
         return {
             "state": "PASS_ISOLATED_EPOCH_RESTORE",
-            "matched_public_tables": len(CONTROLLED_RUNTIME_PUBLIC_TABLES),
+            "matched_public_tables": len(schema_profile()["public_tables"]),
             **first,
         }
     finally:
@@ -2937,9 +3045,15 @@ def failure_locations(error: BaseException) -> list[dict]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=MODES, required=True)
+    parser.add_argument(
+        "--schema-profile",
+        choices=tuple(SCHEMA_PROFILES),
+        default="historical-default",
+    )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    profile_token = schema_profile_context(args.schema_profile)
     try:
         if args.config.is_symlink() or args.config.stat().st_size > 32_768:
             raise EpochError("PRIVATE_CONFIG_BOUNDARY_REJECTED")
@@ -2947,6 +3061,7 @@ def main(argv=None) -> int:
         result = asyncio.run(dispatch(args.mode, config, args.output))
         result = {
             **result,
+            **schema_profile_report(),
             "owner": config["owner"],
             "mode": args.mode,
             "new_epoch_database": config["database"],
@@ -2987,6 +3102,8 @@ def main(argv=None) -> int:
             },
         )
         return 1
+    finally:
+        reset_schema_profile_context(profile_token)
 
 
 if __name__ == "__main__":

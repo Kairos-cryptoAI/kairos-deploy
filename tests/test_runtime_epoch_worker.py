@@ -37,6 +37,114 @@ def _catchup_config(**changes):
 
 
 class WorkerConfigTests(unittest.TestCase):
+    def test_schema_profiles_are_explicit_immutable_and_historical_by_default(self):
+        self.assertEqual(worker.schema_profile()["identity"], "historical-default")
+        historical = worker.schema_profile("historical-default")
+        current = worker.schema_profile("current-controlled-v1")
+        self.assertEqual(len(historical["migrations"]), 18)
+        self.assertEqual(len(historical["public_tables"]), 32)
+        self.assertEqual(len(current["migrations"]), 19)
+        self.assertEqual(len(current["public_tables"]), 33)
+        self.assertIn("028_news_processing.sql", current["migrations"])
+        self.assertIn("news_processing", current["public_tables"])
+        with self.assertRaises(TypeError):
+            current["identity"] = "changed"
+        with self.assertRaises(TypeError):
+            worker.SCHEMA_PROFILES["other"] = current
+
+    def test_profile_context_selects_inventory_without_mutating_historical_constant(self):
+        original = worker.CONTROLLED_RUNTIME_PUBLIC_TABLES
+        token = worker.schema_profile_context("current-controlled-v1")
+        try:
+            self.assertEqual(
+                worker.schema_profile_report(),
+                {
+                    "schema_profile": "current-controlled-v1",
+                    "schema_migration_count": 19,
+                    "schema_public_table_count": 33,
+                },
+            )
+            self.assertIn("news_processing", worker.schema_profile()["public_tables"])
+            worker.validate_epoch_table_inventory(
+                list(worker.schema_profile()["public_tables"])
+            )
+            with self.assertRaises(worker.EpochError):
+                worker.validate_epoch_table_inventory(list(original))
+        finally:
+            worker.reset_schema_profile_context(token)
+        self.assertIs(worker.CONTROLLED_RUNTIME_PUBLIC_TABLES, original)
+        self.assertEqual(worker.schema_profile()["identity"], "historical-default")
+        self.assertEqual(worker.schema_profile_report(), {})
+
+    def test_current_boot_seed_requires_exact_current_profile_metadata(self):
+        from test_runtime_epoch_boot_worker import boot_seed
+
+        state = boot_seed()
+        state["matched_public_tables"] = 33
+        state["tables"]["news_processing"] = {"count": 0, "sha256": "a" * 64}
+        state["schema_profile"] = "current-controlled-v1"
+        state["schema_migration_count"] = 19
+        state["schema_public_table_count"] = 33
+        token = worker.schema_profile_context("current-controlled-v1")
+        try:
+            worker.validate_boot_seed(state, OWNER, DB)
+            for key, changed in (
+                ("schema_profile", "historical-default"),
+                ("schema_migration_count", 18),
+                ("schema_public_table_count", 32),
+            ):
+                bad = copy.deepcopy(state)
+                bad[key] = changed
+                with self.subTest(key=key), self.assertRaises(worker.EpochError):
+                    worker.validate_boot_seed(bad, OWNER, DB)
+            bad = copy.deepcopy(state)
+            del bad["schema_public_table_count"]
+            with self.assertRaises(worker.EpochError):
+                worker.validate_boot_seed(bad, OWNER, DB)
+        finally:
+            worker.reset_schema_profile_context(token)
+
+    def test_historical_boot_seed_field_set_remains_exact(self):
+        from test_runtime_epoch_boot_worker import boot_seed
+
+        state = boot_seed()
+        worker.validate_boot_seed(state, OWNER, DB)
+        state["schema_profile"] = "historical-default"
+        with self.assertRaises(worker.EpochError):
+            worker.validate_boot_seed(state, OWNER, DB)
+
+    def test_current_profile_checks_historical_source_and_current_target_manifests(self):
+        class Connection:
+            def __init__(self, versions):
+                self.versions = versions
+
+            async def fetch(self, _query):
+                return [{"version": version} for version in self.versions]
+
+        async def verify():
+            token = worker.schema_profile_context("current-controlled-v1")
+            try:
+                await worker.verify_schema(
+                    Connection(worker.HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS),
+                    source=True,
+                )
+                await worker.verify_schema(
+                    Connection(worker.CURRENT_CONTROLLED_RUNTIME_MIGRATIONS)
+                )
+                with self.assertRaises(worker.EpochError):
+                    await worker.verify_schema(
+                        Connection(worker.HISTORICAL_CONTROLLED_RUNTIME_MIGRATIONS)
+                    )
+                with self.assertRaises(worker.EpochError):
+                    await worker.verify_schema(
+                        Connection(worker.CURRENT_CONTROLLED_RUNTIME_MIGRATIONS),
+                        source=True,
+                    )
+            finally:
+                worker.reset_schema_profile_context(token)
+
+        asyncio.run(verify())
+
     def test_reviewed_restore_clone_names_are_exact_epoch_and_nonce_scoped(self):
         owner = "69893dc7b7c647f49967387e7efca9fb"
         good = "kairos-epoch-69893dc7b7c6-restore-reviewed-0123abcd"

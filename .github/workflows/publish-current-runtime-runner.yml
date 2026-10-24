@@ -8,7 +8,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: publish-current-runtime-runner-752c984ca276ccbb
+  group: publish-current-runtime-runner-506628fc8686ff73
   cancel-in-progress: false
 
 jobs:
@@ -18,11 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      PERSISTENCE_REVISION: 752c984ca276ccbb7fcbd1b60a6c75d95fe6f108
-      DEPLOY_REVISION: 418b0979bd53fcfaa1816392efebcff59162f601
+      PERSISTENCE_REVISION: 506628fc8686ff7373d72f37ac032e53a47b233f
+      DEPLOY_REVISION: ${{ github.sha }}
       SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-persistence
       IMAGE: ghcr.io/kairos-cryptoai/kairos-runtime-current-schema-runner
-      IMAGE_TAG: p752c984-d418b097-run${{ github.run_id }}-${{ github.run_attempt }}
+      IMAGE_TAG: p506628f-run${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out workflow source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

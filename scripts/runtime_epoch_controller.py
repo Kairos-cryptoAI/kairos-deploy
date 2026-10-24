@@ -19,6 +19,7 @@ import subprocess
 import time
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -251,8 +252,12 @@ def continuation_worker_name(owner: str, attempt: str) -> str:
     )
 
 
-def validate_worker_config(value: object, *, mode: str) -> dict:
+def validate_worker_config(
+    value: object, *, mode: str, schema_profile: str = "historical-default"
+) -> dict:
     """Validate narrow, mode-specific worker JSON before private-file creation."""
+    if schema_profile not in {"historical-default", "current-controlled-v1"}:
+        raise Rejected("UNKNOWN_WORKER_SCHEMA_PROFILE")
     if mode in {"r7-state", "r7-verify-restore", "r7-drain"}:
         if __package__:
             from scripts.runtime_epoch_r7_read_profile import (
@@ -468,7 +473,9 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
             }
             and not (
                 mode == "boot-verify-restore"
-                and _reviewed_boot_restore_host(value["owner"], value["restore_host"])
+                and _reviewed_boot_restore_host(
+                    value["owner"], value["restore_host"], schema_profile=schema_profile
+                )
             )
         )
         or value["restore_database"]
@@ -505,12 +512,14 @@ def validate_worker_config(value: object, *, mode: str) -> dict:
     return value
 
 
-def _reviewed_boot_restore_host(owner: object, host: object) -> bool:
+def _reviewed_boot_restore_host(
+    owner: object, host: object, *, schema_profile: str = "historical-default"
+) -> bool:
     if __package__:
         from scripts.runtime_epoch_worker import is_reviewed_boot_restore_host
     else:
         from runtime_epoch_worker import is_reviewed_boot_restore_host
-    return is_reviewed_boot_restore_host(owner, host)
+    return is_reviewed_boot_restore_host(owner, host, profile=schema_profile)
 
 
 def validate_worker_tmpfs(value: object) -> dict:
@@ -800,7 +809,11 @@ def extract_git_snapshot(
 
 
 def validate_wheelhouse(
-    path: Path, expected_sha256: str, *, exact_files: bool = False
+    path: Path,
+    expected_sha256: str,
+    *,
+    exact_files: bool = False,
+    expected_revisions: dict[str, str] | None = None,
 ) -> dict:
     if not path.is_dir() or path.is_symlink():
         raise Rejected("PINNED_OFFLINE_WHEELHOUSE_REQUIRED")
@@ -809,7 +822,7 @@ def validate_wheelhouse(
         manifest_path.is_symlink()
         or not manifest_path.is_file()
         or _sha(manifest_path) != expected_sha256
-        or expected_sha256 != WHEEL_MANIFEST_SHA256
+        or (expected_revisions is None and expected_sha256 != WHEEL_MANIFEST_SHA256)
     ):
         raise Rejected("PINNED_OFFLINE_WHEEL_MANIFEST_REQUIRED")
     manifest = current.require_manifest(
@@ -828,10 +841,22 @@ def validate_wheelhouse(
         if actual_files != expected_files:
             raise Rejected("EXACT_OFFLINE_WHEELHOUSE_FILE_SET_REQUIRED")
     revisions = {item["name"]: item["revision"] for item in manifest["packages"]}
-    if revisions != {
-        "kairos-core": CORE_REVISION,
-        "kairos-persistence": PERSISTENCE_REVISION,
-    }:
+    required_revisions = (
+        {
+            "kairos-core": CORE_REVISION,
+            "kairos-persistence": PERSISTENCE_REVISION,
+        }
+        if expected_revisions is None
+        else expected_revisions
+    )
+    if (
+        set(required_revisions) != {"kairos-core", "kairos-persistence"}
+        or any(
+            not re.fullmatch(r"[0-9a-f]{40}", rev)
+            for rev in required_revisions.values()
+        )
+        or revisions != required_revisions
+    ):
         raise Rejected("EXACT_SIGNED_RUNTIME_WHEEL_REVISIONS_REQUIRED")
     return manifest
 
@@ -951,8 +976,51 @@ def normalize_container_metadata(value: object) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class CurrentEpochBuildProfile:
+    """Explicit build inputs; not source authority by themselves.
+
+    The current launcher must independently verify signed clean source heads,
+    the runner build/installed payload and this exact wheel manifest before any
+    resource is allocated. Historical callers do not select this profile.
+    """
+
+    worker_image: str
+    wheel_manifest_sha256: str
+    core_revision: str
+    persistence_revision: str
+    quant_revision: str
+    schema_profile: str = "current-controlled-v1"
+
+    def __post_init__(self):
+        if (
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", self.worker_image)
+            or not re.fullmatch(r"[0-9a-f]{64}", self.wheel_manifest_sha256)
+            or any(
+                not re.fullmatch(r"[0-9a-f]{40}", revision)
+                for revision in (
+                    self.core_revision,
+                    self.persistence_revision,
+                    self.quant_revision,
+                )
+            )
+            or self.schema_profile != "current-controlled-v1"
+        ):
+            raise Rejected("EXACT_CURRENT_BUILD_PROFILE_REQUIRED")
+
+    @property
+    def wheel_revisions(self) -> dict[str, str]:
+        return {
+            "kairos-core": self.core_revision,
+            "kairos-persistence": self.persistence_revision,
+        }
+
+
 class EpochController:
     """Owner-bound native resource manager; no old-runtime resource is adopted."""
+
+    build_profile: CurrentEpochBuildProfile | None = None
+    worker_image = WORKER_IMAGE
 
     def __init__(
         self,
@@ -963,8 +1031,19 @@ class EpochController:
         deadline: float | None = None,
         workdir: Path | None = None,
         continuation_attempt: str | None = None,
+        build_profile: CurrentEpochBuildProfile | None = None,
     ):
         self.owner = owner_name(owner)
+        if build_profile is not None and not isinstance(
+            build_profile, CurrentEpochBuildProfile
+        ):
+            raise Rejected("EXPLICIT_CURRENT_BUILD_PROFILE_REQUIRED")
+        if build_profile is not None and continuation_attempt is not None:
+            raise Rejected("CURRENT_PROFILE_CANNOT_ADOPT_HISTORICAL_CONTINUATION")
+        self.build_profile = build_profile
+        self.worker_image = (
+            build_profile.worker_image if build_profile else WORKER_IMAGE
+        )
         self.names = resource_names(owner)
         self.expected_revision = expected_revision
         self.work = fresh.safe(workdir or (ROOT / ("run-" + owner)))
@@ -1702,6 +1781,8 @@ class EpochController:
         invocation = build_worker_argv(
             mode, CONFIG_PATH_IN_CONTAINER, OUTPUT_PATH_IN_CONTAINER
         )
+        if self.build_profile is not None:
+            invocation += ["--schema-profile", self.build_profile.schema_profile]
         timeout = (
             ""
             if mode == "serve"
@@ -1724,7 +1805,7 @@ class EpochController:
         command = ["-c", shell]
         self._create_container(
             name,
-            WORKER_IMAGE,
+            self.worker_image,
             args,
             command=command,
             start=False,
@@ -1831,6 +1912,12 @@ class EpochController:
             or receipt.get("state") != expected_states.get(mode)
         ):
             raise Rejected("WORKER_RECEIPT_NOT_ACCEPTED_" + mode.upper())
+        if self.build_profile is not None and (
+            receipt.get("schema_profile") != self.build_profile.schema_profile
+            or receipt.get("schema_migration_count") != 19
+            or receipt.get("schema_public_table_count") != 33
+        ):
+            raise Rejected("CURRENT_WORKER_PROFILE_RECEIPT_REQUIRED")
         if mode == "qualify":
             proofs = receipt.get("qualification_proofs")
             if not isinstance(proofs, dict) or proofs != {
@@ -1847,7 +1934,10 @@ class EpochController:
 
     def phase(self, mode: str, config: dict, *, suffix: str = "") -> dict:
         self.current_phase = mode + ("-" + suffix if suffix else "")
-        validate_worker_config(config, mode=mode)
+        validate_worker_config(
+            config, mode=mode,
+            schema_profile=self.build_profile.schema_profile if self.build_profile else "historical-default",
+        )
         tag = mode + ("-" + suffix if suffix else "")
         self.phase_index += 1
         progress = self.work / ("phase-" + f"{self.phase_index:03d}" + ".json")
@@ -1929,7 +2019,15 @@ class EpochController:
                     pass
 
     def prepare_snapshots(self) -> None:
-        manifest = validate_wheelhouse(self.wheelhouse, WHEEL_MANIFEST_SHA256)
+        manifest_sha = (
+            self.build_profile.wheel_manifest_sha256
+            if self.build_profile
+            else WHEEL_MANIFEST_SHA256
+        )
+        revisions = self.build_profile.wheel_revisions if self.build_profile else None
+        manifest = validate_wheelhouse(
+            self.wheelhouse, manifest_sha, expected_revisions=revisions
+        )
         self.runtime_wheelhouse = self.work / "runtime-wheelhouse"
         self.runtime_wheelhouse.mkdir()
         for filename in (
@@ -1941,7 +2039,10 @@ class EpochController:
                 raise Rejected("VERIFIED_OFFLINE_WHEEL_INPUT_REQUIRED")
             fresh.write(self.runtime_wheelhouse / filename, source.read_bytes())
         validate_wheelhouse(
-            self.runtime_wheelhouse, WHEEL_MANIFEST_SHA256, exact_files=True
+            self.runtime_wheelhouse,
+            manifest_sha,
+            exact_files=True,
+            expected_revisions=revisions,
         )
         self.operator_snapshot = self.work / "operator"
         self.quant_snapshot = self.work / "quant"
@@ -1970,7 +2071,10 @@ class EpochController:
         if not required.issubset(operator_manifest):
             raise Rejected("EXACT_OPERATOR_WORKER_SNAPSHOT_REQUIRED")
         quant_manifest = extract_git_snapshot(
-            QUANT_REPO, QUANT_REVISION, ("kairos_quant",), self.quant_snapshot
+            QUANT_REPO,
+            self.build_profile.quant_revision if self.build_profile else QUANT_REVISION,
+            ("kairos_quant",),
+            self.quant_snapshot,
         )
         if not any(path.startswith("kairos_quant/") for path in quant_manifest):
             raise Rejected("QUANT_RUNTIME_PACKAGE_SNAPSHOT_REQUIRED")

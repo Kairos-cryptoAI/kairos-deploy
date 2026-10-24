@@ -21,13 +21,13 @@ TIMESCALE_IMAGE = (
 )
 PINS = {
     "kairos-core": "ff3af7592cbd47be985d794d8d9903aaa8e5df07",
-    "kairos-persistence": "c6773575a09f918b4d495848705b4234f73f3a32",
-    "kairos-strategy-engine": "30d1315fdcd96b277a87cb59c1819c476344a83c",
-    "kairos-router": "e7c7ddd71125abff0e5d5af0b116301bc3921890",
-    "kairos-llm": "f67ca208d65c430d93dd6e5e242797191b4017f2",
-    "kairos-aggregator": "edff2f56a7de4c7065d8d86d2ce2a8997d1b3133",
-    "kairos-risk-manager": "ef4365979069c601101b6f3a3560afa9bd67777f",
-    "kairos-execution-engine": "53dc2d9bd73652907c6d8c197d9321ebc23fdd9f",
+    "kairos-persistence": "506628fc8686ff7373d72f37ac032e53a47b233f",
+    "kairos-strategy-engine": "9ff13e780d1e936431ef7e153a34120debd21bb5",
+    "kairos-router": "a373e62071e8b68b29f9f4567001d330a6ef2aec",
+    "kairos-llm": "58640a0d285ec6ae193a94479d0cd18d7815c860",
+    "kairos-aggregator": "0bcfbb639efdcbf91d401c643c6fd1cf1f1d9564",
+    "kairos-risk-manager": "c37f6d7be446b2a906b9cba80ea31da4d12dbae3",
+    "kairos-execution-engine": "16706091279f49a3b424b75e57a3c2ce41fa10c4",
 }
 MODULES = {
     "kairos-core": "kairos_core",
