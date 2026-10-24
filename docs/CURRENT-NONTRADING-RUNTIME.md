@@ -89,6 +89,12 @@ report for its owner, receipt and source revision, and no retained host failure
 latch. Installation alone cannot activate this gate; a partial/failed acceptance
 leaves the task inert even if registration already happened. All preservation
 checks precede task installation; completion is signed only after read-back.
+Each acceptance attempt has a create-only UUID directory; a failed attempt is
+retained, never overwritten. The gate pins the exact report path in the task
+binding and verifies its owner, native receipt, source revision and trusted
+signature. Release verification uses this computer's explicitly provisioned
+PowerShell executable: elevated Windows does not inherit Codex's bundled PATH.
+The machine/user PATH and execution policies are not changed.
 
 ## Claim limits
 

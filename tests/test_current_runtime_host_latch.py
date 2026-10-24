@@ -13,7 +13,10 @@ class HostAcceptanceLatchTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.path = Path(self.directory.name) / "acceptance.report.json"
+        self.root = Path(self.directory.name)
+        work = self.root / ("host-acceptance-" + "1" * 32)
+        work.mkdir()
+        self.path = work / "acceptance.report.json"
         self.value = {
             "schema": "kairos.current-runtime-host-acceptance.v1",
             "state": "PASS_CURRENT_NONTRADING_HOST_ACCEPTANCE",
@@ -29,7 +32,7 @@ class HostAcceptanceLatchTests(unittest.TestCase):
 
     def check(self, *, bad_signature=False):
         with (
-            patch.object(boot, "HOST_ACCEPTANCE_REPORT", self.path),
+            patch.object(boot, "HOST_ACCEPTANCE_ROOT", self.root),
             patch.object(boot, "read_bounded_json", return_value=self.value),
             patch.object(boot, "verify_receipt_signature") as signature,
         ):

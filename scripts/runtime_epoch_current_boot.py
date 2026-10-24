@@ -38,9 +38,7 @@ SOURCE_LOCK = TRUSTED_SIGNER.with_name("source-lock.json")
 RECEIPT_LIMIT = 512 * 1024
 STATUS_WAIT_SECONDS = 360
 LATCH_LIMIT = 32
-HOST_ACCEPTANCE_REPORT = Path(
-    "D:/Kairos/runtime/prod-runtime-inputs-20261024/host-acceptance-first/acceptance.report.json"
-)
+HOST_ACCEPTANCE_ROOT = Path("D:/Kairos/runtime/prod-runtime-inputs-20261024")
 PRIVATE_KEYS = {
     "owner",
     "database",
@@ -151,7 +149,9 @@ def verify_receipt_signature(
 def require_host_acceptance(report_path: Path, owner: str, receipt_sha256: str, deploy_revision: str) -> None:
     """Scheduled boot stays inert until signed whole-host acceptance completes."""
     if (
-        report_path != HOST_ACCEPTANCE_REPORT
+        report_path.parent.parent != HOST_ACCEPTANCE_ROOT
+        or report_path.name != "acceptance.report.json"
+        or re.fullmatch(r"host-acceptance-[0-9a-f]{32}", report_path.parent.name) is None
         or (report_path.parent / "acceptance.failure.json").exists()
         or (report_path.parent / "acceptance.failure.json").is_symlink()
         or not report_path.is_file()
@@ -855,7 +855,7 @@ class CurrentEpochBootAdapter:
             }
             epoch.fresh.save(work / "boot-complete.json", completed)
             return {"state": completed["state"], "owner": self.owner, "receipt_sha256": self.receipt_sha256, "trading_started": False}
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - retain failure and clean up only admitted IDs on interruption
             cleanup_failures = []
             for name, identifier in reversed(started_ids):
                 try:

@@ -33,6 +33,9 @@ else:
 
 ROOT = Path("D:/Kairos/runtime/current-runtime-20261024")
 META = Path("D:/Kairos/kairos")
+RELEASE_POWERSHELL = Path(
+    "C:/Users/loval/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe"
+)
 PRIOR_OWNER = "1ec512799b23422190a1f3360ba60996"
 PRIOR_IDS = (
     "f915bd6e428320310aaad2357791ca3cc4c1d47da6f73928a796f0b9d1cf8791",
@@ -233,9 +236,16 @@ def verify_clean_signed_sources(value: dict) -> None:
             raise CurrentEpochRejected("CLEAN_EXACT_CURRENT_SOURCE_REQUIRED")
         previous._verify_signed_commit(repo, value[key])
     verify_runner_recipe(value)
+    # Elevated Windows processes do not inherit Codex's bundled PATH. Select
+    # this host's already provisioned shell explicitly; never fall back to an
+    # arbitrary PATH executable or change the machine/user environment.
+    if not RELEASE_POWERSHELL.is_file() or RELEASE_POWERSHELL.is_symlink():
+        raise CurrentEpochRejected("EXACT_RELEASE_POWERSHELL_REQUIRED")
+    release_environment = epoch.fresh.supervisor_environment()
+    release_environment["PATH"] = str(epoch.GIT.parent) + os.pathsep + release_environment.get("PATH", "")
     result = subprocess.run(
         [
-            "pwsh",
+            str(RELEASE_POWERSHELL),
             "-NoProfile",
             "-NonInteractive",
             "-File",
@@ -246,6 +256,7 @@ def verify_clean_signed_sources(value: dict) -> None:
         stderr=subprocess.DEVNULL,
         timeout=180,
         check=False,
+        env=release_environment,
     )
     if result.returncode:
         raise CurrentEpochRejected("CURRENT_RELEASE_GATE_FAILED")

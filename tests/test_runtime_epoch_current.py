@@ -257,6 +257,56 @@ class CurrentProfileTests(unittest.TestCase):
         )
         self.assertGreater(command.index("archive"), command.index("core.eol=lf"))
 
+    def test_release_gate_uses_explicit_shell_without_elevated_path_dependency(self):
+        revisions = {
+            "kairos-deploy": self.value["deploy_revision"],
+            "kairos-core": self.value["core_revision"],
+            "kairos-persistence": self.value["persistence_revision"],
+            "kairos-quant-scouts": self.value["quant_revision"],
+        }
+
+        def git_output(repo, *args):
+            if args == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main"
+            if args[0] == "rev-parse":
+                return revisions[repo.name]
+            if args == ("remote", "get-url", "origin"):
+                return f"https://github.com/Kairos-cryptoAI/{repo.name}.git"
+            raise AssertionError("Unexpected source admission command")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            shell = current.Path(temporary) / "pwsh.exe"
+            shell.write_bytes(b"synthetic path-selection fixture; never executed")
+            with (
+                patch.object(current, "RELEASE_POWERSHELL", shell),
+                patch.object(current.previous, "_run_git", side_effect=git_output),
+                patch.object(current.previous, "_verify_signed_commit"),
+                patch.object(current, "verify_runner_recipe"),
+                patch.object(
+                    current.epoch.fresh,
+                    "supervisor_environment",
+                    return_value={"PATH": "unchanged-parent-path"},
+                ),
+                patch.object(
+                    current.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ) as run,
+            ):
+                current.verify_clean_signed_sources(self.value)
+                self.assertEqual(run.call_args.args[0][0], str(shell))
+                self.assertEqual(
+                    run.call_args.kwargs["env"]["PATH"],
+                    str(current.epoch.GIT.parent) + current.os.pathsep + "unchanged-parent-path",
+                )
+                shell.unlink()
+                run.reset_mock()
+                with self.assertRaisesRegex(
+                    current.CurrentEpochRejected, "EXACT_RELEASE_POWERSHELL_REQUIRED"
+                ):
+                    current.verify_clean_signed_sources(self.value)
+                run.assert_not_called()
+
     def test_canonical_git_snapshot_reads_raw_blob_and_default_keeps_archive_path(self):
         revision = "b" * 40
         raw_source = b"line_one = 1\nline_two = 2\n"

@@ -66,7 +66,7 @@ if ($plan.state -cne 'ALREADY_RUNNING' -or $plan.owner -cne $owner -or $plan.sta
 }
 $taskName = 'Kairos-CurrentRuntime-' + $owner.Substring(0, 12) + '-Boot'
 $hostReportPath = [IO.Path]::GetFullPath($HostAcceptanceReport)
-if ($hostReportPath -cne 'D:\Kairos\runtime\prod-runtime-inputs-20261024\host-acceptance-first\acceptance.report.json') {
+if ($hostReportPath -cnotmatch '^D:\\Kairos\\runtime\\prod-runtime-inputs-20261024\\host-acceptance-[0-9a-f]{32}\\acceptance\.report\.json$') {
     throw 'Exact create-only host acceptance report path is required'
 }
 if (-not $Execute) {
