@@ -10,7 +10,8 @@ class CurrentRuntimeTaskTests(unittest.TestCase):
         for token in (
             "[switch]$Execute", "'PLAN_ONLY'", "'ALREADY_RUNNING'", "[IO.FileMode]::CreateNew",
             "pythonw.exe", "-I -B -c", "hashlib.sha256(r).hexdigest()", "set(b['script_hashes'])",
-            "-MultipleInstances IgnoreNew -RestartCount 0 -Hidden", "-RunLevel Limited",
+            "-MultipleInstances IgnoreNew -RestartCount 0 -Hidden", "-RunLevel Highest",
+            "Elevated inventory access is required",
             "'INSTALLED_NOT_STARTED'", "$bindingPath", "--receipt-sha256", "--signature",
         ):
             self.assertIn(token, source)

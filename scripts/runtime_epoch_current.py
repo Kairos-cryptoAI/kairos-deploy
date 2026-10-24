@@ -42,6 +42,7 @@ PRIOR_IDS = (
 PROFILE_KEYS = {
     "schema",
     "deploy_revision",
+    "runner_recipe_revision",
     "core_revision",
     "persistence_revision",
     "quant_revision",
@@ -126,6 +127,7 @@ def validate_profile(
         raise CurrentEpochRejected("EXACT_CURRENT_PROFILE_REQUIRED")
     for key in (
         "deploy_revision",
+        "runner_recipe_revision",
         "core_revision",
         "persistence_revision",
         "quant_revision",
@@ -158,11 +160,11 @@ def validate_profile(
         or runner.get("recipe")
         != {
             "repository": "https://github.com/Kairos-cryptoAI/kairos-deploy",
-            "revision": value["deploy_revision"],
+            "revision": value["runner_recipe_revision"],
         }
         or runner.get("workflow", {}).get("repository")
         != "Kairos-cryptoAI/kairos-deploy"
-        or runner.get("workflow", {}).get("commit") != value["deploy_revision"]
+        or runner.get("workflow", {}).get("commit") != value["runner_recipe_revision"]
         or runner.get("runtime")
         != {"python": "3.11.15", "aiohttp": "3.14.5", "multidict": "6.9.1"}
     ):
@@ -207,6 +209,7 @@ def verify_clean_signed_sources(value: dict) -> None:
         ):
             raise CurrentEpochRejected("CLEAN_EXACT_CURRENT_SOURCE_REQUIRED")
         previous._verify_signed_commit(repo, value[key])
+    verify_runner_recipe(value)
     result = subprocess.run(
         [
             "pwsh",
@@ -223,6 +226,129 @@ def verify_clean_signed_sources(value: dict) -> None:
     )
     if result.returncode:
         raise CurrentEpochRejected("CURRENT_RELEASE_GATE_FAILED")
+
+
+RECIPE_INPUT_MODES = {
+    ".dockerignore": "100644",
+    "docker/Dockerfile": "100644",
+    "docker/entrypoint.sh": "100644",
+}
+MAX_RECIPE_INPUT_BYTES = 1024 * 1024
+
+
+def _git_recipe_input(repo: Path, revision: str, path: str) -> bytes:
+    try:
+        tree = subprocess.run(
+            [str(epoch.GIT), "-C", str(repo), "ls-tree", "-z", revision, "--", path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise CurrentEpochRejected(
+            "EXACT_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED"
+        ) from None
+    records = tree.stdout.split(b"\0") if tree.returncode == 0 else []
+    records = [record for record in records if record]
+    if len(records) != 1 or b"\t" not in records[0]:
+        raise CurrentEpochRejected("EXACT_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED")
+    metadata, entry_path = records[0].split(b"\t", 1)
+    try:
+        mode, object_type, object_id = metadata.decode("ascii").split(" ")
+        decoded_path = entry_path.decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        raise CurrentEpochRejected(
+            "EXACT_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED"
+        ) from None
+    if (
+        mode != RECIPE_INPUT_MODES[path]
+        or object_type != "blob"
+        or decoded_path != path
+        or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+    ):
+        raise CurrentEpochRejected("EXACT_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED")
+    try:
+        blob = subprocess.run(
+            [str(epoch.GIT), "-C", str(repo), "cat-file", "blob", object_id],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise CurrentEpochRejected(
+            "BOUNDED_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED"
+        ) from None
+    if blob.returncode or len(blob.stdout) > MAX_RECIPE_INPUT_BYTES:
+        raise CurrentEpochRejected("BOUNDED_SIGNED_RUNNER_RECIPE_INPUT_REQUIRED")
+    return blob.stdout
+
+
+def verify_runner_recipe_inputs(
+    repo: Path, recipe_revision: str, deploy_revision: str
+) -> None:
+    if any(
+        not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        for revision in (recipe_revision, deploy_revision)
+    ):
+        raise CurrentEpochRejected("EXACT_RUNNER_RECIPE_REVISION_REQUIRED")
+    for path in RECIPE_INPUT_MODES:
+        if _git_recipe_input(repo, recipe_revision, path) != _git_recipe_input(
+            repo, deploy_revision, path
+        ):
+            raise CurrentEpochRejected(
+                "RUNNER_RECIPE_INPUT_DIFFERS_FROM_CURRENT_DEPLOY"
+            )
+
+
+def verify_runner_recipe_ancestor(
+    repo: Path, recipe_revision: str, deploy_revision: str
+) -> None:
+    if any(
+        not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        for revision in (recipe_revision, deploy_revision)
+    ):
+        raise CurrentEpochRejected("EXACT_RUNNER_RECIPE_REVISION_REQUIRED")
+    try:
+        result = subprocess.run(
+            [
+                str(epoch.GIT),
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                recipe_revision,
+                deploy_revision,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise CurrentEpochRejected("SIGNED_RUNNER_RECIPE_ANCESTRY_REQUIRED") from None
+    if result.returncode != 0:
+        raise CurrentEpochRejected(
+            "SIGNED_RUNNER_RECIPE_NOT_ANCESTOR_OF_CURRENT_DEPLOY"
+        )
+
+
+def verify_runner_recipe(value: dict) -> None:
+    repo = Path("D:/Kairos/kairos-deploy")
+    recipe_revision = value["runner_recipe_revision"]
+    try:
+        previous._verify_signed_commit(repo, recipe_revision)
+    except previous.SuccessorRejected:
+        raise CurrentEpochRejected("TRUSTED_RUNNER_RECIPE_SIGNATURE_REQUIRED") from None
+    verify_runner_recipe_ancestor(repo, recipe_revision, value["deploy_revision"])
+    verify_runner_recipe_inputs(repo, recipe_revision, value["deploy_revision"])
 
 
 class CurrentEpochController(previous.RetainOwnedClonesController):
@@ -435,7 +561,7 @@ def execute(profile_path: Path) -> dict:
             "schema_profile": profile.schema_profile,
             "trading_started": False,
         }
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - persist failure evidence on interruption too
         receipt = epoch._persist_failure_receipt(
             work, owner, controller, exc, private_ready=True
         )

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import runtime_epoch_current as current
@@ -12,6 +14,7 @@ class CurrentProfileTests(unittest.TestCase):
         self.value = {
             "schema": "kairos.current-nontrading-profile.v1",
             "deploy_revision": "a" * 40,
+            "runner_recipe_revision": "9" * 40,
             "core_revision": "b" * 40,
             "persistence_revision": "c" * 40,
             "quant_revision": "d" * 40,
@@ -31,11 +34,11 @@ class CurrentProfileTests(unittest.TestCase):
             },
             "recipe": {
                 "repository": "https://github.com/Kairos-cryptoAI/kairos-deploy",
-                "revision": "a" * 40,
+                "revision": "9" * 40,
             },
             "workflow": {
                 "repository": "Kairos-cryptoAI/kairos-deploy",
-                "commit": "a" * 40,
+                "commit": "9" * 40,
             },
             "runtime": {"python": "3.11.15", "aiohttp": "3.14.5", "multidict": "6.9.1"},
             "migrations": self.migrations,
@@ -94,6 +97,107 @@ class CurrentProfileTests(unittest.TestCase):
         bad["repositories"][0]["revision"] = "0" * 40
         with self.assertRaises(current.CurrentEpochRejected):
             self.validate(release=bad)
+
+    def test_runner_recipe_revision_must_match_receipt_not_current_deploy(self):
+        self.assertNotEqual(
+            self.value["runner_recipe_revision"], self.value["deploy_revision"]
+        )
+        for bad_value, bad_runner in (
+            ({**self.value, "runner_recipe_revision": "8" * 40}, self.runner),
+            (
+                self.value,
+                {
+                    **self.runner,
+                    "workflow": {
+                        "repository": "Kairos-cryptoAI/kairos-deploy",
+                        "commit": "a" * 40,
+                    },
+                },
+            ),
+        ):
+            with (
+                self.subTest(value=bad_value, runner=bad_runner),
+                self.assertRaises(current.CurrentEpochRejected),
+            ):
+                self.validate(value=bad_value, runner=bad_runner)
+
+    def _fake_git_blobs(self, contents):
+        blobs = {hashlib.sha1(data).hexdigest(): data for data in contents.values()}
+
+        def run(args, **kwargs):
+            if args[3] == "ls-tree":
+                revision, path = args[5], args[7]
+                data = contents[(revision, path)]
+                object_id = hashlib.sha1(data).hexdigest()
+                mode = current.RECIPE_INPUT_MODES[path]
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{mode} blob {object_id}\t{path}\0".encode(),
+                )
+            if args[3:5] == ["cat-file", "blob"]:
+                return SimpleNamespace(returncode=0, stdout=blobs[args[-1]])
+            raise AssertionError("unexpected mocked Git command")
+
+        return run
+
+    def test_recipe_build_input_git_blob_bytes_must_match_current_deploy(self):
+        recipe, deploy = "9" * 40, "a" * 40
+        contents = {
+            (revision, path): path.encode("utf-8")
+            for revision in (recipe, deploy)
+            for path in current.RECIPE_INPUT_MODES
+        }
+        with patch.object(
+            current.subprocess, "run", side_effect=self._fake_git_blobs(contents)
+        ):
+            current.verify_runner_recipe_inputs(
+                current.Path("unused-test-repo"), recipe, deploy
+            )
+        contents[(deploy, "docker/Dockerfile")] = b"different reviewed recipe bytes"
+        with (
+            patch.object(
+                current.subprocess, "run", side_effect=self._fake_git_blobs(contents)
+            ),
+            self.assertRaisesRegex(
+                current.CurrentEpochRejected,
+                "RUNNER_RECIPE_INPUT_DIFFERS_FROM_CURRENT_DEPLOY",
+            ),
+        ):
+            current.verify_runner_recipe_inputs(
+                current.Path("unused-test-repo"), recipe, deploy
+            )
+
+    def test_nonancestor_recipe_commit_is_refused(self):
+        with (
+            patch.object(
+                current.subprocess, "run", return_value=SimpleNamespace(returncode=1)
+            ) as run,
+            self.assertRaisesRegex(
+                current.CurrentEpochRejected,
+                "SIGNED_RUNNER_RECIPE_NOT_ANCESTOR_OF_CURRENT_DEPLOY",
+            ),
+        ):
+            current.verify_runner_recipe_ancestor(
+                current.Path("unused-test-repo"), "9" * 40, "a" * 40
+            )
+        self.assertIn("merge-base", run.call_args.args[0])
+
+    def test_unsigned_or_wrongly_signed_recipe_commit_is_refused(self):
+        def untrusted_git_result(repo, *args, capture=True):
+            if args[0] == "log":
+                return "B " + current.previous.epoch.fresh.SIGNER
+            return ""
+
+        with (
+            patch.object(
+                current.previous, "_run_git", side_effect=untrusted_git_result
+            ),
+            self.assertRaisesRegex(
+                current.CurrentEpochRejected,
+                "TRUSTED_RUNNER_RECIPE_SIGNATURE_REQUIRED",
+            ),
+        ):
+            current.verify_runner_recipe(self.value)
 
     def test_public_subnet_and_unexpected_fields_are_refused(self):
         for field, value in (

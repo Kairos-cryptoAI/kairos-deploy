@@ -11,6 +11,11 @@ param(
 # an older task, arm trading, restart a resource, or start this task on install.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$windowsPrincipal = [Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $windowsPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Elevated inventory access is required; no task or runtime was changed'
+}
 $repo = 'D:\Kairos\kairos-deploy'
 $root = 'D:\Kairos\runtime\current-runtime-20261024'
 $git = 'C:\Program Files\Git\cmd\git.exe'
@@ -93,7 +98,7 @@ $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $pythonwPath -Argument $arguments -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $trigger.Delay = 'PT2M'
-$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 155) -MultipleInstances IgnoreNew -RestartCount 0 -Hidden
 $settings.StartWhenAvailable = $false
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Signed current-source isolated non-trading epoch. No retries, no trading, no legacy resources.' | Out-Null

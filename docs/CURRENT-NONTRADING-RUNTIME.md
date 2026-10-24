@@ -11,11 +11,16 @@ historical evidence, not inputs to a silent upgrade.
 
 Plan-only is the default. An execute call requires one exact public profile:
 `kairos.current-nontrading-profile.v1`, current Deploy/Core/Persistence/Quant
-commit IDs, runner receipt path/digest, wheelhouse/manifest digest and a
+commit IDs, independently pinned runner recipe commit, runner receipt path/digest, wheelhouse/manifest digest and a
 collision-checked private IPv4 `/28`. No secret or approval boolean is part of
 that public profile. The launcher verifies clean signed main/origin identities,
 the Meta current-release gate, exact runner source/recipe/runtime/migrations,
 local image ID/user/labels, and wheel payloads against signed Git archive bytes.
+The image recipe may be a separately GPG-verified ancestor of current Deploy
+only when the exact Git blob bytes and modes of `.dockerignore`,
+`docker/Dockerfile` and `docker/entrypoint.sh` are unchanged. Its workflow and
+receipt still identify that exact immutable recipe commit; the current
+orchestrator/source identity is not replaced by the image recipe identity.
 The downloaded build artifact must independently be obtained from the exact
 successful reviewed GitHub workflow; a local JSON receipt alone is not remote
 build attestation.
@@ -58,7 +63,7 @@ or name collision never authorizes stopping the colliding resource.
 supplied. It installs only after read-only admission proves the new owner is
 healthy. It creates a new exact-owner task and create-only public binding,
 never changes older tasks, and never starts a task during installation. The
-interactive limited-user logon action is hidden `pythonw -I -B`; its inline
+interactive exact-owner logon action is hidden `pythonw -I -B`; its inline
 bootstrap verifies the binding digest, interpreter and complete sibling Python
 source hash inventory before importing workspace code. Logon has a two-minute
 Docker Desktop readiness delay, IgnoreNew, no automatic retries and no catch-up
@@ -68,6 +73,11 @@ A failed task registration retains its create-only binding and refuses another
 installation until the exact partial state is reviewed. The inline interpreter
 hash check occurs after the interpreter starts; it is not a pre-execution code
 integrity boundary for that interpreter.
+Installation requires Windows elevation and the exact-owner task uses Highest
+for complete read-only CIM process identity. A limited token cannot identify
+other elevated Python/PowerShell processes on this host, so the unchanged
+no-duplicate guard correctly refuses it. This does not broaden the controller's
+signed-source, exact-owner or no-trading resource allowlists.
 
 ## Claim limits
 
