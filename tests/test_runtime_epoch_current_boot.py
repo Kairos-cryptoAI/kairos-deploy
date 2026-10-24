@@ -38,6 +38,55 @@ def status(*, observed_at: datetime | None = None) -> dict:
 
 
 class CurrentBootAdmissionTests(unittest.TestCase):
+    def test_boot_dump_names_match_unchanged_controller_allowlist(self):
+        class DumpAdmissionObserved(RuntimeError):
+            pass
+
+        class DumpController:
+            def __init__(self, expected):
+                self.expected = expected
+
+            def stream_private_pg_dump(self, *, backup, database):
+                self.expected.assertEqual(database, "kairos_epoch_" + OWNER[:12])
+                self.expected.assertEqual(backup, expected_backup)
+                raise DumpAdmissionObserved
+
+        adapter = object.__new__(boot.CurrentEpochBootAdapter)
+        with tempfile.TemporaryDirectory() as directory:
+            for boot_id in ("1" * 32, "2" * 32):
+                work = Path(directory) / ("boot-" + boot_id)
+                for suffix, leaf in (
+                    ("01", "epoch-history-bootbefore.dump"),
+                    ("02", "epoch-history-bootafter.dump"),
+                ):
+                    expected_backup = work / leaf
+                    with (
+                        self.subTest(boot_id=boot_id, suffix=suffix),
+                        self.assertRaises(DumpAdmissionObserved),
+                    ):
+                        adapter._backup_restore(
+                            DumpController(self),
+                            work,
+                            {"database": "kairos_epoch_" + OWNER[:12]},
+                            {},
+                            boot_id + "-" + suffix,
+                        )
+
+    def test_invalid_boot_dump_token_is_rejected_before_dump(self):
+        class NoDumpController:
+            def stream_private_pg_dump(self, **kwargs):
+                raise AssertionError("invalid token must not reach dump")
+
+        adapter = object.__new__(boot.CurrentEpochBootAdapter)
+        for tag in ("1" * 32 + "-03", "1" * 31 + "-01", "A" * 32 + "-01", "../01"):
+            with (
+                self.subTest(tag=tag),
+                self.assertRaisesRegex(
+                    boot.CurrentBootRejected, "UNIQUE_RESTORE_BOOT_TOKEN_REQUIRED"
+                ),
+            ):
+                adapter._backup_restore(NoDumpController(), Path("unused"), {}, {}, tag)
+
     def test_restore_name_collision_after_failed_create_never_inspects_or_stops_by_name(self):
         class FailedCreateController:
             def __init__(self):

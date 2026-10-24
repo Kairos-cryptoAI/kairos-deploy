@@ -93,6 +93,11 @@ query budget on both sides of restore comparison. The historical default,
 ordinary runtime SQL deadlines, complete hashes, read-only transactions, and
 the one-million-row/one-GiB/300-second snapshot bounds remain unchanged. A
 timeout is a failed verification, never a retry or an assumed integrity pass.
+Boot backup leaves are the controller's existing exact allowed names
+`epoch-history-bootbefore.dump` and `epoch-history-bootafter.dump` inside the
+unique create-only `boot-UUID` directory. The validated UUID/phase token still
+binds the retained restore resources. Invalid tokens are refused before dump;
+the private-path, exclusive-file and bounded-process checks are unchanged.
 
 `Install-CurrentRuntimeBootTask.ps1` is also plan-only unless `-Execute` is
 supplied. It installs only after read-only admission proves the new owner is

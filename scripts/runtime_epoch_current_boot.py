@@ -955,13 +955,16 @@ class CurrentEpochBootAdapter:
             raise CurrentBootRejected("CURRENT_SCHEMA_WORKER_RECEIPT_REQUIRED")
 
     def _backup_restore(self, c, work: Path, common: dict, expected: dict, tag: str) -> str:
-        backup = work / ("epoch-history-" + tag + ".dump")
-        c.stream_private_pg_dump(backup=backup, database=common["database"])
-        if backup.is_symlink() or not backup.is_file():
-            raise CurrentBootRejected("BOUNDED_CURRENT_EPOCH_BACKUP_REQUIRED")
         token_match = re.fullmatch(r"([0-9a-f]{32})-(01|02)", tag)
         if token_match is None:
             raise CurrentBootRejected("UNIQUE_RESTORE_BOOT_TOKEN_REQUIRED")
+        # The enclosing boot directory is already create-only and UUID-bound.
+        # Keep the dump leaf inside the controller's unchanged exact allowlist.
+        stage = {"01": "bootbefore", "02": "bootafter"}[token_match.group(2)]
+        backup = work / ("epoch-history-" + stage + ".dump")
+        c.stream_private_pg_dump(backup=backup, database=common["database"])
+        if backup.is_symlink() or not backup.is_file():
+            raise CurrentBootRejected("BOUNDED_CURRENT_EPOCH_BACKUP_REQUIRED")
         token = token_match.group(1)[:12] + token_match.group(2)
         prefix = "kairos-epoch-" + self.owner[:12]
         name = prefix + "-restore-current-" + token
