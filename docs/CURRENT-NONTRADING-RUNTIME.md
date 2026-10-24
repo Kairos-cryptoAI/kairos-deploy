@@ -134,6 +134,11 @@ Each read-only owner admission has a separate create-only `inspection-UUID`
 CLI evidence directory. It never reuses the completed native run's numbered
 CLI files. Runtime snapshots, native receipts and data remain unchanged;
 inspection metadata is not a runtime-recovery or full-host acceptance pass.
+The unchanged 30-second process query captures bounded diagnostics internally.
+An unavailable command identity still refuses admission; only its numeric PID
+is exposed in the safe reason code, never command-line contents or raw stderr.
+Timeout, oversized output, incomplete inventory and active old controllers
+remain fail-closed, without retries or deletion of partial evidence.
 
 ## Claim limits
 

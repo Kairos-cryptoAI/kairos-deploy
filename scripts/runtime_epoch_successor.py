@@ -703,7 +703,9 @@ foreach ($p in $processes) {
   $name = [string]$p.Name
   if ($name -notmatch '^(pythonw?\.exe|powershell\.exe|pwsh\.exe)$') { continue }
   $line = [string]$p.CommandLine
-  if ([string]::IsNullOrWhiteSpace($line)) { throw 'PROCESS_COMMAND_IDENTITY_UNKNOWN' }
+  if ([string]::IsNullOrWhiteSpace($line)) {
+    throw "PROCESS_COMMAND_IDENTITY_UNKNOWN:$($p.ProcessId):$name"
+  }
   $kairosPattern = '(?i)(D:\\Kairos|kairos-deploy|' +
     'kairos.*(runtime|boot|cutover)|(runtime|boot|cutover).*kairos)'
   $controllerPattern = '(?i)(runtime_epoch_(?!successor(?:\.py|\b))[a-z0-9_-]+\.py|' +
@@ -722,15 +724,29 @@ ConvertTo-Json -InputObject $payload -Compress -Depth 3
             [str(epoch.PS), "-NoProfile", "-NonInteractive", "-Command", script],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=30,
             check=False,
             shell=False,
             env=epoch.fresh.supervisor_environment(),
         )
+    except subprocess.TimeoutExpired:
+        raise SuccessorRejected("LEGACY_RUNTIME_PROCESS_INVENTORY_TIMEOUT") from None
     except Exception:
         raise SuccessorRejected("LEGACY_RUNTIME_PROCESS_INVENTORY_FAILED") from None
+    error = result.stderr if isinstance(getattr(result, "stderr", None), bytes) else b""
+    if len(result.stdout) > 64 * 1024 or len(error) > 64 * 1024:
+        raise SuccessorRejected("LEGACY_RUNTIME_PROCESS_INVENTORY_OVERSIZE")
     if result.returncode:
+        unknown = re.search(
+            rb"PROCESS_COMMAND_IDENTITY_UNKNOWN:([0-9]{1,10}):(pythonw?\.exe|powershell\.exe|pwsh\.exe)",
+            error, re.IGNORECASE,
+        )
+        if unknown:
+            # Only a PID leaves this function, never a command line or stderr.
+            raise SuccessorRejected(
+                "LEGACY_RUNTIME_PROCESS_IDENTITY_UNKNOWN_PID_" + unknown.group(1).decode("ascii")
+            )
         raise SuccessorRejected("LEGACY_RUNTIME_PROCESS_INVENTORY_FAILED")
     try:
         parsed = json.loads(result.stdout.decode("ascii", "strict"))
