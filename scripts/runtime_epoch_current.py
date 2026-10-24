@@ -88,6 +88,10 @@ def migration_hashes(revision: str) -> dict[str, str]:
             str(epoch.GIT),
             "-C",
             "D:/Kairos/kairos-persistence",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
             "archive",
             "--format=zip",
             revision,
@@ -399,12 +403,16 @@ class CurrentEpochController(previous.RetainOwnedClonesController):
             raise CurrentEpochRejected("CURRENT_NETWORK_IDENTITY_MISMATCH")
 
     def prepare_snapshots(self) -> None:
-        super().prepare_snapshots()
+        super().prepare_snapshots(canonical_blobs=True)
         assert self.build_profile is not None
         for name, revision in self.build_profile.wheel_revisions.items():
             directory = self.work / ("source-" + name)
             expected = epoch.extract_git_snapshot(
-                Path("D:/Kairos") / name, revision, (name.replace("-", "_"),), directory
+                Path("D:/Kairos") / name,
+                revision,
+                (name.replace("-", "_"),),
+                directory,
+                canonical_blobs=True,
             )
             manifest = read_public_json(self.runtime_wheelhouse / "manifest.json")
             package = next(

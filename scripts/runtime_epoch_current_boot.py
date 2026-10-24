@@ -38,6 +38,9 @@ SOURCE_LOCK = TRUSTED_SIGNER.with_name("source-lock.json")
 RECEIPT_LIMIT = 512 * 1024
 STATUS_WAIT_SECONDS = 360
 LATCH_LIMIT = 32
+HOST_ACCEPTANCE_REPORT = Path(
+    "D:/Kairos/runtime/prod-runtime-inputs-20261024/host-acceptance-first/acceptance.report.json"
+)
 PRIVATE_KEYS = {
     "owner",
     "database",
@@ -143,6 +146,33 @@ def verify_receipt_signature(
     )
     if imported.returncode or verified.returncode or not valid:
         raise CurrentBootRejected("CURRENT_RECEIPT_SIGNATURE_NOT_TRUSTED")
+
+
+def require_host_acceptance(report_path: Path, owner: str, receipt_sha256: str, deploy_revision: str) -> None:
+    """Scheduled boot stays inert until signed whole-host acceptance completes."""
+    if (
+        report_path != HOST_ACCEPTANCE_REPORT
+        or (report_path.parent / "acceptance.failure.json").exists()
+        or (report_path.parent / "acceptance.failure.json").is_symlink()
+        or not report_path.is_file()
+        or report_path.is_symlink()
+    ):
+        raise CurrentBootRejected("SIGNED_HOST_ACCEPTANCE_REQUIRED_BEFORE_SCHEDULED_BOOT")
+    report = read_bounded_json(report_path)
+    verify_receipt_signature(report_path, report_path.with_name(report_path.name + ".asc"), epoch._sha(report_path))
+    if (
+        report.get("schema") != "kairos.current-runtime-host-acceptance.v1"
+        or report.get("state") != "PASS_CURRENT_NONTRADING_HOST_ACCEPTANCE"
+        or report.get("owner") != owner
+        or report.get("receipt_sha256") != receipt_sha256
+        or report.get("deploy_revision") != deploy_revision
+        or report.get("old_resources_preserved") is not True
+        or report.get("production_trading_qualified") is not False
+        or report.get("trading_started") is not False
+        or report.get("orders_submitted") != 0
+        or report.get("paid_calls") != 0
+    ):
+        raise CurrentBootRejected("EXACT_SIGNED_NONTRADING_HOST_ACCEPTANCE_REQUIRED")
 
 
 def validate_current_receipt(

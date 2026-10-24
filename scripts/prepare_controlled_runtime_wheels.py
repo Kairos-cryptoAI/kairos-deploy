@@ -67,6 +67,22 @@ def wheel_package_files(wheel: Path, name: str) -> dict[str, str]:
         return runtime
 
 
+def source_archive_command(repo: Path, revision: str, archive: Path) -> list[str]:
+    """Read current source with stable LF bytes despite Windows autocrlf."""
+    return [
+        "-C",
+        str(repo),
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        "archive",
+        "--format=zip",
+        "--output=" + str(archive),
+        revision,
+    ]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--prepare", action="store_true")
@@ -120,14 +136,7 @@ def main(argv=None):
         archive = directory / (name + ".zip")
         controller.process(
             fresh.GIT,
-            [
-                "-C",
-                str(repo),
-                "archive",
-                "--format=zip",
-                "--output=" + str(archive),
-                revision,
-            ],
+            source_archive_command(repo, revision, archive),
             20,
             label=name + "-archive",
         )

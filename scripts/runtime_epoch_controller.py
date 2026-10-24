@@ -726,6 +726,7 @@ def extract_git_snapshot(
     destination: Path,
     *,
     strip_prefix: str | None = None,
+    canonical_blobs: bool = False,
 ) -> dict[str, str]:
     """Archive only pinned ordinary source files and reject links/escapes."""
     if (
@@ -737,6 +738,12 @@ def extract_git_snapshot(
     archive = destination.parent / (destination.name + ".zip")
     if archive.exists() or archive.is_symlink():
         raise Rejected("CREATE_ONLY_SOURCE_ARCHIVE_REQUIRED")
+    if type(canonical_blobs) is not bool:
+        raise Rejected("EXPLICIT_CANONICAL_BLOB_MODE_REQUIRED")
+    if canonical_blobs:
+        return _extract_git_blob_snapshot(
+            repo, revision, paths, destination, strip_prefix=strip_prefix
+        )
     command = [
         str(GIT),
         "-C",
@@ -806,6 +813,172 @@ def extract_git_snapshot(
         if file.is_file()
     }
     return manifest
+
+
+def _extract_git_blob_snapshot(
+    repo: Path,
+    revision: str,
+    paths: tuple[str, ...],
+    destination: Path,
+    *,
+    strip_prefix: str | None,
+) -> dict[str, str]:
+    """Extract exact committed blob bytes without checkout/EOL conversion."""
+    try:
+        tree = subprocess.run(
+            [
+                str(GIT),
+                "-C",
+                str(repo),
+                "ls-tree",
+                "-rz",
+                "--full-tree",
+                revision,
+                "--",
+                *paths,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Rejected("PINNED_GIT_BLOB_TREE_FAILED") from None
+    if tree.returncode or len(tree.stdout) > 4 * 1024 * 1024:
+        raise Rejected("PINNED_GIT_BLOB_TREE_FAILED")
+    entries = []
+    seen_paths = set()
+    for record in tree.stdout.split(b"\0"):
+        if not record:
+            continue
+        if b"\t" not in record:
+            raise Rejected("PINNED_GIT_BLOB_ENTRY_REJECTED")
+        metadata, raw_path = record.split(b"\t", 1)
+        try:
+            mode, kind, object_id = metadata.decode("ascii").split(" ")
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            raise Rejected("PINNED_GIT_BLOB_ENTRY_REJECTED") from None
+        parts = path.split("/")
+        if (
+            mode not in {"100644", "100755"}
+            or kind != "blob"
+            or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+            or not path
+            or "\\" in path
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+            or path in seen_paths
+            or not any(
+                path == item or path.startswith(item.rstrip("/") + "/")
+                for item in paths
+            )
+        ):
+            raise Rejected("PINNED_GIT_BLOB_ENTRY_REJECTED")
+        if strip_prefix is not None:
+            if parts[0] != strip_prefix or len(parts) < 2:
+                raise Rejected("PINNED_SOURCE_ARCHIVE_PREFIX_REQUIRED")
+            relative_parts = parts[1:]
+        else:
+            relative_parts = parts
+        seen_paths.add(path)
+        entries.append((object_id, path, relative_parts, mode))
+        if len(entries) > 2048:
+            raise Rejected("PINNED_SOURCE_ARCHIVE_SIZE_LIMIT")
+    if not entries:
+        raise Rejected("CREATE_ONLY_PINNED_SOURCE_SNAPSHOT_REQUIRED")
+
+    ids_input = b"".join((entry[0] + "\n").encode("ascii") for entry in entries)
+    try:
+        checked = subprocess.run(
+            [str(GIT), "-C", str(repo), "cat-file", "--batch-check"],
+            input=ids_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Rejected("PINNED_GIT_BLOB_SIZE_CHECK_FAILED") from None
+    rows = checked.stdout.splitlines() if checked.returncode == 0 else []
+    if len(rows) != len(entries):
+        raise Rejected("PINNED_GIT_BLOB_SIZE_CHECK_FAILED")
+    sizes = []
+    total = 0
+    for entry, row in zip(entries, rows, strict=True):
+        try:
+            object_id, kind, raw_size = row.decode("ascii").split(" ")
+            size = int(raw_size)
+        except (UnicodeDecodeError, ValueError):
+            raise Rejected("PINNED_GIT_BLOB_SIZE_CHECK_FAILED") from None
+        if object_id != entry[0] or kind != "blob" or size < 0 or size > 16 * 1024**2:
+            raise Rejected("PINNED_GIT_BLOB_SIZE_CHECK_FAILED")
+        sizes.append(size)
+        total += size
+        if total > 128 * 1024**2:
+            raise Rejected("PINNED_SOURCE_ARCHIVE_SIZE_LIMIT")
+
+    try:
+        content = subprocess.run(
+            [str(GIT), "-C", str(repo), "cat-file", "--batch"],
+            input=ids_input,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            check=False,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise Rejected("PINNED_GIT_BLOB_READ_FAILED") from None
+    if content.returncode:
+        raise Rejected("PINNED_GIT_BLOB_READ_FAILED")
+    cursor = 0
+    blobs = []
+    for entry, size in zip(entries, sizes, strict=True):
+        header_end = content.stdout.find(b"\n", cursor)
+        if header_end < 0:
+            raise Rejected("PINNED_GIT_BLOB_READ_FAILED")
+        try:
+            object_id, kind, raw_size = (
+                content.stdout[cursor:header_end].decode("ascii").split(" ")
+            )
+            reported_size = int(raw_size)
+        except (UnicodeDecodeError, ValueError):
+            raise Rejected("PINNED_GIT_BLOB_READ_FAILED") from None
+        start = header_end + 1
+        end = start + size
+        if (
+            object_id != entry[0]
+            or kind != "blob"
+            or reported_size != size
+            or end >= len(content.stdout)
+            or content.stdout[end : end + 1] != b"\n"
+        ):
+            raise Rejected("PINNED_GIT_BLOB_READ_FAILED")
+        blobs.append(content.stdout[start:end])
+        cursor = end + 1
+    if cursor != len(content.stdout):
+        raise Rejected("PINNED_GIT_BLOB_READ_FAILED")
+
+    destination.mkdir()
+    for (_, _, relative_parts, mode), blob in zip(entries, blobs, strict=True):
+        target = destination.joinpath(*relative_parts)
+        try:
+            target.resolve().relative_to(destination.resolve())
+        except ValueError:
+            raise Rejected("PINNED_SOURCE_ARCHIVE_ESCAPE") from None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("xb") as output:
+            output.write(blob)
+        os.chmod(target, 0o755 if mode == "100755" else 0o644)
+    return {
+        file.relative_to(destination).as_posix(): _sha(file)
+        for file in destination.rglob("*")
+        if file.is_file()
+    }
 
 
 def validate_wheelhouse(
@@ -912,7 +1085,7 @@ def validate_running_status(
         raise Rejected("NONTRADING_SERVE_HEALTH_BOUNDARY_REQUIRED")
     try:
         observed = datetime.fromisoformat(
-            value["observed_at_utc"].replace("Z", "+00:00")
+            value["observed_at_utc"].replace("Z", "+00:00")  # noqa: FURB162 - normalize UTC Z explicitly
         )
         age = (
             datetime.now(UTC)
@@ -933,7 +1106,7 @@ def validate_running_status(
             raise Rejected("SERVE_RESTART_WATERMARK_ADVANCE_REQUIRED")
         try:
             old_time = datetime.fromisoformat(
-                previous["observed_at_utc"].replace("Z", "+00:00")
+                previous["observed_at_utc"].replace("Z", "+00:00")  # noqa: FURB162 - normalize UTC Z explicitly
             )
         except (KeyError, AttributeError, TypeError, ValueError):
             raise Rejected("PREVIOUS_SERVE_TIMESTAMP_REQUIRED") from None
@@ -1935,8 +2108,11 @@ class EpochController:
     def phase(self, mode: str, config: dict, *, suffix: str = "") -> dict:
         self.current_phase = mode + ("-" + suffix if suffix else "")
         validate_worker_config(
-            config, mode=mode,
-            schema_profile=self.build_profile.schema_profile if self.build_profile else "historical-default",
+            config,
+            mode=mode,
+            schema_profile=self.build_profile.schema_profile
+            if self.build_profile
+            else "historical-default",
         )
         tag = mode + ("-" + suffix if suffix else "")
         self.phase_index += 1
@@ -2018,7 +2194,7 @@ class EpochController:
                 except Exception:  # noqa: BLE001,S110 - preserve the original failure and retain forensics.
                     pass
 
-    def prepare_snapshots(self) -> None:
+    def prepare_snapshots(self, *, canonical_blobs: bool = False) -> None:
         manifest_sha = (
             self.build_profile.wheel_manifest_sha256
             if self.build_profile
@@ -2059,6 +2235,7 @@ class EpochController:
             ),
             self.operator_snapshot,
             strip_prefix="scripts",
+            canonical_blobs=canonical_blobs,
         )
         required = {
             "runtime_epoch_worker.py",
@@ -2075,6 +2252,7 @@ class EpochController:
             self.build_profile.quant_revision if self.build_profile else QUANT_REVISION,
             ("kairos_quant",),
             self.quant_snapshot,
+            canonical_blobs=canonical_blobs,
         )
         if not any(path.startswith("kairos_quant/") for path in quant_manifest):
             raise Rejected("QUANT_RUNTIME_PACKAGE_SNAPSHOT_REQUIRED")

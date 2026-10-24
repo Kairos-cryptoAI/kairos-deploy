@@ -13,6 +13,7 @@ class CurrentRuntimeTaskTests(unittest.TestCase):
             "-MultipleInstances IgnoreNew -RestartCount 0 -Hidden", "-RunLevel Highest",
             "Elevated inventory access is required",
             "'INSTALLED_NOT_STARTED'", "$bindingPath", "--receipt-sha256", "--signature",
+            "HostAcceptanceReport", "guard.require_host_acceptance",
         ):
             self.assertIn(token, source)
         for forbidden in ("Start-ScheduledTask", "Unregister-ScheduledTask", "Stop-Process", "docker start", "-Force"):

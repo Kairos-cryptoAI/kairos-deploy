@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
+import tempfile
 import unittest
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from scripts import prepare_controlled_runtime_wheels as wheels
 from scripts import runtime_epoch_current as current
 
 
@@ -198,6 +202,107 @@ class CurrentProfileTests(unittest.TestCase):
             ),
         ):
             current.verify_runner_recipe(self.value)
+
+    def test_migration_archive_disables_windows_eol_conversion(self):
+        raw_sql = b"CREATE TABLE test_rows (id integer);\n"
+        expected = {"028_news_processing.sql": hashlib.sha256(raw_sql).hexdigest()}
+
+        def windows_git_archive(args, **kwargs):
+            self.assertIn("-c", args)
+            self.assertIn("core.autocrlf=false", args)
+            self.assertIn("core.eol=lf", args)
+            self.assertLess(args.index("core.autocrlf=false"), args.index("archive"))
+            data = (
+                raw_sql
+                if "core.autocrlf=false" in args
+                else raw_sql.replace(b"\n", b"\r\n")
+            )
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr(
+                    "kairos_persistence/migrations/028_news_processing.sql", data
+                )
+            return SimpleNamespace(returncode=0, stdout=output.getvalue())
+
+        with patch.object(current.subprocess, "run", side_effect=windows_git_archive):
+            self.assertEqual(current.migration_hashes("c" * 40), expected)
+
+    def test_current_wheel_source_archive_disables_windows_eol_conversion(self):
+        command = wheels.source_archive_command(
+            current.Path("repo"), "c" * 40, current.Path("source.zip")
+        )
+        self.assertEqual(
+            command[2:6], ["-c", "core.autocrlf=false", "-c", "core.eol=lf"]
+        )
+        self.assertGreater(command.index("archive"), command.index("core.eol=lf"))
+
+    def test_canonical_git_snapshot_reads_raw_blob_and_default_keeps_archive_path(self):
+        revision = "b" * 40
+        raw_source = b"line_one = 1\nline_two = 2\n"
+        object_id = hashlib.sha1(raw_source).hexdigest()
+
+        def raw_blob_git(args, **kwargs):
+            if args[3] == "ls-tree":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"100644 blob {object_id}\tkairos_core/source.py\0".encode(),
+                )
+            if args[-1] == "--batch-check":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{object_id} blob {len(raw_source)}\n".encode(),
+                )
+            if args[-1] == "--batch":
+                header = f"{object_id} blob {len(raw_source)}\n".encode()
+                return SimpleNamespace(returncode=0, stdout=header + raw_source + b"\n")
+            raise AssertionError("canonical extraction must use Git tree/blob plumbing")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = current.Path(temporary)
+            canonical = root / "canonical"
+            with patch.object(
+                current.epoch.subprocess, "run", side_effect=raw_blob_git
+            ):
+                manifest = current.epoch.extract_git_snapshot(
+                    current.Path("repo"),
+                    revision,
+                    ("kairos_core",),
+                    canonical,
+                    canonical_blobs=True,
+                )
+            extracted = canonical / "kairos_core" / "source.py"
+            self.assertEqual(extracted.read_bytes(), raw_source)
+            self.assertEqual(
+                manifest["kairos_core/source.py"],
+                hashlib.sha256(raw_source).hexdigest(),
+            )
+            self.assertFalse((root / "canonical.zip").exists())
+
+            historical = root / "historical"
+
+            def historical_archive(args, **kwargs):
+                self.assertIn("archive", args)
+                self.assertNotIn("ls-tree", args)
+                archive_path = next(
+                    item.split("=", 1)[1]
+                    for item in args
+                    if item.startswith("--output=")
+                )
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("scripts/source.py", b"historical\r\n")
+                return SimpleNamespace(returncode=0, stdout=b"")
+
+            with patch.object(
+                current.epoch.subprocess, "run", side_effect=historical_archive
+            ):
+                current.epoch.extract_git_snapshot(
+                    current.Path("repo"),
+                    revision,
+                    ("scripts/source.py",),
+                    historical,
+                    strip_prefix="scripts",
+                )
+            self.assertEqual((historical / "source.py").read_bytes(), b"historical\r\n")
 
     def test_public_subnet_and_unexpected_fields_are_refused(self):
         for field, value in (

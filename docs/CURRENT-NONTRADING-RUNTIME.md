@@ -78,6 +78,11 @@ for complete read-only CIM process identity. A limited token cannot identify
 other elevated Python/PowerShell processes on this host, so the unchanged
 no-duplicate guard correctly refuses it. This does not broaden the controller's
 signed-source, exact-owner or no-trading resource allowlists.
+The scheduled bootstrap additionally requires the exact signed full-host pass
+report for its owner, receipt and source revision, and no retained host failure
+latch. Installation alone cannot activate this gate; a partial/failed acceptance
+leaves the task inert even if registration already happened. All preservation
+checks precede task installation; completion is signed only after read-back.
 
 ## Claim limits
 

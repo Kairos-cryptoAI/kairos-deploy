@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)][string]$Receipt,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{64}$')][string]$ReceiptSha256,
     [Parameter(Mandatory)][string]$Signature,
+    [Parameter(Mandatory)][string]$HostAcceptanceReport,
     [string]$Python = 'C:/Users/loval/AppData/Roaming/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe',
     [switch]$Execute
 )
@@ -64,6 +65,10 @@ if ($plan.state -cne 'ALREADY_RUNNING' -or $plan.owner -cne $owner -or $plan.sta
     throw 'A currently healthy admitted owner is required before task installation'
 }
 $taskName = 'Kairos-CurrentRuntime-' + $owner.Substring(0, 12) + '-Boot'
+$hostReportPath = [IO.Path]::GetFullPath($HostAcceptanceReport)
+if ($hostReportPath -cne 'D:\Kairos\runtime\prod-runtime-inputs-20261024\host-acceptance-first\acceptance.report.json') {
+    throw 'Exact create-only host acceptance report path is required'
+}
 if (-not $Execute) {
     [ordered]@{state='PLAN_ONLY'; task_name=$taskName; owner=$owner; task_started=$false; trading_started=$false} | ConvertTo-Json -Compress
     return
@@ -84,6 +89,7 @@ $binding = [ordered]@{
     scripts=$scriptsPath; script_hashes=$hashes; pythonw=$pythonwPath
     pythonw_sha256=(Get-FileHash -LiteralPath $pythonwPath -Algorithm SHA256).Hash.ToLowerInvariant()
     argv=@($cli) + @('--execute'); trading_started=$false
+    host_acceptance_report=$hostReportPath; receipt_sha256=$ReceiptSha256
 }
 $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($binding | ConvertTo-Json -Depth 8 -Compress))
 $stream = [IO.File]::Open($bindingPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -92,7 +98,7 @@ $bindingHash = (Get-FileHash -LiteralPath $bindingPath -Algorithm SHA256).Hash.T
 # Isolated pythonw shows no console. The scheduler-pinned inline bootstrap
 # checks its binding, interpreter and complete sibling-module inventory BEFORE
 # importing any workspace code. Unknown/failed latches are owned by the adapter.
-$bootstrap = "import hashlib,json,pathlib,runpy,sys;p=pathlib.Path('$($bindingPath.Replace('\','/'))');assert not p.is_symlink() and p.stat().st_size<65536;r=p.read_bytes();assert hashlib.sha256(r).hexdigest()=='$bindingHash';b=json.loads(r);s=pathlib.Path(b['scripts']);w=pathlib.Path(b['pythonw']);assert not w.is_symlink() and hashlib.sha256(w.read_bytes()).hexdigest()==b['pythonw_sha256'];fs=list(s.glob('*.py'));assert {f.name for f in fs}==set(b['script_hashes']);assert all(not f.is_symlink() and hashlib.sha256(f.read_bytes()).hexdigest()==b['script_hashes'][f.name] for f in fs);sys.path.insert(0,str(s));sys.argv=b['argv'];runpy.run_path(sys.argv[0],run_name='__main__')"
+$bootstrap = "import hashlib,json,pathlib,runpy,sys;p=pathlib.Path('$($bindingPath.Replace('\','/'))');assert not p.is_symlink() and p.stat().st_size<65536;r=p.read_bytes();assert hashlib.sha256(r).hexdigest()=='$bindingHash';b=json.loads(r);s=pathlib.Path(b['scripts']);w=pathlib.Path(b['pythonw']);assert not w.is_symlink() and hashlib.sha256(w.read_bytes()).hexdigest()==b['pythonw_sha256'];fs=list(s.glob('*.py'));assert {f.name for f in fs}==set(b['script_hashes']);assert all(not f.is_symlink() and hashlib.sha256(f.read_bytes()).hexdigest()==b['script_hashes'][f.name] for f in fs);sys.path.insert(0,str(s));import runtime_epoch_current_boot as guard;guard.require_host_acceptance(pathlib.Path(b['host_acceptance_report']),b['owner'],b['receipt_sha256'],b['deploy_revision']);sys.argv=b['argv'];runpy.run_path(sys.argv[0],run_name='__main__')"
 $arguments = '-I -B -c "' + $bootstrap + '"'
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $pythonwPath -Argument $arguments -WorkingDirectory $repo
