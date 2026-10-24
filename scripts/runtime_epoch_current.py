@@ -43,6 +43,7 @@ PROFILE_KEYS = {
     "schema",
     "deploy_revision",
     "runner_recipe_revision",
+    "worker_image_id",
     "core_revision",
     "persistence_revision",
     "quant_revision",
@@ -173,6 +174,24 @@ def validate_profile(
         != {"python": "3.11.15", "aiohttp": "3.14.5", "multidict": "6.9.1"}
     ):
         raise CurrentEpochRejected("CURRENT_RUNNER_SOURCE_RECEIPT_MISMATCH")
+    allowed_image_ids = {runner.get("local_image_id", "")}
+    archive_identity = runner.get("archive_identity")
+    if isinstance(archive_identity, dict) and (
+        archive_identity.get("format") == "oci-layout"
+        and archive_identity.get("config_digest") == runner.get("local_image_id")
+        and isinstance(archive_identity.get("manifest_digest"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", archive_identity["manifest_digest"])
+    ):
+        # Docker Desktop's containerd store uses this exact OCI manifest ID as
+        # its local immutable locator. It is NOT the config digest. Both roles
+        # remain explicit in the unchanged archive/build receipt.
+        allowed_image_ids.add(archive_identity["manifest_digest"])
+    if (
+        not isinstance(value["worker_image_id"], str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["worker_image_id"])
+        or value["worker_image_id"] not in allowed_image_ids
+    ):
+        raise CurrentEpochRejected("EXACT_IMPORTED_IMAGE_IDENTITY_REQUIRED")
     migrations = migration_hashes(value["persistence_revision"])
     if (
         runner.get("migrations") != migrations
@@ -187,7 +206,7 @@ def validate_profile(
     ):
         raise CurrentEpochRejected("EXPLICIT_PRIVATE_28_SUBNET_REQUIRED")
     return epoch.CurrentEpochBuildProfile(
-        worker_image=runner.get("local_image_id", ""),
+        worker_image=value["worker_image_id"],
         wheel_manifest_sha256=value["wheel_manifest_sha256"],
         core_revision=value["core_revision"],
         persistence_revision=value["persistence_revision"],

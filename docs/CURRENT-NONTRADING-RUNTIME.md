@@ -24,6 +24,12 @@ orchestrator/source identity is not replaced by the image recipe identity.
 The downloaded build artifact must independently be obtained from the exact
 successful reviewed GitHub workflow; a local JSON receipt alone is not remote
 build attestation.
+The profile also pins the imported immutable `worker_image_id`. Classic Docker
+can use the receipt's config ID; this computer's containerd image store uses
+the exact archive OCI manifest digest instead. Admission permits only these
+explicitly linked identities, never a mutable tag or unrelated digest. The
+unchanged build receipt continues to distinguish config, archive manifest and
+registry manifest; none is relabeled as another.
 
 The original `2408db…` dump and its native verification receipt remain pinned.
 Only verified candle history is imported into a new target. Source verification

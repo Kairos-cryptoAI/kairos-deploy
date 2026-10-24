@@ -19,6 +19,7 @@ class CurrentProfileTests(unittest.TestCase):
             "schema": "kairos.current-nontrading-profile.v1",
             "deploy_revision": "a" * 40,
             "runner_recipe_revision": "9" * 40,
+            "worker_image_id": "sha256:" + "2" * 64,
             "core_revision": "b" * 40,
             "persistence_revision": "c" * 40,
             "quant_revision": "d" * 40,
@@ -101,6 +102,26 @@ class CurrentProfileTests(unittest.TestCase):
         bad["repositories"][0]["revision"] = "0" * 40
         with self.assertRaises(current.CurrentEpochRejected):
             self.validate(release=bad)
+
+    def test_containerd_manifest_locator_does_not_replace_config_digest(self):
+        runner = copy.deepcopy(self.runner)
+        manifest = "sha256:" + "3" * 64
+        runner["archive_identity"] = {
+            "format": "oci-layout",
+            "manifest_digest": manifest,
+            "config_digest": runner["local_image_id"],
+        }
+        value = {**self.value, "worker_image_id": manifest}
+        self.assertEqual(self.validate(value=value, runner=runner).worker_image, manifest)
+        self.assertNotEqual(runner["local_image_id"], manifest)
+        runner["archive_identity"]["config_digest"] = "sha256:" + "4" * 64
+        with self.assertRaises(current.CurrentEpochRejected):
+            self.validate(value=value, runner=runner)
+
+    def test_unrelated_or_mutable_imported_image_is_refused(self):
+        for identifier in ("image:latest", "sha256:" + "f" * 64):
+            with self.subTest(identifier=identifier), self.assertRaises(current.CurrentEpochRejected):
+                self.validate(value={**self.value, "worker_image_id": identifier})
 
     def test_runner_recipe_revision_must_match_receipt_not_current_deploy(self):
         self.assertNotEqual(
