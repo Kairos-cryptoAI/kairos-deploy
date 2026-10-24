@@ -9,6 +9,10 @@ from scripts import runtime_epoch_current_boot as boot
 
 
 class SignatureHostIOTests(unittest.TestCase):
+    def test_pinned_public_key_is_not_subject_to_checkout_newline_conversion(self):
+        attributes = (Path(__file__).resolve().parents[1] / ".gitattributes").read_text()
+        self.assertIn("tests/offline_outbox_reconciliation/trusted-signer.asc -text", attributes.splitlines())
+
     def test_msys_resource_is_relative_and_both_processes_share_private_cwd(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / "receipt.json"

@@ -6,3 +6,5 @@
 *.yaml text eol=lf
 Dockerfile text eol=lf
 scripts/controlled_runtime_build-constraints.txt text eol=lf
+# This public trust input is pinned by its exact Git-blob SHA-256.
+tests/offline_outbox_reconciliation/trusted-signer.asc -text
