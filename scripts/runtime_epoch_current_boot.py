@@ -7,6 +7,7 @@ never adopts the historical successor or the legacy continuation owner.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import ipaddress
 import json
 import re
@@ -899,12 +900,14 @@ class CurrentEpochBootAdapter:
             serve_before = self._verify_container_by_id(self.names["serve"], serve_id)
             if (serve_before.get("state") or {}).get("Status") != "exited":
                 raise CurrentBootRejected("EXACT_STOPPED_OWNER_SERVE_REQUIRED")
+            prestart_sha256 = self._capture_prestart_status(work)
             started_ids.append((self.names["serve"], serve_id))
             c.docker(["start", serve_id])
             serve_after = self._verify_container_by_id(self.names["serve"], serve_id)
             if (serve_after.get("state") or {}).get("Status") != "running":
                 raise CurrentBootRejected("OWNER_SERVE_START_NOT_VERIFIED")
-            status = self._wait_advanced_status(self.proofs["serve_restart_status"])
+            status = self._wait_advanced_status(self.proofs["serve_restart_status"],
+                exclude_prestart_sha256=prestart_sha256)
             completed = {
                 "schema": "kairos.current-epoch-boot-result.v1",
                 "state": "PASS_CURRENT_EPOCH_BOOT",
@@ -1081,7 +1084,36 @@ class CurrentEpochBootAdapter:
             .splitlines()
         )
 
-    def _wait_advanced_status(self, previous: dict) -> dict:
+    def _capture_prestart_status(self, work: Path) -> str:
+        """Retain exact pre-start bytes as an exclusion, never a health proof."""
+        path = self.status_path
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 32768:
+            raise CurrentBootRejected("BOUNDED_PRESTART_STATUS_REQUIRED")
+        with path.open("rb") as stream:
+            raw = stream.read(32769)
+        if len(raw) > 32768:
+            raise CurrentBootRejected("BOUNDED_PRESTART_STATUS_REQUIRED")
+        try:
+            value = json.loads(raw, object_pairs_hook=current.unique_object)
+            observed = datetime.fromisoformat(value["observed_at_utc"].replace("Z", "+00:00"))
+            future_seconds = (observed - datetime.now(UTC)).total_seconds()
+        except (KeyError, AttributeError, TypeError, ValueError, current.CurrentEpochRejected):
+            raise CurrentBootRejected("PRESTART_STATUS_IDENTITY_REQUIRED") from None
+        if (
+            not isinstance(value, dict) or value.get("owner") != self.owner
+            or value.get("schema_profile") != SCHEMA_PROFILE
+            or value.get("schema_migration_count") != MIGRATION_COUNT
+            or value.get("schema_public_table_count") != PUBLIC_TABLE_COUNT
+            or value.get("state") not in {"RUNNING_NONTRADING", "STOPPED_NONTRADING", "CATCHING_UP_NONTRADING", "WAITING_SOURCE_NONTRADING"}
+            or value.get("trading_started") is not False
+            or any(value.get(key) is not False for key in ("PAPER_QUALIFIED", "ALPHA_READY", "LIVE_READY"))
+            or value.get("STRATEGY_POLICY") != "REJECT_ALL" or future_seconds > 5
+        ):
+            raise CurrentBootRejected("PRESTART_STATUS_IDENTITY_REQUIRED")
+        epoch.fresh.write(work / "pre-start-serve-status.json", raw)
+        return hashlib.sha256(raw).hexdigest()
+
+    def _wait_advanced_status(self, previous: dict, *, exclude_prestart_sha256: str | None = None) -> dict:
         def require_running():
             self._verify_container_by_id(self.names["serve"], self.container_ids[self.names["serve"]])
             view = self.controller.inspect_container(self.container_ids[self.names["serve"]])
@@ -1090,7 +1122,8 @@ class CurrentEpochBootAdapter:
 
         try:
             status = current.wait_for_advanced_status(self.status_path, self.owner, previous,
-                deadline=time.monotonic() + STATUS_WAIT_SECONDS, running_check=require_running)
+                deadline=time.monotonic() + STATUS_WAIT_SECONDS, running_check=require_running,
+                exclude_prestart_sha256=exclude_prestart_sha256)
         except current.CurrentEpochRejected as exc:
             raise CurrentBootRejected(str(exc)) from None
         return validate_status_profile(status, self.owner, previous=previous)

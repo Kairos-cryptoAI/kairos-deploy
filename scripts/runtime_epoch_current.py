@@ -94,8 +94,11 @@ def validate_pending_status(value: dict, owner: str) -> None:
         raise CurrentEpochRejected("CURRENT_STARTUP_FRESHNESS_REQUIRED")
 
 
-def wait_for_advanced_status(status_path: Path, owner: str, first: dict, *, deadline: float, running_check) -> dict:
+def wait_for_advanced_status(status_path: Path, owner: str, first: dict, *, deadline: float, running_check,
+                             exclude_prestart_sha256: str | None = None) -> dict:
     """Wait through explicit nonhealthy startup states, then apply native gates."""
+    if exclude_prestart_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", exclude_prestart_sha256) is None:
+        raise CurrentEpochRejected("EXACT_PRESTART_STATUS_DIGEST_REQUIRED")
     while time.monotonic() < deadline:
         if status_path.is_file() and not status_path.is_symlink():
             try:
@@ -105,6 +108,12 @@ def wait_for_advanced_status(status_path: Path, owner: str, first: dict, *, dead
                     raw = stream.read(32769)
                 if len(raw) > 32768:
                     raise CurrentEpochRejected("CURRENT_STATUS_BOUND_EXCEEDED")
+                if exclude_prestart_sha256 is not None and hashlib.sha256(raw).hexdigest() == exclude_prestart_sha256:
+                    # Exact pre-start bytes are not a new observation or a health pass.
+                    # Every byte-different stale/future candidate keeps native gates.
+                    running_check()
+                    time.sleep(2)
+                    continue
                 status = json.loads(raw)
                 if not isinstance(status, dict):
                     raise CurrentEpochRejected("CURRENT_STATUS_OBJECT_REQUIRED")

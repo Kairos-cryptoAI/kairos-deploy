@@ -1,5 +1,6 @@
 """Synthetic CURRENT restart polling, never runtime or database operations."""
 import copy
+import hashlib
 import itertools
 import json
 import tempfile
@@ -41,9 +42,10 @@ class CurrentStartupPollingTests(unittest.TestCase):
     def advanced(self):
         return self.status(4, watermarks_ms={s: n + 60000 for s, n in self.first["watermarks_ms"].items()})
 
-    def poll(self, statuses, *, running_check=None):
+    def poll(self, statuses, *, running_check=None, exclude_first_bytes=False):
         values = iter(statuses)
         self.path.write_text(json.dumps(next(values)), encoding="utf-8")
+        excluded = hashlib.sha256(self.path.read_bytes()).hexdigest() if exclude_first_bytes else None
 
         def step(_seconds):
             value = next(values, None)
@@ -53,7 +55,65 @@ class CurrentStartupPollingTests(unittest.TestCase):
         with (patch.object(current.time, "sleep", side_effect=step),
               patch.object(current.time, "monotonic", side_effect=itertools.count())):
             return current.wait_for_advanced_status(self.path, OWNER, self.first, deadline=8,
-                                                   running_check=running_check or Mock())
+                                                   running_check=running_check or Mock(),
+                                                   exclude_prestart_sha256=excluded)
+
+    def test_exact_stale_prestart_bytes_wait_for_a_fresh_advanced_status(self):
+        stale = self.status(observed_at_utc=(self.now - timedelta(minutes=10)).isoformat())
+        check = Mock()
+        fresh = self.advanced()
+        self.assertEqual(self.poll([stale, fresh], running_check=check, exclude_first_bytes=True), fresh)
+        self.assertEqual(check.call_count, 2)
+
+    def test_byte_different_stale_or_future_candidate_keeps_original_freshness_gate(self):
+        stale = self.status(observed_at_utc=(self.now - timedelta(minutes=10)).isoformat())
+        for candidate in (
+            {**stale, "cycles": 2},
+            self.status(observed_at_utc=(self.now + timedelta(hours=1)).isoformat()),
+        ):
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(
+                current.epoch.Rejected, "SERVE_STATUS_FRESHNESS_REQUIRED"
+            ):
+                self.poll([stale, candidate], exclude_first_bytes=True)
+
+    def test_excluded_prestart_never_counts_as_progress_or_bypasses_running_identity(self):
+        stale = self.status(observed_at_utc=(self.now - timedelta(minutes=10)).isoformat())
+        for statuses in ([stale], [stale, self.status()]):
+            with self.subTest(statuses=statuses), self.assertRaisesRegex(
+                current.CurrentEpochRejected, "FRESH_ADVANCED_STATUS"
+            ):
+                self.poll(statuses, exclude_first_bytes=True)
+        check = Mock(side_effect=current.CurrentEpochRejected("EXACT_OWNER_STOPPED"))
+        with self.assertRaisesRegex(current.CurrentEpochRejected, "EXACT_OWNER_STOPPED"):
+            self.poll([stale, self.advanced()], running_check=check, exclude_first_bytes=True)
+
+    def test_prestart_capture_retains_original_bytes_without_refreshing_time(self):
+        stale = self.status(observed_at_utc=(self.now - timedelta(minutes=10)).isoformat())
+        raw = (json.dumps(stale, indent=2) + "\n").encode()
+        self.path.write_bytes(raw)
+        adapter = object.__new__(boot.CurrentEpochBootAdapter)
+        adapter.owner, adapter.status_path = OWNER, self.path
+        work = self.work / "boot-new"
+        work.mkdir()
+        self.assertEqual(adapter._capture_prestart_status(work), hashlib.sha256(raw).hexdigest())
+        self.assertEqual((work / "pre-start-serve-status.json").read_bytes(), raw)
+        self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_prestart_capture_refuses_foreign_unsafe_or_unbounded_identity(self):
+        adapter = object.__new__(boot.CurrentEpochBootAdapter)
+        adapter.owner, adapter.status_path = OWNER, self.path
+        for change in (
+            {"owner": "f" * 32}, {"LIVE_READY": True}, {"schema_migration_count": 18},
+            {"observed_at_utc": (self.now + timedelta(hours=1)).isoformat()},
+        ):
+            self.path.write_text(json.dumps(self.status(**change)), encoding="utf-8")
+            with self.subTest(change=change), self.assertRaisesRegex(
+                boot.CurrentBootRejected, "PRESTART_STATUS_IDENTITY_REQUIRED"
+            ):
+                adapter._capture_prestart_status(self.work)
+        self.path.write_bytes(b" " * 32769)
+        with self.assertRaisesRegex(boot.CurrentBootRejected, "BOUNDED_PRESTART_STATUS_REQUIRED"):
+            adapter._capture_prestart_status(self.work)
 
     def test_pending_and_zero_bar_cycles_wait_for_real_running_progress(self):
         catching = self.status(1, state="CATCHING_UP_NONTRADING", pending_outbox=7)

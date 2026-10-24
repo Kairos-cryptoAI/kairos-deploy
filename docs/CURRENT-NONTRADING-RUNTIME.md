@@ -98,6 +98,13 @@ Boot backup leaves are the controller's existing exact allowed names
 unique create-only `boot-UUID` directory. The validated UUID/phase token still
 binds the retained restore resources. Invalid tokens are refused before dump;
 the private-path, exclusive-file and bounded-process checks are unchanged.
+Immediately before starting the exact stopped owner serve container, boot
+retains the bounded pre-start status bytes. Its SHA-256 excludes only that exact
+old file from restart polling: it is not a new observation or a health pass.
+Every byte-different candidate retains the existing freshness, identity,
+watermark-advancement and finite-deadline checks. Timestamps and the 120-second
+status freshness boundary are unchanged; stale/future replacement statuses
+still fail closed. This does not make a failed boot owner resumable.
 
 `Install-CurrentRuntimeBootTask.ps1` is also plan-only unless `-Execute` is
 supplied. It installs only after read-only admission proves the new owner is
