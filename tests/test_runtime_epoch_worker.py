@@ -104,6 +104,7 @@ class WorkerConfigTests(unittest.TestCase):
         state["tables"]["schema_migrations"]["count"] = 19
         token = worker.schema_profile_context("current-controlled-v1")
         try:
+            state["original_prefix"] = worker.expected_original_prefix()
             worker.validate_boot_seed(state, OWNER, DB)
             for key, changed in (
                 ("schema_profile", "historical-default"),

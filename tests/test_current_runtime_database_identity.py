@@ -20,6 +20,12 @@ def current_seed():
     value["tables"]["news_processing"] = {"count": 0, "sha256": "a" * 64}
     value["tables"]["schema_migrations"]["count"] = 19
     value["tables"]["paper_canary_database_identity"] = dict(IDENTITY)
+    value["original_prefix"] = {
+        "rows": worker.ORIGINAL_PREFIX_ROWS,
+        "audit_table_sha256": worker.CURRENT_ORIGINAL_PREFIX_TABLE_SHA256,
+        "last_open_time_ms": worker.ORIGINAL_PREFIX_LAST_OPEN_MS,
+        "digest_scope": worker.CURRENT_ORIGINAL_PREFIX_DIGEST_SCOPE,
+    }
     return value
 
 

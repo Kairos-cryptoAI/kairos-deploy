@@ -80,6 +80,14 @@ checks and both restored comparisons must retain that identity. CURRENT boot
 seeds include the identity and exact schema metadata; only already-verified
 CLI owner/mode/database metadata is projected away before strict seed checks.
 The historical default's identity constant and seed shape remain unchanged.
+The original 173,164-row CURRENT seed prefix binds the original audit content
+with explicit scope `audit-original-fields-excluding-import-persisted-at.v1`.
+Only `persisted_at`, which migration 001 regenerates on history-only import,
+is excluded from this provenance projection. Its digest was independently
+matched between the isolated accepted-backup clone and the imported owner;
+it is not calibrated to one owner's import timestamp. Full-table restore
+hashes and pre-boot complete audit-prefix hashes still include every column,
+including `persisted_at`. Historical prefix hashes and shapes are unchanged.
 CURRENT full-table integrity hashes use an explicit maximum 120-second SQL
 query budget on both sides of restore comparison. The historical default,
 ordinary runtime SQL deadlines, complete hashes, read-only transactions, and

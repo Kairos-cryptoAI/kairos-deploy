@@ -48,6 +48,15 @@ ORIGINAL_PREFIX_LAST_OPEN_MS = 1_789_832_580_000
 ORIGINAL_PREFIX_TABLE_SHA256 = (
     "f23b4060feae703c568b0204f4b3ff8932fe2813b20f578bc0a0d983e5600499"
 )
+# Migration 001 adds persisted_at with DEFAULT now(); the accepted source seed
+# intentionally imports the original eight event_audit fields only. Bind the
+# original-content prefix without that import-time metadata for current owners.
+CURRENT_ORIGINAL_PREFIX_TABLE_SHA256 = (
+    "d22dd917b3ce71baa569531170c5a0cf7682b8c59de41b335ca25116c210c609"
+)
+CURRENT_ORIGINAL_PREFIX_DIGEST_SCOPE = (
+    "audit-original-fields-excluding-import-persisted-at.v1"
+)
 SOURCE = "kairos-quant-scouts"
 SOURCE_DUMP_SHA256 = "2408db1335dc856122750e4604f14a436184f54a7f4ffab22bc35eb69747a7bc"
 DB_ROLES = ("kairos_epoch_history", "kairos_epoch_producer", "kairos_epoch_consumer")
@@ -864,6 +873,34 @@ def validate_boot_database_identity(tables: dict, expected_identity: dict | None
         raise EpochError("BOOT_MIGRATION_DATABASE_IDENTITY_CONFLICT")
 
 
+def expected_original_prefix() -> dict:
+    """Return the exact prefix contract without relabeling import metadata."""
+    result = {
+        "rows": ORIGINAL_PREFIX_ROWS,
+        "audit_table_sha256": (
+            CURRENT_ORIGINAL_PREFIX_TABLE_SHA256
+            if schema_profile()["identity"] == "current-controlled-v1"
+            else ORIGINAL_PREFIX_TABLE_SHA256
+        ),
+        "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
+    }
+    if schema_profile()["identity"] == "current-controlled-v1":
+        result["digest_scope"] = CURRENT_ORIGINAL_PREFIX_DIGEST_SCOPE
+    return result
+
+
+def original_prefix_digest_sql() -> str:
+    """Hash the same source columns as historical, excluding only current import time."""
+    row_json = (
+        "(to_jsonb(t) - 'persisted_at')::text"
+        if schema_profile()["identity"] == "current-controlled-v1"
+        else "to_jsonb(t)::text"
+    )
+    return f"""SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest
+             FROM (SELECT encode(sha256(convert_to({row_json},'UTF8')),'hex') row_sha
+                     FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r"""
+
+
 def validate_boot_seed(value: dict, owner: str, database: str) -> None:
     """Require the byte-for-byte boot-state result, not a partial expectation."""
     expected_fields = {
@@ -921,12 +958,7 @@ def validate_boot_seed(value: dict, owner: str, database: str) -> None:
         raise EpochError("BOOT_STATE_NON_AUDIT_TABLE_NOT_EMPTY")
     validate_boot_database_identity(value["tables"], value.get("database_identity"))
     if (
-        value["original_prefix"]
-        != {
-            "rows": ORIGINAL_PREFIX_ROWS,
-            "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
-            "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
-        }
+        value["original_prefix"] != expected_original_prefix()
         or value["queue"].get("outbox_rows") != value["queue"].get("inbox_rows")
         or value["queue"].get("completed_inbox") != value["queue"].get("inbox_rows")
         or value["queue"].get("pending_outbox") != 0
@@ -1065,12 +1097,7 @@ async def boot_history_snapshot(connection) -> dict:
 
     audit = await epoch_table_digest(connection, "event_audit", Budget())
     outbox = await epoch_table_digest(connection, "message_outbox", Budget())
-    prefix = await connection.fetchrow(
-        """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest
-             FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha
-                     FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r""",
-        ORIGINAL_PREFIX_LAST_OPEN_MS,
-    )
+    prefix = await connection.fetchrow(original_prefix_digest_sql(), ORIGINAL_PREFIX_LAST_OPEN_MS)
     history = {}
     for symbol in SYMBOLS:
         row = await connection.fetchrow(
@@ -1092,15 +1119,11 @@ async def boot_history_snapshot(connection) -> dict:
         }
     validate_history_snapshot(audit["count"], history, {"anchors": history})
     original_prefix = {
+        **expected_original_prefix(),
         "rows": prefix["n"],
         "audit_table_sha256": prefix["digest"],
-        "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
     }
-    if original_prefix != {
-        "rows": ORIGINAL_PREFIX_ROWS,
-        "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
-        "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
-    }:
+    if original_prefix != expected_original_prefix():
         raise EpochError("BOOT_ORIGINAL_PREFIX_CONFLICT")
     return {
         "audit": audit,
@@ -1202,12 +1225,7 @@ def validate_history_state(value: dict) -> None:
     prefix = value.get("original_prefix")
     if (
         value.get("matched_public_tables") != len(schema_profile()["public_tables"])
-        or prefix
-        != {
-            "rows": ORIGINAL_PREFIX_ROWS,
-            "audit_table_sha256": ORIGINAL_PREFIX_TABLE_SHA256,
-            "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
-        }
+        or prefix != expected_original_prefix()
         or type(value.get("rows")) is not int
         or not ORIGINAL_PREFIX_ROWS <= value["rows"] <= 1_000_000
         or re.fullmatch(r"[0-9a-f]{64}", str(value.get("audit_table_sha256", "")))
@@ -1248,10 +1266,7 @@ async def history_state(config: dict) -> dict:
             ]
             validate_epoch_table_inventory(tables)
             audit = await epoch_table_digest(connection, "event_audit", Budget())
-            prefix = await connection.fetchrow(
-                """SELECT count(*) n,encode(sha256(convert_to(COALESCE(string_agg(row_sha,'' ORDER BY row_sha),''),'UTF8')),'hex') digest FROM (SELECT encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') row_sha FROM event_audit t WHERE (payload->>'open_time_ms')::bigint <= $1) r""",
-                ORIGINAL_PREFIX_LAST_OPEN_MS,
-            )
+            prefix = await connection.fetchrow(original_prefix_digest_sql(), ORIGINAL_PREFIX_LAST_OPEN_MS)
             history = {}
             for symbol in SYMBOLS:
                 row = await connection.fetchrow(
@@ -1275,9 +1290,9 @@ async def history_state(config: dict) -> dict:
                 "anchors": history,
                 "matched_public_tables": len(tables),
                 "original_prefix": {
+                    **expected_original_prefix(),
                     "rows": prefix["n"],
                     "audit_table_sha256": prefix["digest"],
-                    "last_open_time_ms": ORIGINAL_PREFIX_LAST_OPEN_MS,
                 },
                 "trading_started": False,
             }
