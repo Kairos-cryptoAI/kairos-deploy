@@ -160,8 +160,8 @@ class CurrentBootAdmissionTests(unittest.TestCase):
         )
 
     def test_current_gpg_tools_are_exact_bundled_git_binaries(self):
-        self.assertEqual(str(boot.GPG), "C:\\Program Files\\Git\\usr\\bin\\gpg.exe")
-        self.assertEqual(str(boot.GPGV), "C:\\Program Files\\Git\\usr\\bin\\gpgv.exe")
+        self.assertEqual(boot.GPG.as_posix(), "C:/Program Files/Git/usr/bin/gpg.exe")
+        self.assertEqual(boot.GPGV.as_posix(), "C:/Program Files/Git/usr/bin/gpgv.exe")
 
     def test_only_exact_current_inprogress_latch_is_excluded(self):
         with tempfile.TemporaryDirectory() as directory:
