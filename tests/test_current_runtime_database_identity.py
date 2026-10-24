@@ -56,6 +56,13 @@ class CurrentDatabaseIdentityTests(unittest.TestCase):
                  "pg_host": "kairos-epoch-" + OWNER[:12] + "-pg", "redis_host": "kairos-epoch-" + OWNER[:12] + "-redis",
                  "admin_password": "a" * 64, "database_identity": dict(IDENTITY)}
         controller.validate_worker_config(value, mode="boot-state", schema_profile="current-controlled-v1")
+        token = worker.schema_profile_context("current-controlled-v1")
+        try:
+            worker.validate_config(value, "boot-state")
+            with self.assertRaises(worker.EpochError):
+                worker.validate_config({**value, "unreviewed_field": True}, "boot-state")
+        finally:
+            worker.reset_schema_profile_context(token)
         bad = dict(value)
         del bad["database_identity"]
         with self.assertRaises(controller.Rejected):

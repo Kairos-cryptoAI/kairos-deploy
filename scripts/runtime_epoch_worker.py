@@ -395,13 +395,13 @@ def validate_config(value: dict, mode: str) -> None:
             raise EpochError("FIXED_FINALITY_SAFE_DEADLINE_REQUIRED")
         if value.get("maximum_bars") != MAX_BARS:
             raise EpochError("EXACT_GLOBAL_HISTORY_CAP_REQUIRED")
-    if mode == "boot-state" and set(value) != {
+    if mode == "boot-state" and set(value) != ({
         "owner",
         "database",
         "pg_host",
         "redis_host",
         "admin_password",
-    }:
+    } | ({"database_identity"} if schema_profile()["identity"] == "current-controlled-v1" else set())):
         raise EpochError("EXACT_READONLY_BOOT_STATE_CONFIG_REQUIRED")
     if mode == "boot-verify-restore":
         if (
