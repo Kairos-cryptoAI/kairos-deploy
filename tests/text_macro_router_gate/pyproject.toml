@@ -30,7 +30,7 @@ override-dependencies = [
 kairos-core = { git = "https://github.com/Kairos-cryptoAI/kairos-core.git", rev = "ff3af7592cbd47be985d794d8d9903aaa8e5df07" }
 kairos-persistence = { git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git", rev = "506628fc8686ff7373d72f37ac032e53a47b233f" }
 kairos-llm = { git = "https://github.com/Kairos-cryptoAI/kairos-llm.git", rev = "d91566ba24ea72ac79203d56e8a7ec87b9d04db3" }
-kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "c1de5c7f7d2fa21327717488ca3725b5ca003e6c" }
+kairos-text-scouts = { git = "https://github.com/Kairos-cryptoAI/kairos-text-scouts.git", rev = "a8dbd889383fbe76e9429272eccfdff93e414dd3" }
 kairos-macro-strategist = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git", rev = "edca44241f43a050363eeab4e89e480c9afb4dcc" }
 kairos-router = { git = "https://github.com/Kairos-cryptoAI/kairos-router.git", rev = "a373e62071e8b68b29f9f4567001d330a6ef2aec" }
 kairos-aggregator = { git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git", rev = "863eaa65bb9590d94d46bbe89c9da421b911c180" }

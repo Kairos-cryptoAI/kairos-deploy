@@ -31,7 +31,7 @@
     },
     "text-scouts": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-text-scouts",
-      "revision": "c1de5c7f7d2fa21327717488ca3725b5ca003e6c",
+      "revision": "a8dbd889383fbe76e9429272eccfdff93e414dd3",
       "package_dir": "kairos_text",
       "command": "kairos-text-scouts"
     },
@@ -61,7 +61,7 @@
     },
     "execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "03e1766461dc59f3327d5d0a026d52c473b56555",
+      "revision": "291905da5eec0a331ebede4543493f407cf3dca7",
       "package_dir": "kairos_execution",
       "command": "kairos-execution-engine",
       "extra": "evedex"
