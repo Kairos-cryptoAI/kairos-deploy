@@ -4,16 +4,20 @@ import json
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.validate_deployment import (
     APP_SERVICES,
     EXPECTED_REPOSITORIES,
-    SYNTHETIC_PROCESSING_SCOPE_SHA256,
+    LLM_SERVICES,
+    PERSISTENCE_SERVICES,
     SOURCE_SERVICES,
+    SYNTHETIC_PROCESSING_SCOPE_SHA256,
     parse_dotenv,
     validate_compose,
     validate_environment,
     validate_source_lock,
+    verify_remote_sources,
 )
 
 
@@ -59,9 +63,7 @@ class EnvironmentValidationTests(unittest.TestCase):
                     "KAIROS_PROCESSING_SCOPE_SHA256": value,
                 }
                 errors = validate_environment(environment)
-                self.assertTrue(
-                    any("KAIROS_PROCESSING_SCOPE_SHA256" in error for error in errors)
-                )
+                self.assertTrue(any("KAIROS_PROCESSING_SCOPE_SHA256" in error for error in errors))
 
 
 def source_lock(revision: str = "a" * 40) -> dict[str, object]:
@@ -69,12 +71,8 @@ def source_lock(revision: str = "a" * 40) -> dict[str, object]:
         name: {
             "repository": EXPECTED_REPOSITORIES[name],
             "revision": revision,
-            "package_dir": "kairos_persistence"
-            if name == "ops-exporter"
-            else name.replace("-", "_"),
-            "command": "kairos-persistence-exporter"
-            if name == "ops-exporter"
-            else f"kairos-{name}",
+            "package_dir": "kairos_persistence" if name == "ops-exporter" else name.replace("-", "_"),
+            "command": "kairos-persistence-exporter" if name == "ops-exporter" else f"kairos-{name}",
             **({"extra": "evedex"} if name == "execution-engine" else {}),
             **({"extra": "runtime"} if name == "strategy-engine" else {}),
         }
@@ -99,7 +97,231 @@ def source_lock(revision: str = "a" * 40) -> dict[str, object]:
     }
 
 
+NATIVE_INPUT_DECLARATIONS = [
+    "kairos-text-scouts>=0.2,<0.3",
+    "kairos-macro-strategist>=0.2,<0.3",
+    "kairos-router>=0.2,<0.3",
+    "kairos-aggregator>=0.2,<0.3",
+    "kairos-llm>=0.1,<0.2",
+]
+NATIVE_INPUT_REPOSITORIES = {
+    "kairos-text-scouts": "text-scouts",
+    "kairos-macro-strategist": "macro-strategist",
+    "kairos-router": "router",
+    "kairos-aggregator": "aggregator",
+    "kairos-llm": "kairos-llm",
+}
+
+
+def remote_pyproject_for(lock, name, *, native_inputs=True, mutation=None):
+    source = lock["services"][name]
+    dependencies = lock["dependencies"]
+    service_sources = lock["services"]
+    uv_sources = {
+        "kairos-core": (
+            "https://github.com/Kairos-cryptoAI/kairos-core.git",
+            dependencies["kairos-core"],
+        ),
+    }
+    if name in PERSISTENCE_SERVICES:
+        uv_sources["kairos-persistence"] = (
+            "https://github.com/Kairos-cryptoAI/kairos-persistence.git",
+            dependencies["kairos-persistence"],
+        )
+    if name in LLM_SERVICES or (name == "execution-engine" and native_inputs):
+        uv_sources["kairos-llm"] = (
+            "https://github.com/Kairos-cryptoAI/kairos-llm.git",
+            dependencies["kairos-llm"],
+        )
+    if name == "execution-engine" and mutation == "missing-extra-with-llm":
+        uv_sources["kairos-llm"] = (
+            "https://github.com/Kairos-cryptoAI/kairos-llm.git",
+            dependencies["kairos-llm"],
+        )
+    declarations = list(NATIVE_INPUT_DECLARATIONS) if native_inputs else None
+    if name == "execution-engine" and native_inputs:
+        for package, service_name in NATIVE_INPUT_REPOSITORIES.items():
+            repository = (
+                "https://github.com/Kairos-cryptoAI/kairos-llm.git"
+                if package == "kairos-llm"
+                else EXPECTED_REPOSITORIES[service_name] + ".git"
+            )
+            revision = (
+                dependencies["kairos-llm"]
+                if package == "kairos-llm"
+                else service_sources[service_name]["revision"]
+            )
+            uv_sources[package] = (repository, revision)
+    if mutation == "wrong-revision":
+        repository, _revision = uv_sources["kairos-router"]
+        uv_sources["kairos-router"] = (repository, "0" * 40)
+    elif mutation == "private-url":
+        _repository, revision = uv_sources["kairos-router"]
+        uv_sources["kairos-router"] = ("https://private.example/kairos-router.git", revision)
+    elif mutation == "wrong-version":
+        declarations[0] = "kairos-text-scouts>=0.3,<0.4"
+    elif mutation == "unknown-extra":
+        declarations.append("kairos-unlisted>=0.1,<0.2")
+
+    lines = [
+        "[project]",
+        'name = "fixture-package"',
+        'version = "0.1.0"',
+        "[project.scripts]",
+        f'"{source["command"]}" = "fixture:main"',
+    ]
+    if name == "execution-engine":
+        lines.extend(
+            [
+                "[project.optional-dependencies]",
+                'evedex = ["coincurve>=20"]',
+            ]
+        )
+        if declarations is not None:
+            lines.append("native-inputs = [")
+            lines.extend(f'  "{item}",' for item in declarations)
+            lines.append("]")
+    lines.extend(["[tool.uv]", 'required-version = "==0.12.3"', "[tool.uv.sources]"])
+    for package, (repository, revision) in uv_sources.items():
+        lines.append(f'"{package}" = {{ git = "{repository}", rev = "{revision}" }}')
+    lines.extend(
+        [
+            "[tool.hatch.build.targets.wheel]",
+            f'packages = ["{source["package_dir"]}"]',
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def remote_uv_lock_for(lock, name, *, native_inputs=True, mutation=None):
+    dependencies = lock["dependencies"]
+    services = lock["services"]
+    package_sources = {
+        "kairos-core": (
+            "https://github.com/Kairos-cryptoAI/kairos-core.git",
+            dependencies["kairos-core"],
+            "0.4.0",
+        ),
+        "kairos-persistence": (
+            "https://github.com/Kairos-cryptoAI/kairos-persistence.git",
+            dependencies["kairos-persistence"],
+            "0.1.0",
+        ),
+        "kairos-llm": (
+            "https://github.com/Kairos-cryptoAI/kairos-llm.git",
+            dependencies["kairos-llm"],
+            "0.1.0",
+        ),
+    }
+    if name == "execution-engine" and native_inputs:
+        for package, service_name in NATIVE_INPUT_REPOSITORIES.items():
+            repository = (
+                "https://github.com/Kairos-cryptoAI/kairos-llm.git"
+                if package == "kairos-llm"
+                else EXPECTED_REPOSITORIES[service_name] + ".git"
+            )
+            revision = (
+                dependencies["kairos-llm"] if package == "kairos-llm" else services[service_name]["revision"]
+            )
+            version = "0.1.0" if package == "kairos-llm" else "0.2.0"
+            package_sources[package] = (repository, revision, version)
+    if mutation == "wrong-lock-revision":
+        repository, _revision, version = package_sources["kairos-router"]
+        package_sources["kairos-router"] = (repository, "0" * 40, version)
+    elif mutation == "wrong-lock-version":
+        repository, revision, _version = package_sources["kairos-router"]
+        package_sources["kairos-router"] = (repository, revision, "0.3.0")
+    elif mutation == "missing-lock-source":
+        package_sources.pop("kairos-router")
+    lines = [
+        "[[package]]",
+        f'name = "kairos-{name}"',
+        'version = "0.1.0"',
+        'source = { editable = "." }',
+    ]
+    if name == "execution-engine" and native_inputs:
+        lines.extend(["", "[package.optional-dependencies]", "native-inputs = ["])
+        lines.extend(f'  {{ name = "{package}" }},' for package in sorted(NATIVE_INPUT_REPOSITORIES))
+        lines.append("]")
+    for package, (repository, revision, version) in package_sources.items():
+        lines.extend(
+            [
+                "",
+                "[[package]]",
+                f'name = "{package}"',
+                f'version = "{version}"',
+                f'source = {{ git = "{repository}?rev={revision}#{revision}" }}',
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
 class SourceLockValidationTests(unittest.TestCase):
+    def verify_mocked_remote(self, lock, *, mutation=None):
+        service_by_slug = {
+            source["repository"].removeprefix("https://github.com/"): name
+            for name, source in lock["services"].items()
+        }
+
+        def request(url, *, token=None, accept=""):
+            if "/commits/" in url:
+                slug, revision = url.split("/repos/", 1)[1].split("/commits/", 1)
+                return json.dumps({"sha": revision}).encode()
+            parts = url.removeprefix("https://raw.githubusercontent.com/").split("/")
+            slug, name = "/".join(parts[:2]), service_by_slug["/".join(parts[:2])]
+            filename = "/".join(parts[3:])
+            if filename == ".python-version":
+                return b"3.11\n"
+            if filename == "pyproject.toml":
+                service_mutation = mutation if name == "execution-engine" else None
+                return remote_pyproject_for(
+                    lock,
+                    name,
+                    native_inputs=service_mutation != "missing-extra-with-llm",
+                    mutation=service_mutation,
+                ).encode()
+            if filename == "uv.lock":
+                service_mutation = mutation if name == "execution-engine" else None
+                return remote_uv_lock_for(
+                    lock,
+                    name,
+                    native_inputs=service_mutation != "missing-extra-with-llm",
+                    mutation=service_mutation,
+                ).encode()
+            raise AssertionError(f"unexpected mocked URL for {slug}")
+
+        with patch("scripts.validate_deployment._github_request", side_effect=request):
+            return verify_remote_sources(lock)
+
+    def test_execution_optional_native_inputs_are_admitted_at_exact_source_pins(self) -> None:
+        lock = source_lock()
+        self.assertNotIn("execution-engine", LLM_SERVICES)
+        errors = self.verify_mocked_remote(lock)
+        self.assertFalse(errors, errors)
+
+    def test_execution_llm_source_without_native_inputs_is_rejected(self) -> None:
+        lock = source_lock()
+        errors = self.verify_mocked_remote(lock, mutation="missing-extra-with-llm")
+        self.assertTrue(
+            any("native-inputs must declare the exact five" in error for error in errors),
+            errors,
+        )
+
+    def test_execution_native_inputs_reject_wrong_pin_version_private_url_and_extra(self) -> None:
+        lock = source_lock()
+        for mutation in (
+            "wrong-revision",
+            "private-url",
+            "wrong-version",
+            "unknown-extra",
+            "wrong-lock-revision",
+            "wrong-lock-version",
+            "missing-lock-source",
+        ):
+            with self.subTest(mutation=mutation):
+                errors = self.verify_mocked_remote(lock, mutation=mutation)
+                self.assertTrue(errors, mutation)
+
     def test_source_revision_invalidates_remote_context_copy_cache(self) -> None:
         root = Path(__file__).resolve().parents[1]
         dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
@@ -112,8 +334,7 @@ class SourceLockValidationTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn(
-            "COPY --from=builder --chown=kairos:kairos "
-            "/tmp/kairos-source-identity /app/.source-identity",
+            "COPY --from=builder --chown=kairos:kairos /tmp/kairos-source-identity /app/.source-identity",
             dockerfile,
         )
 
@@ -123,9 +344,7 @@ class SourceLockValidationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         rules = [
             line.strip()
-            for line in (root / ".dockerignore")
-            .read_text(encoding="utf-8")
-            .splitlines()
+            for line in (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
         self.assertEqual(rules, ["**", "!docker/", "!docker/**", "!.dockerignore"])
@@ -144,9 +363,7 @@ class SourceLockValidationTests(unittest.TestCase):
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         for name, source in lock["services"].items():
             with self.subTest(service=name):
-                self.assertIn(
-                    f"service: {source['repository']}.git#{source['revision']}", compose
-                )
+                self.assertIn(f"service: {source['repository']}.git#{source['revision']}", compose)
                 self.assertIn(f"SOURCE_REVISION: {source['revision']}", compose)
 
 
@@ -235,26 +452,18 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
         }.get(name, ())
         for environment_name, provider in providers:
             secrets.append({"source": provider, "target": provider})
-            environment["KAIROS_SECRET_BINDINGS"] += (
-                f",{environment_name}=/run/secrets/{provider}"
-            )
+            environment["KAIROS_SECRET_BINDINGS"] += f",{environment_name}=/run/secrets/{provider}"
         services[name] = {
             "build": {
                 "context": ".",
                 "dockerfile": "docker/Dockerfile",
                 "pull": True,
-                "additional_contexts": {
-                    "service": f"{source['repository']}.git#{source['revision']}"
-                },
+                "additional_contexts": {"service": f"{source['repository']}.git#{source['revision']}"},
                 "args": {
                     "SOURCE_REVISION": source["revision"],
                     "SOURCE_REPOSITORY": source["repository"],
                     "PACKAGE_DIR": source["package_dir"],
-                    **(
-                        {"SERVICE_EXTRA": source["extra"]}
-                        if source.get("extra")
-                        else {}
-                    ),
+                    **({"SERVICE_EXTRA": source["extra"]} if source.get("extra") else {}),
                 },
             },
             "command": [source["command"]],
@@ -302,9 +511,7 @@ def rendered_config() -> tuple[dict[str, object], dict[str, object]]:
                 "healthcheck": {"test": ["CMD", "/run/secrets/redis_password"]},
                 "secrets": [{"source": "redis_password"}],
                 "networks": {"bus": None},
-                "volumes": [
-                    {"type": "volume", "source": "redis-data", "target": "/data"}
-                ],
+                "volumes": [{"type": "volume", "source": "redis-data", "target": "/data"}],
             },
             "timescaledb": {
                 "image": "timescale:1@sha256:" + "d" * 64,
@@ -455,18 +662,16 @@ class ComposeValidationTests(unittest.TestCase):
 
     def test_synthetic_processing_scope_is_ci_only_opt_in(self) -> None:
         config, lock = rendered_config()
-        config["services"]["text-scouts"]["environment"][
-            "KAIROS_PROCESSING_SCOPE_SHA256"
-        ] = SYNTHETIC_PROCESSING_SCOPE_SHA256
+        config["services"]["text-scouts"]["environment"]["KAIROS_PROCESSING_SCOPE_SHA256"] = (
+            SYNTHETIC_PROCESSING_SCOPE_SHA256
+        )
 
         errors = validate_compose(config, lock)
         self.assertIn(
             "text-scouts: synthetic CI processing scope is not deployment authority",
             errors,
         )
-        self.assertEqual(
-            validate_compose(config, lock, allow_example_values=True), []
-        )
+        self.assertEqual(validate_compose(config, lock, allow_example_values=True), [])
 
     def test_aggregator_requires_macro_and_text_context(self) -> None:
         for key, label in (
@@ -507,9 +712,7 @@ class ComposeValidationTests(unittest.TestCase):
                 "x_bearer_token",
             },
         )
-        self.assertNotIn(
-            "KAIROS_DEEPSEEK_API_KEY", text["environment"]["KAIROS_SECRET_BINDINGS"]
-        )
+        self.assertNotIn("KAIROS_DEEPSEEK_API_KEY", text["environment"]["KAIROS_SECRET_BINDINGS"])
         self.assertEqual(validate_compose(config, lock), [])
 
     def test_rendered_base_and_live_secret_sets_are_exactly_active(self) -> None:
@@ -517,9 +720,7 @@ class ComposeValidationTests(unittest.TestCase):
             with self.subTest(live=live):
                 config, lock = rendered_config()
                 if live:
-                    config["services"]["execution-engine"]["environment"][
-                        "KAIROS_TRADING_MODE"
-                    ] = "LIVE"
+                    config["services"]["execution-engine"]["environment"]["KAIROS_TRADING_MODE"] = "LIVE"
                 referenced_secrets = {
                     secret["source"]
                     for service in config["services"].values()
@@ -551,8 +752,7 @@ class ComposeValidationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn(
-            "\n  deepseek_api_key:\n"
-            "    file: ${KAIROS_SECRETS_DIR:-./secrets}/deepseek_api_key\n",
+            "\n  deepseek_api_key:\n    file: ${KAIROS_SECRETS_DIR:-./secrets}/deepseek_api_key\n",
             compose,
         )
         text = compose.split("\n  text-scouts:\n", 1)[1].split("\n  router:\n", 1)[0]
@@ -585,23 +785,17 @@ class ComposeValidationTests(unittest.TestCase):
             (False, True),
             (True, True),
         ):
-            with self.subTest(
-                missing_mount=missing_mount, missing_binding=missing_binding
-            ):
+            with self.subTest(missing_mount=missing_mount, missing_binding=missing_binding):
                 config, lock = rendered_config()
                 text = config["services"]["text-scouts"]
                 if missing_mount:
                     text["secrets"] = [
-                        secret
-                        for secret in text["secrets"]
-                        if secret["source"] != "openai_api_key"
+                        secret for secret in text["secrets"] if secret["source"] != "openai_api_key"
                     ]
                 if missing_binding:
                     text["environment"]["KAIROS_SECRET_BINDINGS"] = ",".join(
                         binding
-                        for binding in text["environment"][
-                            "KAIROS_SECRET_BINDINGS"
-                        ].split(",")
+                        for binding in text["environment"]["KAIROS_SECRET_BINDINGS"].split(",")
                         if not binding.startswith("KAIROS_OPENAI_API_KEY=")
                     )
 
@@ -624,9 +818,7 @@ class ComposeValidationTests(unittest.TestCase):
         for secret in text["secrets"]:
             if secret["source"] == "openai_api_key":
                 secret.update(source="deepseek_api_key", target="deepseek_api_key")
-        text["environment"]["KAIROS_SECRET_BINDINGS"] = text["environment"][
-            "KAIROS_SECRET_BINDINGS"
-        ].replace(
+        text["environment"]["KAIROS_SECRET_BINDINGS"] = text["environment"]["KAIROS_SECRET_BINDINGS"].replace(
             "KAIROS_OPENAI_API_KEY=/run/secrets/openai_api_key",
             "KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key",
         )
@@ -641,40 +833,28 @@ class ComposeValidationTests(unittest.TestCase):
             "text-scouts: expected provider binding KAIROS_OPENAI_API_KEY is missing",
             errors,
         )
-        self.assertIn(
-            "text-scouts: secret source set must match the exact allow-list", errors
-        )
-        self.assertIn(
-            "text-scouts: secret bindings must match the exact allow-list", errors
-        )
+        self.assertIn("text-scouts: secret source set must match the exact allow-list", errors)
+        self.assertIn("text-scouts: secret bindings must match the exact allow-list", errors)
 
     def test_text_scouts_rejects_extra_legacy_deepseek_runtime_scope(self) -> None:
         config, lock = rendered_config()
         text = config["services"]["text-scouts"]
-        text["secrets"].append(
-            {"source": "deepseek_api_key", "target": "deepseek_api_key"}
-        )
+        text["secrets"].append({"source": "deepseek_api_key", "target": "deepseek_api_key"})
         text["environment"]["KAIROS_SECRET_BINDINGS"] += (
             ",KAIROS_DEEPSEEK_API_KEY=/run/secrets/deepseek_api_key"
         )
 
         errors = validate_compose(config, lock)
 
-        self.assertIn(
-            "text-scouts: secret source set must match the exact allow-list", errors
-        )
-        self.assertIn(
-            "text-scouts: secret bindings must match the exact allow-list", errors
-        )
+        self.assertIn("text-scouts: secret source set must match the exact allow-list", errors)
+        self.assertIn("text-scouts: secret bindings must match the exact allow-list", errors)
 
     def test_rejects_secret_env_host_redis_and_live_base_execution(self) -> None:
         config, lock = rendered_config()
         broken = deepcopy(config)
         broken["services"]["router"]["environment"]["KAIROS_EVEDEX_PRIVATE_KEY"] = "x"
         broken["services"]["redis"]["ports"] = [{"published": 6379}]
-        broken["services"]["execution-engine"]["environment"]["KAIROS_TRADING_MODE"] = (
-            "LIVE"
-        )
+        broken["services"]["execution-engine"]["environment"]["KAIROS_TRADING_MODE"] = "LIVE"
         errors = validate_compose(broken, lock)
         self.assertTrue(any("file-mounted" in error for error in errors))
         self.assertTrue(any("Redis must not publish" in error for error in errors))
@@ -684,9 +864,7 @@ class ComposeValidationTests(unittest.TestCase):
         config, lock = rendered_config()
         execution = config["services"]["execution-engine"]
         execution["secrets"].append({"source": "foo", "target": "foo"})
-        execution["environment"]["KAIROS_SECRET_BINDINGS"] += (
-            ",KAIROS_EVEDEX_PRIVATE_KEY=/run/secrets/foo"
-        )
+        execution["environment"]["KAIROS_SECRET_BINDINGS"] += ",KAIROS_EVEDEX_PRIVATE_KEY=/run/secrets/foo"
         config["secrets"]["foo"] = {"file": "/secrets/evedex_private_key"}
 
         errors = validate_compose(config, lock)
@@ -707,12 +885,8 @@ class ComposeValidationTests(unittest.TestCase):
         errors = validate_compose(config, lock)
 
         self.assertTrue(any("unsafe Compose option user" in error for error in errors))
-        self.assertTrue(
-            any("unsafe Compose option entrypoint" in error for error in errors)
-        )
-        self.assertTrue(
-            any("unsafe Compose option cap_add" in error for error in errors)
-        )
+        self.assertTrue(any("unsafe Compose option entrypoint" in error for error in errors))
+        self.assertTrue(any("unsafe Compose option cap_add" in error for error in errors))
         self.assertTrue(any("environment keys" in error for error in errors))
         self.assertTrue(any("build context" in error for error in errors))
         self.assertTrue(any("pinned non-root image user" in error for error in errors))
@@ -728,17 +902,13 @@ class ComposeValidationTests(unittest.TestCase):
             ",KAIROS_EVEDEX_JWT=/run/secrets/evedex_jwt,"
             "KAIROS_EVEDEX_PRIVATE_KEY=/run/secrets/evedex_private_key"
         )
-        execution["secrets"].extend(
-            [{"source": "evedex_jwt"}, {"source": "evedex_private_key"}]
-        )
+        execution["secrets"].extend([{"source": "evedex_jwt"}, {"source": "evedex_private_key"}])
         errors = validate_compose(config, lock, live=True)
         self.assertTrue(any("retired static EVEDEX" in error for error in errors))
 
     def test_rejects_x_budget_above_qualification_ceiling(self) -> None:
         config, lock = rendered_config()
-        config["services"]["text-scouts"]["environment"][
-            "KAIROS_X_MONTHLY_BUDGET_MICROUSD"
-        ] = "2000001"
+        config["services"]["text-scouts"]["environment"]["KAIROS_X_MONTHLY_BUDGET_MICROUSD"] = "2000001"
 
         errors = validate_compose(config, lock)
 
