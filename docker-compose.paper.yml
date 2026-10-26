@@ -174,12 +174,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#0da885aac20c5bae0173bf2d2ca81d528c458777
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#d8c031eb35ae54263c355ee6ad9c4f7719d306d2
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: 0da885aac20c5bae0173bf2d2ca81d528c458777
+        SOURCE_REVISION: d8c031eb35ae54263c355ee6ad9c4f7719d306d2
     command: ["kairos-risk-manager"]
     environment:
       <<: *paper-environment
@@ -202,12 +202,12 @@ services:
     build:
       <<: *paper-python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#0da885aac20c5bae0173bf2d2ca81d528c458777
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#d8c031eb35ae54263c355ee6ad9c4f7719d306d2
       args:
         PACKAGE_DIR: kairos_risk
         SERVICE_EXTRA: ""
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: 0da885aac20c5bae0173bf2d2ca81d528c458777
+        SOURCE_REVISION: d8c031eb35ae54263c355ee6ad9c4f7719d306d2
     # `docker compose run` replaces this argument-free, non-arming default with
     # an explicit symbol/side and the exact arm phrase. `up` never starts this profile.
     command: ["kairos-paper-canary"]
@@ -231,12 +231,12 @@ services:
       dockerfile: docker/Dockerfile.paper-execution
       pull: true
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#2d2f1bdaeaa495a296e5543d4a0ef6557126f944
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#82f43e45c85739523d0dae30373b49b8ae3c3a17
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 2d2f1bdaeaa495a296e5543d4a0ef6557126f944
+        SOURCE_REVISION: 82f43e45c85739523d0dae30373b49b8ae3c3a17
     command: ["kairos-execution-engine"]
     environment:
       <<: *paper-environment
