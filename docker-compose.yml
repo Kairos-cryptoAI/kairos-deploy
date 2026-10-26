@@ -219,11 +219,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#863eaa65bb9590d94d46bbe89c9da421b911c180
+        service: https://github.com/Kairos-cryptoAI/kairos-aggregator.git#8f96df46b657e6403b5c4355f9603f38a50868cd
       args:
         PACKAGE_DIR: kairos_aggregator
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-aggregator
-        SOURCE_REVISION: 863eaa65bb9590d94d46bbe89c9da421b911c180
+        SOURCE_REVISION: 8f96df46b657e6403b5c4355f9603f38a50868cd
     command: ["kairos-aggregator"]
     environment:
       <<: *common-environment
@@ -269,11 +269,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#c37f6d7be446b2a906b9cba80ea31da4d12dbae3
+        service: https://github.com/Kairos-cryptoAI/kairos-risk-manager.git#0da885aac20c5bae0173bf2d2ca81d528c458777
       args:
         PACKAGE_DIR: kairos_risk
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-risk-manager
-        SOURCE_REVISION: c37f6d7be446b2a906b9cba80ea31da4d12dbae3
+        SOURCE_REVISION: 0da885aac20c5bae0173bf2d2ca81d528c458777
     command: ["kairos-risk-manager"]
     environment:
       <<: *common-environment
@@ -290,12 +290,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#6cd322d4eb19f7ea6934dee601ab2b509b5f4e4c
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#2d2f1bdaeaa495a296e5543d4a0ef6557126f944
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 6cd322d4eb19f7ea6934dee601ab2b509b5f4e4c
+        SOURCE_REVISION: 2d2f1bdaeaa495a296e5543d4a0ef6557126f944
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
