@@ -98,6 +98,7 @@ def source_lock(revision: str = "a" * 40) -> dict[str, object]:
 
 
 NATIVE_INPUT_DECLARATIONS = [
+    "kairos-quant-scouts>=0.1,<0.2",
     "kairos-text-scouts>=0.2,<0.3",
     "kairos-macro-strategist>=0.2,<0.3",
     "kairos-router>=0.2,<0.3",
@@ -105,6 +106,7 @@ NATIVE_INPUT_DECLARATIONS = [
     "kairos-llm>=0.1,<0.2",
 ]
 NATIVE_INPUT_REPOSITORIES = {
+    "kairos-quant-scouts": "quant-scouts",
     "kairos-text-scouts": "text-scouts",
     "kairos-macro-strategist": "macro-strategist",
     "kairos-router": "router",
@@ -162,6 +164,8 @@ def remote_pyproject_for(lock, name, *, native_inputs=True, mutation=None):
         declarations[0] = "kairos-text-scouts>=0.3,<0.4"
     elif mutation == "unknown-extra":
         declarations.append("kairos-unlisted>=0.1,<0.2")
+    elif mutation == "quant-only-recorder":
+        declarations.remove("kairos-quant-scouts>=0.1,<0.2")
 
     lines = [
         "[project]",
@@ -181,6 +185,7 @@ def remote_pyproject_for(lock, name, *, native_inputs=True, mutation=None):
             lines.append("native-inputs = [")
             lines.extend(f'  "{item}",' for item in declarations)
             lines.append("]")
+            lines.append('recorder = ["kairos-quant-scouts>=0.1,<0.2"]')
     lines.extend(["[tool.uv]", 'required-version = "==0.12.3"', "[tool.uv.sources]"])
     for package, (repository, revision) in uv_sources.items():
         lines.append(f'"{package}" = {{ git = "{repository}", rev = "{revision}" }}')
@@ -223,7 +228,7 @@ def remote_uv_lock_for(lock, name, *, native_inputs=True, mutation=None):
             revision = (
                 dependencies["kairos-llm"] if package == "kairos-llm" else services[service_name]["revision"]
             )
-            version = "0.1.0" if package == "kairos-llm" else "0.2.0"
+            version = "0.1.0" if package in {"kairos-llm", "kairos-quant-scouts"} else "0.2.0"
             package_sources[package] = (repository, revision, version)
     if mutation == "wrong-lock-revision":
         repository, _revision, version = package_sources["kairos-router"]
@@ -241,8 +246,11 @@ def remote_uv_lock_for(lock, name, *, native_inputs=True, mutation=None):
     ]
     if name == "execution-engine" and native_inputs:
         lines.extend(["", "[package.optional-dependencies]", "native-inputs = ["])
-        lines.extend(f'  {{ name = "{package}" }},' for package in sorted(NATIVE_INPUT_REPOSITORIES))
-        lines.append("]")
+        native_packages = sorted(NATIVE_INPUT_REPOSITORIES)
+        if mutation == "quant-only-recorder":
+            native_packages.remove("kairos-quant-scouts")
+        lines.extend(f'  {{ name = "{package}" }},' for package in native_packages)
+        lines.extend(["]", "recorder = [", '  { name = "kairos-quant-scouts" },', "]"])
     for package, (repository, revision, version) in package_sources.items():
         lines.extend(
             [
@@ -299,11 +307,33 @@ class SourceLockValidationTests(unittest.TestCase):
         errors = self.verify_mocked_remote(lock)
         self.assertFalse(errors, errors)
 
+    def test_quant_native_input_is_distinct_from_the_recorder_extra(self) -> None:
+        lock = source_lock()
+        remote_project = remote_pyproject_for(lock, "execution-engine")
+        self.assertIn('"kairos-quant-scouts>=0.1,<0.2"', remote_project)
+        self.assertIn('recorder = ["kairos-quant-scouts>=0.1,<0.2"]', remote_project)
+        self.assertEqual(remote_project.count("kairos-quant-scouts>=0.1,<0.2"), 2)
+        remote_lock = remote_uv_lock_for(lock, "execution-engine")
+        self.assertIn('native-inputs = [', remote_lock)
+        self.assertIn('recorder = [', remote_lock)
+        self.assertEqual(remote_lock.count('{ name = "kairos-quant-scouts" }'), 2)
+
+    def test_quant_recorder_declaration_cannot_substitute_for_native_input(self) -> None:
+        errors = self.verify_mocked_remote(source_lock(), mutation="quant-only-recorder")
+        self.assertTrue(
+            any("native-inputs must declare the exact six" in error for error in errors),
+            errors,
+        )
+        self.assertTrue(
+            any("uv.lock native-inputs dependency set differs" in error for error in errors),
+            errors,
+        )
+
     def test_execution_llm_source_without_native_inputs_is_rejected(self) -> None:
         lock = source_lock()
         errors = self.verify_mocked_remote(lock, mutation="missing-extra-with-llm")
         self.assertTrue(
-            any("native-inputs must declare the exact five" in error for error in errors),
+            any("native-inputs must declare the exact six" in error for error in errors),
             errors,
         )
 

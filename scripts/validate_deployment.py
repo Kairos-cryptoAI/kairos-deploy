@@ -37,6 +37,7 @@ EGRESS_SERVICES = {
 LLM_SERVICES = {"text-scouts", "aggregator", "macro-strategist"}
 PERSISTENCE_SERVICES = SOURCE_SERVICES - {"ops-exporter"}
 EXECUTION_NATIVE_INPUTS = {
+    "kairos-quant-scouts": ("quant-scouts", "0.1.0", "kairos-quant-scouts>=0.1,<0.2"),
     "kairos-text-scouts": ("text-scouts", "0.2.0", "kairos-text-scouts>=0.2,<0.3"),
     "kairos-macro-strategist": (
         "macro-strategist",
@@ -720,7 +721,7 @@ def _validate_execution_native_inputs(
     declarations = extras.get("native-inputs")
     expected_declarations = [value[2] for value in EXECUTION_NATIVE_INPUTS.values()]
     if declarations != expected_declarations:
-        errors.append("execution-engine: native-inputs must declare the exact five pinned dependencies")
+        errors.append("execution-engine: native-inputs must declare the exact six pinned dependencies")
 
     sources = pyproject.get("tool", {}).get("uv", {}).get("sources", {}) or {}
     services = lock.get("services", {}) or {}
