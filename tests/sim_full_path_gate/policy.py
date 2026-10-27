@@ -27,7 +27,7 @@ PINS = {
     "kairos-llm": "d91566ba24ea72ac79203d56e8a7ec87b9d04db3",
     "kairos-aggregator": "8f96df46b657e6403b5c4355f9603f38a50868cd",
     "kairos-risk-manager": "d8c031eb35ae54263c355ee6ad9c4f7719d306d2",
-    "kairos-execution-engine": "fe6e538a90793d496c3d388cdb4b207efabad5e6",
+    "kairos-execution-engine": "7562b7e47e64b14d8771a879ba29898c97e279d1",
 }
 MODULES = {
     "kairos-core": "kairos_core",

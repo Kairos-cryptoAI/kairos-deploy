@@ -131,11 +131,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#f1a7490cea316e2caf27e0ca27beb4fd2fec9a08
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#14785b5baf2a21f9295a920fd736dad7885881d6
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: f1a7490cea316e2caf27e0ca27beb4fd2fec9a08
+        SOURCE_REVISION: 14785b5baf2a21f9295a920fd736dad7885881d6
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
@@ -290,12 +290,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#fe6e538a90793d496c3d388cdb4b207efabad5e6
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#7562b7e47e64b14d8771a879ba29898c97e279d1
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: fe6e538a90793d496c3d388cdb4b207efabad5e6
+        SOURCE_REVISION: 7562b7e47e64b14d8771a879ba29898c97e279d1
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment
