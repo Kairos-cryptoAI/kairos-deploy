@@ -43,7 +43,7 @@
     },
     "kairos-execution-engine": {
       "repository": "https://github.com/Kairos-cryptoAI/kairos-execution-engine",
-      "revision": "7562b7e47e64b14d8771a879ba29898c97e279d1"
+      "revision": "1e8afe6f4a87fba070d7ae8889eb9afdf9d6a6e8"
     }
   },
   "gate": {
