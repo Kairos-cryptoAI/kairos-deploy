@@ -131,11 +131,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#0a7c3b69bf2b2e55ab23d5c23da8ca884c06b301
+        service: https://github.com/Kairos-cryptoAI/kairos-quant-scouts.git#f1a7490cea316e2caf27e0ca27beb4fd2fec9a08
       args:
         PACKAGE_DIR: kairos_quant
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-quant-scouts
-        SOURCE_REVISION: 0a7c3b69bf2b2e55ab23d5c23da8ca884c06b301
+        SOURCE_REVISION: f1a7490cea316e2caf27e0ca27beb4fd2fec9a08
     command: ["kairos-quant-scouts"]
     environment:
       <<: *common-environment
@@ -245,11 +245,11 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#edca44241f43a050363eeab4e89e480c9afb4dcc
+        service: https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git#1f0d262dff8c7fc3e08cd1110fbe5b04beaca60c
       args:
         PACKAGE_DIR: kairos_macro
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-macro-strategist
-        SOURCE_REVISION: edca44241f43a050363eeab4e89e480c9afb4dcc
+        SOURCE_REVISION: 1f0d262dff8c7fc3e08cd1110fbe5b04beaca60c
     command: ["kairos-macro-strategist"]
     environment:
       <<: *common-environment
@@ -290,12 +290,12 @@ services:
     build:
       <<: *python-build
       additional_contexts:
-        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#58ebf3438ab6f710c14d0fcc09c4a52dcbdf017d
+        service: https://github.com/Kairos-cryptoAI/kairos-execution-engine.git#fe6e538a90793d496c3d388cdb4b207efabad5e6
       args:
         PACKAGE_DIR: kairos_execution
         SERVICE_EXTRA: evedex
         SOURCE_REPOSITORY: https://github.com/Kairos-cryptoAI/kairos-execution-engine
-        SOURCE_REVISION: 58ebf3438ab6f710c14d0fcc09c4a52dcbdf017d
+        SOURCE_REVISION: fe6e538a90793d496c3d388cdb4b207efabad5e6
     command: ["kairos-execution-engine"]
     environment:
       <<: *common-environment

@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "kairos-macro-strategist"
 version = "0.2.0"
-source = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git?rev=edca44241f43a050363eeab4e89e480c9afb4dcc#edca44241f43a050363eeab4e89e480c9afb4dcc" }
+source = { git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git?rev=1f0d262dff8c7fc3e08cd1110fbe5b04beaca60c#1f0d262dff8c7fc3e08cd1110fbe5b04beaca60c" }
 dependencies = [
     { name = "kairos-core" },
     { name = "kairos-llm" },
@@ -683,7 +683,7 @@ requires-dist = [
     { name = "kairos-aggregator", git = "https://github.com/Kairos-cryptoAI/kairos-aggregator.git?rev=8f96df46b657e6403b5c4355f9603f38a50868cd" },
     { name = "kairos-core", git = "https://github.com/Kairos-cryptoAI/kairos-core.git?rev=ff3af7592cbd47be985d794d8d9903aaa8e5df07" },
     { name = "kairos-llm", git = "https://github.com/Kairos-cryptoAI/kairos-llm.git?rev=d91566ba24ea72ac79203d56e8a7ec87b9d04db3" },
-    { name = "kairos-macro-strategist", git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git?rev=edca44241f43a050363eeab4e89e480c9afb4dcc" },
+    { name = "kairos-macro-strategist", git = "https://github.com/Kairos-cryptoAI/kairos-macro-strategist.git?rev=1f0d262dff8c7fc3e08cd1110fbe5b04beaca60c" },
     { name = "kairos-persistence", git = "https://github.com/Kairos-cryptoAI/kairos-persistence.git?rev=506628fc8686ff7373d72f37ac032e53a47b233f" },
     { name = "kairos-risk-manager", git = "https://github.com/Kairos-cryptoAI/kairos-risk-manager.git?rev=d8c031eb35ae54263c355ee6ad9c4f7719d306d2" },
     { name = "kairos-router", git = "https://github.com/Kairos-cryptoAI/kairos-router.git?rev=a373e62071e8b68b29f9f4567001d330a6ef2aec" },
