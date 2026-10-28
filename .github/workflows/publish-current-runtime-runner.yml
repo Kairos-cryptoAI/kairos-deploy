@@ -25,12 +25,12 @@ jobs:
       IMAGE_TAG: p506628f-run${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out workflow source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out reviewed persistence source
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Kairos-cryptoAI/kairos-persistence
           ref: ${{ env.PERSISTENCE_REVISION }}
@@ -38,7 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out reviewed image recipe
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.DEPLOY_REVISION }}
           path: reviewed-deploy
@@ -139,7 +139,7 @@ jobs:
             --migration-source reviewed-persistence/kairos_persistence/migrations
 
       - name: Preserve Docker archive and non-secret receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: current-runtime-runner-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
